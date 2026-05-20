@@ -47,17 +47,31 @@ RPi4 header                          signal
 
 Pins 11–16 are a tight cluster on the header — all six connections (4 signals + 2 GND) sit within six adjacent physical pins, making for clean point-to-point wiring.
 
-### Full 40-pin header reference (for orientation)
+### Full 40-pin header reference
+
+`●` = connected / used for this project  `○` = unused
 
 ```
-        3.3 V  (1) ● ○ (2)  5 V
-        GPIO2  (3) ○ ○ (4)  5 V
-        GPIO3  (5) ○ ○ (6)  GND  ◀── Left GND
-       GPIO17 (11) ● ○ (12) GPIO18   ◀── Left  RUN(11) / BOOTSEL(12)
-       GPIO27 (13) ○ ● (14) GND  ◀── Right GND (or use pin 6)
-       GPIO22 (15) ● ● (16) GPIO23   ◀── Right RUN(15) / BOOTSEL(16)
-        3.3 V (17) ○ ○ (18) GPIO24
-       GPIO10 (19) ○ ● (20) GND  ◀── alternative GND
+    3.3V ( 1) ○ ○ ( 2) 5V
+   GPIO2 ( 3) ○ ○ ( 4) 5V
+   GPIO3 ( 5) ○ ● ( 6) GND         ◀── Left GND
+   GPIO4 ( 7) ○ ○ ( 8) GPIO14
+     GND ( 9) ○ ○ (10) GPIO15
+  GPIO17 (11) ● ○ (12) GPIO18       ◀── Left  RUN(11) / BOOTSEL(12)
+  GPIO27 (13) ○ ● (14) GND          ◀── Right GND
+  GPIO22 (15) ● ● (16) GPIO23       ◀── Right RUN(15) / BOOTSEL(16)
+   3.3V  (17) ○ ○ (18) GPIO24
+  GPIO10 (19) ○ ● (20) GND          ◀── alternative GND
+   GPIO9 (21) ○ ○ (22) GPIO25
+  GPIO11 (23) ○ ○ (24) GPIO8
+     GND (25) ○ ○ (26) GPIO7
+   GPIO0 (27) ○ ○ (28) GPIO1
+   GPIO5 (29) ○ ○ (30) GND
+   GPIO6 (31) ○ ○ (32) GPIO12
+  GPIO13 (33) ○ ○ (34) GND
+  GPIO19 (35) ○ ○ (36) GPIO16
+  GPIO26 (37) ○ ○ (38) GPIO20
+     GND (39) ○ ○ (40) GPIO21
 ```
 
 ### RP2040 pad locations
