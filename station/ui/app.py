@@ -58,6 +58,25 @@ if GITHUB_REPO:
     threading.Thread(target=_ci_poll_loop, daemon=True).start()
 
 
+def _query_usb_state_at_startup():
+    try:
+        from station.flash import FlashController
+        fc = FlashController()
+        try:
+            for side in ("left", "right"):
+                state = fc.query_usb_state(side)
+                if state is not None:
+                    _usb_state[side] = state
+        finally:
+            fc.cleanup()
+        socketio.emit("usb_state", dict(_usb_state))
+    except Exception:
+        pass  # GPIO / uhubctl not available (e.g. dev machine) — stay as None
+
+
+threading.Thread(target=_query_usb_state_at_startup, daemon=True).start()
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")

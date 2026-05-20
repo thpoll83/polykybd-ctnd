@@ -109,6 +109,20 @@ class FlashController:
         log(f"[usb:{side}] port {usb_port} → {'on' if on else 'off'}")
         self._usb_power(usb_port, on)
 
+    def query_usb_state(self, side: str) -> bool | None:
+        """Return True/False for the current USB power state, or None if unreadable."""
+        if side not in _SIDES:
+            raise ValueError(f"Unknown side '{side}'")
+        _, _, usb_port = _SIDES[side]
+        result = subprocess.run(
+            ["sudo", "uhubctl", "-l", USB_HUB_LOCATION, "-p", str(usb_port)],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            if f"Port {usb_port}:" in line:
+                return "power" in line
+        return None
+
     def reset(self, side: str, log=print) -> None:
         if side not in _SIDES:
             raise ValueError(f"Unknown side '{side}'")
