@@ -46,9 +46,17 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="4b50", MODE="0666", GROUP="plugdev"
 EOF
 sudo udevadm control --reload-rules
 
-# Install application
+# Install application — clone the repo into $INSTALL_DIR so that future
+# updates only need: sudo git -C $INSTALL_DIR pull && sudo systemctl restart polykybd-ctnd
+REPO_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/thpoll83/polykybd-ctnd.git")
+if [ -d "$INSTALL_DIR/.git" ]; then
+    echo "Updating existing installation in $INSTALL_DIR ..."
+    sudo git -C "$INSTALL_DIR" pull
+else
+    echo "Cloning $REPO_URL into $INSTALL_DIR ..."
+    sudo git clone "$REPO_URL" "$INSTALL_DIR"
+fi
 sudo mkdir -p "$INSTALL_DIR/firmware"
-sudo cp -r . "$INSTALL_DIR"
 sudo chown -R "$CTND_USER:$CTND_USER" "$INSTALL_DIR"
 
 python3 -m venv "$INSTALL_DIR/venv"

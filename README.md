@@ -119,7 +119,7 @@ This will:
 - Install `uhubctl`, `libhidapi`, `chromium` (or `chromium-browser` on older OS), Python 3 + venv
 - Add the current user to the `gpio` and `plugdev` groups
 - Install a udev rule for HID access without root
-- Copy the app to `/opt/polykybd-ctnd/` and create a venv
+- Clone the repo to `/opt/polykybd-ctnd/` (keeping it as a git repo for easy updates) and create a venv
 - Install and enable the `polykybd-ctnd` and `polykybd-kiosk` systemd services with the correct username
 - Print instructions for registering the GitHub Actions runner
 
@@ -273,12 +273,18 @@ sudo systemctl restart polykybd-ctnd.service
 
 ### Updating after a code change
 
-Pull the latest changes and restart the service — no reboot needed:
+`/opt/polykybd-ctnd` is a git clone, so pull and restart — no reboot or re-copy needed:
 
 ```bash
-git -C /opt/polykybd-ctnd pull
+sudo git -C /opt/polykybd-ctnd pull
 sudo systemctl restart polykybd-ctnd.service
 sudo systemctl status polykybd-ctnd.service
+```
+
+If the update adds new Python dependencies, also run:
+
+```bash
+sudo /opt/polykybd-ctnd/venv/bin/pip install -q -r /opt/polykybd-ctnd/requirements.txt
 ```
 
 ---
