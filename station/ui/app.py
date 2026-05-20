@@ -98,4 +98,4 @@ def on_run_tests(data):
 
 
 if __name__ == "__main__":
-    socketio.run(app, host=UI_HOST, port=UI_PORT)
+    socketio.run(app, host=UI_HOST, port=UI_PORT, allow_unsafe_werkzeug=True)
