@@ -205,7 +205,7 @@ def _on_sigterm(signum, frame):
         fc = FlashController()
         for side in ("left", "right"):
             try:
-                fc.usb_power(side, False)
+                fc.usb_power(side, True)
             except Exception:
                 pass
         fc.cleanup()
