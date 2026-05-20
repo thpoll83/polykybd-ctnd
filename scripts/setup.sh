@@ -49,6 +49,7 @@ sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends \
   python3 python3-venv python3-pip \
   uhubctl \
+  picotool \
   libhidapi-hidraw0 libhidapi-libusb0 \
   "$CHROMIUM_PKG"
 

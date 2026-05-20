@@ -3,6 +3,7 @@ import glob
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import RPi.GPIO as GPIO
 
@@ -48,9 +49,28 @@ class FlashController:
             time.sleep(0.3)
         raise TimeoutError(f"Mass storage '{MASS_STORAGE_LABEL}' not found after {timeout}s")
 
-    def flash(self, side: str, uf2_path: str, log=print) -> None:
+    def _flash_uf2(self, firmware_path: str, log) -> None:
+        mount = self._await_mount()
+        log(f"[flash] mounted at {mount} — writing {firmware_path}")
+        shutil.copy(firmware_path, mount)
+
+    def _flash_bin(self, firmware_path: str, log) -> None:
+        # picotool communicates with the RP2040 over USB while it sits in
+        # BOOTSEL mode — no mass-storage mount needed.
+        log(f"[flash] loading with picotool: {firmware_path}")
+        subprocess.run(
+            ["picotool", "load", firmware_path, "--update"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(["picotool", "reboot"], check=True, capture_output=True)
+
+    def flash(self, side: str, firmware_path: str, log=print) -> None:
         if side not in _SIDES:
             raise ValueError(f"Unknown side '{side}' — expected 'left' or 'right'")
+        ext = Path(firmware_path).suffix.lower()
+        if ext not in (".uf2", ".bin"):
+            raise ValueError(f"Unsupported firmware format '{ext}' — expected .uf2 or .bin")
+
         run_pin, bootsel_pin, usb_port = _SIDES[side]
 
         log(f"[flash:{side}] powering off USB port {usb_port}")
@@ -63,11 +83,12 @@ class FlashController:
         log(f"[flash:{side}] powering on USB port {usb_port}")
         self._usb_power(usb_port, True)
 
-        log(f"[flash:{side}] waiting for mass storage")
-        mount = self._await_mount()
-
-        log(f"[flash:{side}] mounted at {mount} — writing {uf2_path}")
-        shutil.copy(uf2_path, mount)
+        if ext == ".uf2":
+            log(f"[flash:{side}] waiting for mass storage")
+            self._flash_uf2(firmware_path, log)
+        else:
+            time.sleep(1.0)  # give USB a moment to enumerate before picotool
+            self._flash_bin(firmware_path, log)
 
         log(f"[flash:{side}] complete — waiting for reboot")
         time.sleep(2.5)

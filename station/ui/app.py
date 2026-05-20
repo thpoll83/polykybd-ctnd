@@ -34,7 +34,7 @@ def list_firmware():
     base = Path(FIRMWARE_DIR)
     if not base.exists():
         return jsonify([])
-    files = sorted(p.name for p in base.glob("*.uf2"))
+    files = sorted(p.name for p in base.iterdir() if p.suffix.lower() in (".uf2", ".bin"))
     return jsonify(files)
 
 
