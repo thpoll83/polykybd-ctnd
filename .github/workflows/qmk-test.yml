@@ -1,9 +1,10 @@
-# Example workflow — place a copy of this in thpoll83/qmk_firmware/.github/workflows/
+# Template — this file lives in polykybd-ctnd for reference.
+# The copy in thpoll83/qmk_firmware/.github/workflows/ is the live one.
 name: Build and HIL Test
 
 on:
   push:
-    branches: [main, master, "PolyKybd/**"]
+    branches: [PolyKeyboard, "PolyKybd/**"]
   pull_request:
 
 jobs:
@@ -11,22 +12,21 @@ jobs:
     name: Build firmware
     runs-on: ubuntu-latest
     outputs:
-      left:  ${{ steps.names.outputs.left }}
-      right: ${{ steps.names.outputs.right }}
+      firmware: ${{ steps.names.outputs.firmware }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Build PolyKybd firmware
+      - name: Build PolyKybd corne42 firmware
         uses: docker://qmkfm/qmk_cli
         with:
-          args: qmk compile -kb polykbd -km default
+          args: qmk compile -kb handwired/polykybd/corne42 -km default
 
       - id: names
         run: |
-          echo "left=$(ls  polykbd_default_left*.uf2  2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
-          echo "right=$(ls polykbd_default_right*.uf2 2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
+          fw=$(ls handwired_polykybd_corne42_default*.uf2 2>/dev/null | head -1)
+          echo "firmware=$fw" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -39,14 +39,28 @@ jobs:
     needs: build
     runs-on: [self-hosted, polykybd-ctnd]
     steps:
+      - name: Locate station directory
+        id: ctnd
+        run: |
+          # Use CTND_DIR env var if set; otherwise try /opt then home directory
+          dir="${CTND_DIR:-}"
+          if [ -z "$dir" ]; then
+            if [ -d "/opt/polykybd-ctnd" ]; then
+              dir=/opt/polykybd-ctnd
+            else
+              dir="$HOME/polykybd-ctnd"
+            fi
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           name: firmware
-          path: /opt/polykybd-ctnd/firmware
+          path: ${{ steps.ctnd.outputs.dir }}/firmware
 
       - name: Flash and test
         run: |
-          cd /opt/polykybd-ctnd
+          cd ${{ steps.ctnd.outputs.dir }}
           venv/bin/python -m station.test_runner \
-            --left  firmware/${{ needs.build.outputs.left }} \
-            --right firmware/${{ needs.build.outputs.right }}
+            --left  "firmware/${{ needs.build.outputs.firmware }}" \
+            --right "firmware/${{ needs.build.outputs.firmware }}"
