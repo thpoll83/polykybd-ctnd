@@ -1,0 +1,14 @@
+[Unit]
+Description=PolyKybd CTND Station
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/opt/polykybd-ctnd
+Environment=PYTHONPATH=/opt/polykybd-ctnd
+ExecStart=/opt/polykybd-ctnd/venv/bin/python -m station.ui.app
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

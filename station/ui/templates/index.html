@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1024, initial-scale=1.0">
+  <title>PolyKybd CTND</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-status="idle">
+  <header>
+    <span class="title">PolyKybd CTND</span>
+    <span class="status-badge">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">idle</span>
+    </span>
+    <span class="clock" id="clock"></span>
+  </header>
+
+  <main id="log-panel">
+    <div id="log-output"></div>
+  </main>
+
+  <footer>
+    <div class="firmware-row">
+      <label>Left</label>
+      <select id="left-fw"><option value="">— select UF2 —</option></select>
+      <label>Right</label>
+      <select id="right-fw"><option value="">— select UF2 —</option></select>
+      <button class="btn btn-icon" onclick="refreshFirmware()" title="Refresh">&#x21BB;</button>
+    </div>
+    <div class="button-row">
+      <button class="btn btn-blue"  id="btn-flash-left"  onclick="flashSide('left')">Flash Left</button>
+      <button class="btn btn-blue"  id="btn-flash-right" onclick="flashSide('right')">Flash Right</button>
+      <button class="btn btn-green" id="btn-run"         onclick="runTests()">Run Tests</button>
+      <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>
+    </div>
+  </footer>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

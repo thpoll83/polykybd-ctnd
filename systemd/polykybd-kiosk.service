@@ -1,0 +1,22 @@
+[Unit]
+Description=PolyKybd CTND Kiosk Browser
+After=graphical-session.target polykybd-ctnd.service
+Wants=graphical-session.target
+
+[Service]
+User=pi
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+ExecStartPre=/bin/sleep 4
+ExecStart=/usr/bin/chromium-browser \
+  --kiosk \
+  --noerrdialogs \
+  --disable-infobars \
+  --disable-session-crashed-bubble \
+  --disable-restore-session-state \
+  --app=http://localhost:5000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

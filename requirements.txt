@@ -1,0 +1,5 @@
+flask>=3.0
+flask-socketio>=5.3
+simple-websocket>=1.0
+RPi.GPIO>=0.7
+hid>=1.0

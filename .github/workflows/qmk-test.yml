@@ -1,0 +1,52 @@
+# Example workflow — place a copy of this in thpoll83/qmk_firmware/.github/workflows/
+name: Build and HIL Test
+
+on:
+  push:
+    branches: [main, master, "PolyKybd/**"]
+  pull_request:
+
+jobs:
+  build:
+    name: Build firmware
+    runs-on: ubuntu-latest
+    outputs:
+      left:  ${{ steps.names.outputs.left }}
+      right: ${{ steps.names.outputs.right }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build PolyKybd firmware
+        uses: docker://qmkfm/qmk_cli
+        with:
+          args: qmk compile -kb polykbd -km default
+
+      - id: names
+        run: |
+          echo "left=$(ls  polykbd_default_left*.uf2  2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
+          echo "right=$(ls polykbd_default_right*.uf2 2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: "*.uf2"
+          retention-days: 7
+
+  hil-test:
+    name: HIL test on PolyKybd station
+    needs: build
+    runs-on: [self-hosted, polykybd-ctnd]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: /opt/polykybd-ctnd/firmware
+
+      - name: Flash and test
+        run: |
+          cd /opt/polykybd-ctnd
+          venv/bin/python -m station.test_runner \
+            --left  firmware/${{ needs.build.outputs.left }} \
+            --right firmware/${{ needs.build.outputs.right }}
