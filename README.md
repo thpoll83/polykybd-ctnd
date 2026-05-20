@@ -127,18 +127,20 @@ This will:
 
 ### 3. Update config
 
-Edit `station/config.py`:
+Edit `config/config.yaml` (created automatically by `setup.sh` from the example):
 
-```python
-# Find these values in keyboards/polykbd/config.h in qmk_firmware
-QMK_VENDOR_ID  = 0x????
-QMK_PRODUCT_ID = 0x????
+```yaml
+qmk:
+  vendor_id:  0x????  # from keyboards/polykbd/config.h in qmk_firmware
+  product_id: 0x????
 
-# Find your hub location by running: uhubctl
-USB_HUB_LOCATION = "1-1"   # RPi4 default — verify with uhubctl output
-LEFT_USB_PORT    = 1        # adjust to match your physical port
-RIGHT_USB_PORT   = 2
+usb:
+  hub_location: "1-1"  # verify with: uhubctl
+  left_port:  1
+  right_port: 2
 ```
+
+`config/config.yaml` is gitignored — `git pull` will never overwrite your settings.
 
 ### 4. Register GitHub Actions runner
 

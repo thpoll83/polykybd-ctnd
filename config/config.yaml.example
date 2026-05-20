@@ -1,0 +1,28 @@
+# PolyKybd CTND — station configuration
+# Copy this file to config/config.yaml and edit for your hardware.
+# config/config.yaml is gitignored so git pull will never overwrite your settings.
+
+# GPIO pin assignments (BCM numbering)
+gpio:
+  left_run:      17
+  left_bootsel:  18
+  right_run:     22
+  right_bootsel: 23
+
+# uhubctl — USB hub and port assignments
+# Find your hub location by running: uhubctl
+usb:
+  hub_location: "1-1"
+  left_port:  1
+  right_port: 2
+
+# QMK HID identifiers
+# Find these in keyboards/polykbd/config.h in qmk_firmware
+qmk:
+  vendor_id:  0x4B50  # update with actual value
+  product_id: 0x0001  # update with actual value
+
+# Web UI
+ui:
+  host: "0.0.0.0"
+  port: 5000

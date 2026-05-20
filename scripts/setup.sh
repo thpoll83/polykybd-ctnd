@@ -84,6 +84,12 @@ fi
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
 
+# Create local config from the example if it doesn't exist yet
+if [ ! -f "$INSTALL_DIR/config/config.yaml" ]; then
+    cp "$INSTALL_DIR/config/config.yaml.example" "$INSTALL_DIR/config/config.yaml"
+    echo "Created $INSTALL_DIR/config/config.yaml — edit it to match your hardware."
+fi
+
 # Install systemd service files, substituting the actual username, home
 # directory, and chromium binary for the 'pi' placeholders in the templates.
 sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
