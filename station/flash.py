@@ -79,7 +79,7 @@ class FlashController:
         # Assert BOOTSEL and toggle RUN while USB is still off.
         # BOOTSEL must still be held when USB (and therefore board power)
         # comes back — that is when the RP2040 samples the pin.
-        log(f"[flash:{side}] entering BOOTSEL")
+        log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
         GPIO.output(bootsel_pin, GPIO.LOW)
         time.sleep(0.05)
         GPIO.output(run_pin, GPIO.LOW)
@@ -113,11 +113,11 @@ class FlashController:
         if side not in _SIDES:
             raise ValueError(f"Unknown side '{side}'")
         run_pin, _, _ = _SIDES[side]
-        log(f"[reset:{side}] asserting RUN low")
+        log(f"[reset:{side}] asserting RUN low (BCM{run_pin})")
         GPIO.output(run_pin, GPIO.LOW)
         time.sleep(0.1)
         GPIO.output(run_pin, GPIO.HIGH)
-        log(f"[reset:{side}] done")
+        log(f"[reset:{side}] released RUN high (BCM{run_pin})")
 
     def cleanup(self) -> None:
         GPIO.cleanup()
