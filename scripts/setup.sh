@@ -63,6 +63,13 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="4b50", MODE="0666", GROUP="plugdev"
 EOF
 sudo udevadm control --reload-rules
 
+# Allow the station user to run uhubctl without a password.
+# The service runs as a regular user but uhubctl needs access to /dev/bus/usb/.
+UHUBCTL_BIN=$(command -v uhubctl)
+echo "$CTND_USER ALL=(ALL) NOPASSWD: $UHUBCTL_BIN" \
+  | sudo tee /etc/sudoers.d/polykybd-uhubctl > /dev/null
+sudo chmod 0440 /etc/sudoers.d/polykybd-uhubctl
+
 # Install application
 if $LOCAL; then
     # Running in place — repo is already here, nothing to clone

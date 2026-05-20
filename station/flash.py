@@ -27,7 +27,7 @@ class FlashController:
 
     def _usb_power(self, port: int, on: bool) -> None:
         subprocess.run(
-            ["uhubctl", "-l", USB_HUB_LOCATION, "-p", str(port), "-a", "on" if on else "off"],
+            ["sudo", "uhubctl", "-l", USB_HUB_LOCATION, "-p", str(port), "-a", "on" if on else "off"],
             check=True, capture_output=True,
         )
 
