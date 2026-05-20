@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import json
 import os
+import signal
 import threading
 import urllib.request
 import urllib.error
@@ -196,6 +197,24 @@ def on_run_tests(data):
             runner.cleanup()
 
     threading.Thread(target=_do, daemon=True).start()
+
+
+def _on_sigterm(signum, frame):
+    try:
+        from station.flash import FlashController
+        fc = FlashController()
+        for side in ("left", "right"):
+            try:
+                fc.usb_power(side, False)
+            except Exception:
+                pass
+        fc.cleanup()
+    except Exception:
+        pass
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, _on_sigterm)
 
 
 if __name__ == "__main__":
