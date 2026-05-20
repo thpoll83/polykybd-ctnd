@@ -112,14 +112,16 @@ cd polykybd-ctnd
 
 ```bash
 chmod +x scripts/setup.sh
-./scripts/setup.sh
+./scripts/setup.sh          # installs to /opt/polykybd-ctnd (recommended)
+# or, to run the app from the current clone instead:
+./scripts/setup.sh --local
 ```
 
 This will:
 - Install `uhubctl`, `libhidapi`, `chromium` (or `chromium-browser` on older OS), Python 3 + venv
 - Add the current user to the `gpio` and `plugdev` groups
 - Install a udev rule for HID access without root
-- Clone the repo to `/opt/polykybd-ctnd/` (keeping it as a git repo for easy updates) and create a venv
+- Clone the repo to `/opt/polykybd-ctnd/` and create a venv (default), or use the current directory (`--local`)
 - Install and enable the `polykybd-ctnd` and `polykybd-kiosk` systemd services with the correct username
 - Print instructions for registering the GitHub Actions runner
 

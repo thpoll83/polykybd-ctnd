@@ -30,5 +30,7 @@ MASS_STORAGE_LABEL = "RPI-RP2"
 UI_HOST = "0.0.0.0"
 UI_PORT = 5000
 
-# Directory where built UF2 files are placed by CI
-FIRMWARE_DIR = "/opt/polykybd-ctnd/firmware"
+# Directory where built UF2 files are placed by CI.
+# Resolved relative to this file so it works regardless of install location.
+from pathlib import Path as _Path
+FIRMWARE_DIR = str(_Path(__file__).parent.parent / "firmware")

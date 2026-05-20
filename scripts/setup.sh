@@ -2,18 +2,34 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 
-INSTALL_DIR=/opt/polykybd-ctnd
+# Parse flags
+# --local  Use the current directory as the install location instead of
+#          cloning into /opt/polykybd-ctnd. Useful when you have already
+#          cloned the repo and want to run it in place.
+LOCAL=false
+for arg in "$@"; do
+    case "$arg" in
+        --local) LOCAL=true ;;
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+    esac
+done
 
 # Resolve the real user even when the script is run via sudo
 CTND_USER="${SUDO_USER:-$USER}"
 CTND_HOME=$(getent passwd "$CTND_USER" | cut -d: -f6)
 
-echo "=== PolyKybd CTND Setup (user: $CTND_USER) ==="
-
 # Guard: must be run from the repository root
 if [[ ! -f station/ui/app.py ]]; then
     echo "Error: run this script from the polykybd-ctnd repository root." >&2
     exit 1
+fi
+
+if $LOCAL; then
+    INSTALL_DIR=$(pwd)
+    echo "=== PolyKybd CTND Setup — local install in $INSTALL_DIR (user: $CTND_USER) ==="
+else
+    INSTALL_DIR=/opt/polykybd-ctnd
+    echo "=== PolyKybd CTND Setup — install to $INSTALL_DIR (user: $CTND_USER) ==="
 fi
 
 # Detect chromium package and binary name.
@@ -46,25 +62,31 @@ SUBSYSTEM=="hidraw", ATTRS{idVendor}=="4b50", MODE="0666", GROUP="plugdev"
 EOF
 sudo udevadm control --reload-rules
 
-# Install application — clone the repo into $INSTALL_DIR so that future
-# updates only need: sudo git -C $INSTALL_DIR pull && sudo systemctl restart polykybd-ctnd
-REPO_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/thpoll83/polykybd-ctnd.git")
-if [ -d "$INSTALL_DIR/.git" ]; then
-    echo "Updating existing installation in $INSTALL_DIR ..."
-    sudo git -C "$INSTALL_DIR" pull
+# Install application
+if $LOCAL; then
+    # Running in place — repo is already here, nothing to clone
+    mkdir -p "$INSTALL_DIR/firmware"
 else
-    echo "Cloning $REPO_URL into $INSTALL_DIR ..."
-    sudo git clone "$REPO_URL" "$INSTALL_DIR"
+    # Clone or update the repo in $INSTALL_DIR so future updates only need:
+    #   sudo git -C $INSTALL_DIR pull && sudo systemctl restart polykybd-ctnd
+    REPO_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/thpoll83/polykybd-ctnd.git")
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        echo "Updating existing installation in $INSTALL_DIR ..."
+        sudo git -C "$INSTALL_DIR" pull
+    else
+        echo "Cloning $REPO_URL into $INSTALL_DIR ..."
+        sudo git clone "$REPO_URL" "$INSTALL_DIR"
+    fi
+    sudo mkdir -p "$INSTALL_DIR/firmware"
+    sudo chown -R "$CTND_USER:$CTND_USER" "$INSTALL_DIR"
 fi
-sudo mkdir -p "$INSTALL_DIR/firmware"
-sudo chown -R "$CTND_USER:$CTND_USER" "$INSTALL_DIR"
 
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
 
 # Install systemd service files, substituting the actual username, home
 # directory, and chromium binary for the 'pi' placeholders in the templates.
-sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g" \
+sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
   systemd/polykybd-ctnd.service \
   | sudo tee /etc/systemd/system/polykybd-ctnd.service > /dev/null
 
