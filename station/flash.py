@@ -115,9 +115,20 @@ class FlashController:
         run_pin, _, _ = _SIDES[side]
         log(f"[reset:{side}] asserting RUN low (BCM{run_pin})")
         GPIO.output(run_pin, GPIO.LOW)
-        time.sleep(0.1)
+        time.sleep(0.2)
         GPIO.output(run_pin, GPIO.HIGH)
+        # Hold HIGH for 500 ms so the RP2040 is well into its boot sequence
+        # before GPIO.cleanup() releases the pin to a floating input.
+        time.sleep(0.5)
         log(f"[reset:{side}] released RUN high (BCM{run_pin})")
 
     def cleanup(self) -> None:
+        # Drive all pins HIGH before switching to input so the RP2040's
+        # internal pull-ups don't have to fight any residual LOW drive
+        # from a previous operation.
+        for pin in [LEFT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_RUN_PIN, RIGHT_BOOTSEL_PIN]:
+            try:
+                GPIO.output(pin, GPIO.HIGH)
+            except Exception:
+                pass
         GPIO.cleanup()
