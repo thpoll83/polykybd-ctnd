@@ -47,17 +47,31 @@ RPi4 header                          signal
 
 Pins 11–16 are a tight cluster on the header — all six connections (4 signals + 2 GND) sit within six adjacent physical pins, making for clean point-to-point wiring.
 
-### Full 40-pin header reference (for orientation)
+### Full 40-pin header reference
+
+`●` = connected / used for this project  `○` = unused
 
 ```
-        3.3 V  (1) ● ○ (2)  5 V
-        GPIO2  (3) ○ ○ (4)  5 V
-        GPIO3  (5) ○ ○ (6)  GND  ◀── Left GND
-       GPIO17 (11) ● ○ (12) GPIO18   ◀── Left  RUN(11) / BOOTSEL(12)
-       GPIO27 (13) ○ ● (14) GND  ◀── Right GND (or use pin 6)
-       GPIO22 (15) ● ● (16) GPIO23   ◀── Right RUN(15) / BOOTSEL(16)
-        3.3 V (17) ○ ○ (18) GPIO24
-       GPIO10 (19) ○ ● (20) GND  ◀── alternative GND
+    3.3V ( 1) ○ ○ ( 2) 5V
+   GPIO2 ( 3) ○ ○ ( 4) 5V
+   GPIO3 ( 5) ○ ● ( 6) GND         ◀── Left GND
+   GPIO4 ( 7) ○ ○ ( 8) GPIO14
+     GND ( 9) ○ ○ (10) GPIO15
+  GPIO17 (11) ● ○ (12) GPIO18       ◀── Left  RUN(11) / BOOTSEL(12)
+  GPIO27 (13) ○ ● (14) GND          ◀── Right GND
+  GPIO22 (15) ● ● (16) GPIO23       ◀── Right RUN(15) / BOOTSEL(16)
+   3.3V  (17) ○ ○ (18) GPIO24
+  GPIO10 (19) ○ ● (20) GND          ◀── alternative GND
+   GPIO9 (21) ○ ○ (22) GPIO25
+  GPIO11 (23) ○ ○ (24) GPIO8
+     GND (25) ○ ○ (26) GPIO7
+   GPIO0 (27) ○ ○ (28) GPIO1
+   GPIO5 (29) ○ ○ (30) GND
+   GPIO6 (31) ○ ○ (32) GPIO12
+  GPIO13 (33) ○ ○ (34) GND
+  GPIO19 (35) ○ ○ (36) GPIO16
+  GPIO26 (37) ○ ○ (38) GPIO20
+     GND (39) ○ ○ (40) GPIO21
 ```
 
 ### RP2040 pad locations
@@ -112,31 +126,35 @@ cd polykybd-ctnd
 
 ```bash
 chmod +x scripts/setup.sh
-./scripts/setup.sh
+./scripts/setup.sh          # installs to /opt/polykybd-ctnd (recommended)
+# or, to run the app from the current clone instead:
+./scripts/setup.sh --local
 ```
 
 This will:
 - Install `uhubctl`, `libhidapi`, `chromium` (or `chromium-browser` on older OS), Python 3 + venv
 - Add the current user to the `gpio` and `plugdev` groups
 - Install a udev rule for HID access without root
-- Clone the repo to `/opt/polykybd-ctnd/` (keeping it as a git repo for easy updates) and create a venv
+- Clone the repo to `/opt/polykybd-ctnd/` and create a venv (default), or use the current directory (`--local`)
 - Install and enable the `polykybd-ctnd` and `polykybd-kiosk` systemd services with the correct username
 - Print instructions for registering the GitHub Actions runner
 
 ### 3. Update config
 
-Edit `station/config.py`:
+Edit `config/config.yaml` (created automatically by `setup.sh` from the example):
 
-```python
-# Find these values in keyboards/polykbd/config.h in qmk_firmware
-QMK_VENDOR_ID  = 0x????
-QMK_PRODUCT_ID = 0x????
+```yaml
+qmk:
+  vendor_id:  0x????  # from keyboards/polykbd/config.h in qmk_firmware
+  product_id: 0x????
 
-# Find your hub location by running: uhubctl
-USB_HUB_LOCATION = "1-1"   # RPi4 default — verify with uhubctl output
-LEFT_USB_PORT    = 1        # adjust to match your physical port
-RIGHT_USB_PORT   = 2
+usb:
+  hub_location: "1-1"  # verify with: uhubctl
+  left_port:  1
+  right_port: 2
 ```
+
+`config/config.yaml` is gitignored — `git pull` will never overwrite your settings.
 
 ### 4. Register GitHub Actions runner
 

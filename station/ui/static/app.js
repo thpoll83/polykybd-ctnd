@@ -5,7 +5,11 @@ const socket    = io();
 const logEl     = document.getElementById('log-output');
 const statusEl  = document.getElementById('status-text');
 const clockEl   = document.getElementById('clock');
-const actionBtns = ['btn-flash-left', 'btn-flash-right', 'btn-run'].map(id => document.getElementById(id));
+const actionBtns = [
+  'btn-flash-left', 'btn-flash-right', 'btn-run',
+  'btn-usb-left',     'btn-bootsel-left',  'btn-reset-left',
+  'btn-usb-right',    'btn-bootsel-right', 'btn-reset-right',
+].map(id => document.getElementById(id));
 
 /* ── Clock ── */
 function tick() { clockEl.textContent = new Date().toLocaleTimeString(); }
@@ -25,6 +29,15 @@ socket.on('status', ({ value }) => {
 
 socket.on('log', ({ msg }) => appendLog(msg));
 
+socket.on('ci_status', ({ running, url }) => {
+  const badge = document.getElementById('ci-badge');
+  badge.dataset.ci  = running ? 'running' : 'idle';
+  badge.textContent = running ? 'CI ▶' : 'CI ✓';
+  badge.title       = running ? 'CI running — do not flash!' : 'CI idle';
+  badge.style.cursor = url ? 'pointer' : 'default';
+  badge.onclick = url ? () => window.open(url, '_blank') : null;
+});
+
 socket.on('test_result', result => {
   const icon = result.passed ? '✓ PASS' : '✗ FAIL';
   appendLog(`\n── ${icon} ──`);
@@ -35,21 +48,72 @@ socket.on('test_result', result => {
   appendLog('');
 });
 
-/* ── Actions ── */
+/* ── Primary actions ── */
 function flashSide(side) {
   const sel = document.getElementById(side === 'left' ? 'left-fw' : 'right-fw');
-  if (!sel.value) { appendLog(`[ui] select a ${side} UF2 first`); return; }
+  if (!sel.value) { appendLog(`[ui] select a firmware file for ${side} first`); return; }
   socket.emit('flash', { side, uf2: sel.value });
 }
 
 function runTests() {
   const left  = document.getElementById('left-fw').value;
   const right = document.getElementById('right-fw').value;
-  if (!left || !right) { appendLog('[ui] select both left and right UF2 files first'); return; }
+  if (!left || !right) { appendLog('[ui] select both left and right firmware files first'); return; }
   socket.emit('run_tests', { left_uf2: left, right_uf2: right });
 }
 
 function clearLog() { logEl.textContent = ''; }
+
+function copyLog() {
+  const text = logEl.textContent;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById('btn-copy');
+    const prev = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = prev; }, 1500);
+  });
+}
+
+/* ── Utility actions ── */
+socket.on('usb_state', state => {
+  ['left', 'right'].forEach(side => updateUsbBtn(side, state[side]));
+});
+
+socket.on('bootsel_state', state => {
+  ['left', 'right'].forEach(side => updateBootselBtn(side, state[side]));
+});
+
+function updateBootselBtn(side, asserted) {
+  const btn = document.getElementById(`btn-bootsel-${side}`);
+  const prefix = side === 'left' ? 'L' : 'R';
+  btn.dataset.state = asserted ? 'asserted' : 'released';
+  btn.textContent   = asserted ? `${prefix}: BOOT ●` : `${prefix}: BOOTSEL`;
+}
+
+function toggleBootsel(side) {
+  const btn      = document.getElementById(`btn-bootsel-${side}`);
+  const asserted = btn.dataset.state !== 'asserted';
+  socket.emit('bootsel', { side, asserted });
+}
+
+function updateUsbBtn(side, state) {
+  const btn = document.getElementById(`btn-usb-${side}`);
+  const prefix = side === 'left' ? 'L' : 'R';
+  if (state === true)       { btn.dataset.state = 'on';      btn.textContent = `${prefix}: USB ON`;  }
+  else if (state === false) { btn.dataset.state = 'off';     btn.textContent = `${prefix}: USB OFF`; }
+  else                      { btn.dataset.state = 'unknown'; btn.textContent = `${prefix}: USB ?`;   }
+}
+
+function toggleUsb(side) {
+  const btn = document.getElementById(`btn-usb-${side}`);
+  const on = btn.dataset.state !== 'on';  // unknown → treat as off → turn on
+  socket.emit('usb_power', { side, on });
+}
+
+function resetBoard(side) {
+  socket.emit('reset_board', { side });
+}
 
 function refreshFirmware() {
   fetch('/firmware')
@@ -58,7 +122,7 @@ function refreshFirmware() {
       ['left-fw', 'right-fw'].forEach(id => {
         const sel  = document.getElementById(id);
         const prev = sel.value;
-        sel.innerHTML = '<option value="">— select UF2 —</option>';
+        sel.innerHTML = '<option value="">— select firmware —</option>';
         files.forEach(f => {
           const opt = document.createElement('option');
           opt.value = opt.textContent = f;

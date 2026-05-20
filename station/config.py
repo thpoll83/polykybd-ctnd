@@ -1,34 +1,43 @@
 # SPDX-License-Identifier: GPL-2.0-only
+from pathlib import Path
+import yaml
+
+_root    = Path(__file__).parent.parent
+_cfg     = _root / "config" / "config.yaml"
+_example = _root / "config" / "config.yaml.example"
+
+with open(_cfg if _cfg.exists() else _example) as _f:
+    _c = yaml.safe_load(_f)
 
 # GPIO pin assignments (BCM numbering)
-LEFT_RUN_PIN      = 17
-LEFT_BOOTSEL_PIN  = 18
-RIGHT_RUN_PIN     = 22
-RIGHT_BOOTSEL_PIN = 23
+LEFT_RUN_PIN      = _c["gpio"]["left_run"]
+LEFT_BOOTSEL_PIN  = _c["gpio"]["left_bootsel"]
+RIGHT_RUN_PIN     = _c["gpio"]["right_run"]
+RIGHT_BOOTSEL_PIN = _c["gpio"]["right_bootsel"]
 
-# uhubctl — RPi4 built-in USB hub
-# Find your hub location by running: uhubctl
-USB_HUB_LOCATION = "1-1"
-LEFT_USB_PORT    = 1
-RIGHT_USB_PORT   = 2
+# uhubctl
+USB_HUB_LOCATION = _c["usb"]["hub_location"]
+LEFT_USB_PORT    = _c["usb"]["left_port"]
+RIGHT_USB_PORT   = _c["usb"]["right_port"]
 
 # QMK HID identifiers
-# Update with actual values from keyboards/polykbd/config.h
-QMK_VENDOR_ID  = 0x4B50   # placeholder — check your QMK config
-QMK_PRODUCT_ID = 0x0001   # placeholder
+QMK_VENDOR_ID  = _c["qmk"]["vendor_id"]
+QMK_PRODUCT_ID = _c["qmk"]["product_id"]
 
-# HID usage pages (QMK standard)
-HID_CONSOLE_USAGE_PAGE = 0xFF31
-HID_CONSOLE_USAGE      = 0x0074
-HID_RAW_USAGE_PAGE     = 0xFF60
-HID_RAW_USAGE          = 0x0061
+HID_CONSOLE_USAGE_PAGE = _c["qmk"]["console_usage_page"]
+HID_CONSOLE_USAGE      = _c["qmk"]["console_usage"]
+HID_RAW_USAGE_PAGE     = _c["qmk"]["raw_usage_page"]
+HID_RAW_USAGE          = _c["qmk"]["raw_usage"]
 
-# Mass storage bootloader label
-MASS_STORAGE_LABEL = "RPI-RP2"
+MASS_STORAGE_LABEL = _c["qmk"]["mass_storage_label"]
 
 # Web UI
-UI_HOST = "0.0.0.0"
-UI_PORT = 5000
+UI_HOST = _c["ui"]["host"]
+UI_PORT = _c["ui"]["port"]
 
-# Directory where built UF2 files are placed by CI
-FIRMWARE_DIR = "/opt/polykybd-ctnd/firmware"
+# GitHub Actions CI status (optional)
+GITHUB_REPO  = _c.get("github", {}).get("repo", "")
+GITHUB_TOKEN = _c.get("github", {}).get("token", "")
+
+# Firmware directory (relative to repo root)
+FIRMWARE_DIR = str(_root / "firmware")
