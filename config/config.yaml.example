@@ -21,6 +21,12 @@ usb:
 qmk:
   vendor_id:  0x4B50  # update with actual value
   product_id: 0x0001  # update with actual value
+  # HID usage pages (QMK standard defaults — only change if your firmware differs)
+  console_usage_page: 0xFF31
+  console_usage:      0x0074
+  raw_usage_page:     0xFF60
+  raw_usage:          0x0061
+  mass_storage_label: "RPI-RP2"
 
 # Web UI
 ui:

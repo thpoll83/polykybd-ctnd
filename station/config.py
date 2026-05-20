@@ -24,14 +24,12 @@ RIGHT_USB_PORT   = _c["usb"]["right_port"]
 QMK_VENDOR_ID  = _c["qmk"]["vendor_id"]
 QMK_PRODUCT_ID = _c["qmk"]["product_id"]
 
-# HID usage pages (QMK standard — not user-configurable)
-HID_CONSOLE_USAGE_PAGE = 0xFF31
-HID_CONSOLE_USAGE      = 0x0074
-HID_RAW_USAGE_PAGE     = 0xFF60
-HID_RAW_USAGE          = 0x0061
+HID_CONSOLE_USAGE_PAGE = _c["qmk"]["console_usage_page"]
+HID_CONSOLE_USAGE      = _c["qmk"]["console_usage"]
+HID_RAW_USAGE_PAGE     = _c["qmk"]["raw_usage_page"]
+HID_RAW_USAGE          = _c["qmk"]["raw_usage"]
 
-# Mass storage bootloader label
-MASS_STORAGE_LABEL = "RPI-RP2"
+MASS_STORAGE_LABEL = _c["qmk"]["mass_storage_label"]
 
 # Web UI
 UI_HOST = _c["ui"]["host"]
