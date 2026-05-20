@@ -1,7 +1,7 @@
 [Unit]
 Description=PolyKybd CTND Kiosk Browser
-After=graphical-session.target polykybd-ctnd.service
-Wants=graphical-session.target
+After=graphical.target polykybd-ctnd.service
+Wants=graphical.target
 
 [Service]
 User=pi
@@ -19,4 +19,4 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=graphical.target
