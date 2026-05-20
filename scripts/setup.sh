@@ -56,19 +56,25 @@ sudo apt-get install -y --no-install-recommends \
 # Allow the user to access GPIO and USB without root
 sudo usermod -aG gpio,plugdev "$CTND_USER"
 
-# udev rule for HID access without root
-# Update idVendor to match your actual QMK VID
-sudo tee /etc/udev/rules.d/99-polykybd-hid.rules > /dev/null <<'EOF'
+# udev rules: HID access for the running keyboard (update idVendor for actual QMK VID),
+# and BOOTSEL access so picotool can talk to the RP2040 without root.
+sudo tee /etc/udev/rules.d/99-polykybd.rules > /dev/null <<'EOF'
+# PolyKybd running keyboard — HID console + Raw HID
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="4b50", MODE="0666", GROUP="plugdev"
+# RP2040 in BOOTSEL mode — required for picotool
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0660", GROUP="plugdev"
 EOF
 sudo udevadm control --reload-rules
 
-# Allow the station user to run uhubctl without a password.
-# The service runs as a regular user but uhubctl needs access to /dev/bus/usb/.
+# Allow the station user to run uhubctl and picotool without a password.
+# Both need /dev/bus/usb/ access that isn't available to a normal user service.
 UHUBCTL_BIN=$(command -v uhubctl)
-echo "$CTND_USER ALL=(ALL) NOPASSWD: $UHUBCTL_BIN" \
-  | sudo tee /etc/sudoers.d/polykybd-uhubctl > /dev/null
-sudo chmod 0440 /etc/sudoers.d/polykybd-uhubctl
+PICOTOOL_BIN=$(command -v picotool)
+printf '%s ALL=(ALL) NOPASSWD: %s\n' "$CTND_USER" "$UHUBCTL_BIN" \
+  | sudo tee /etc/sudoers.d/polykybd-usb > /dev/null
+printf '%s ALL=(ALL) NOPASSWD: %s\n' "$CTND_USER" "$PICOTOOL_BIN" \
+  | sudo tee -a /etc/sudoers.d/polykybd-usb > /dev/null
+sudo chmod 0440 /etc/sudoers.d/polykybd-usb
 
 # Install application
 if $LOCAL; then

@@ -58,11 +58,15 @@ class FlashController:
         # picotool communicates with the RP2040 over USB while it sits in
         # BOOTSEL mode — no mass-storage mount needed.
         log(f"[flash] loading with picotool: {firmware_path}")
-        subprocess.run(
-            ["picotool", "load", firmware_path, "--update"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(["picotool", "reboot"], check=True, capture_output=True)
+        try:
+            subprocess.run(
+                ["sudo", "picotool", "load", firmware_path, "--update"],
+                check=True, capture_output=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"picotool exited {exc.returncode}: {stderr}") from exc
+        subprocess.run(["sudo", "picotool", "reboot"], check=True, capture_output=True)
 
     def flash(self, side: str, firmware_path: str, log=print) -> None:
         if side not in _SIDES:
@@ -87,7 +91,7 @@ class FlashController:
             log(f"[flash:{side}] waiting for mass storage")
             self._flash_uf2(firmware_path, log)
         else:
-            time.sleep(1.0)  # give USB a moment to enumerate before picotool
+            time.sleep(2.0)  # give USB a moment to enumerate before picotool
             self._flash_bin(firmware_path, log)
 
         log(f"[flash:{side}] complete — waiting for reboot")
