@@ -32,3 +32,10 @@ qmk:
 ui:
   host: "0.0.0.0"
   port: 5000
+
+# GitHub Actions CI status indicator (optional)
+# The UI polls this repo every 60 s and shows a badge when a job is running,
+# so you know not to flash while CI is verifying.
+github:
+  repo: "thpoll83/qmk_firmware"
+  token: ""  # personal access token — required for private repos, higher rate limit

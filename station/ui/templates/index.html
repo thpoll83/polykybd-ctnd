@@ -13,6 +13,7 @@
       <span class="status-dot" id="status-dot"></span>
       <span id="status-text">idle</span>
     </span>
+    <span class="ci-badge" id="ci-badge" data-ci="unknown" title="GitHub Actions CI status">CI</span>
     <span class="clock" id="clock"></span>
   </header>
 
@@ -23,17 +24,25 @@
   <footer>
     <div class="firmware-row">
       <label>Left</label>
-      <select id="left-fw"><option value="">— select UF2 —</option></select>
+      <select id="left-fw"><option value="">— select firmware —</option></select>
       <label>Right</label>
-      <select id="right-fw"><option value="">— select UF2 —</option></select>
+      <select id="right-fw"><option value="">— select firmware —</option></select>
       <button class="btn btn-icon" onclick="refreshFirmware()" title="Refresh">&#x21BB;</button>
     </div>
     <div class="button-row">
       <button class="btn btn-blue"  id="btn-flash-left"  onclick="flashSide('left')">Flash Left</button>
       <button class="btn btn-blue"  id="btn-flash-right" onclick="flashSide('right')">Flash Right</button>
       <button class="btn btn-green" id="btn-run"         onclick="runTests()">Run Tests</button>
-      <button class="btn btn-gray" id="btn-copy"           onclick="copyLog()">Copy Log</button>
+      <button class="btn btn-gray"  id="btn-copy"        onclick="copyLog()">Copy Log</button>
       <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>
+    </div>
+    <div class="button-row button-row-util">
+      <button class="btn btn-sm btn-red"      id="btn-usb-left-off"  onclick="usbPower('left',  false)">L: USB Off</button>
+      <button class="btn btn-sm btn-dkgreen"  id="btn-usb-left-on"   onclick="usbPower('left',  true)">L: USB On</button>
+      <button class="btn btn-sm btn-gray"     id="btn-reset-left"    onclick="resetBoard('left')">L: Reset</button>
+      <button class="btn btn-sm btn-red"      id="btn-usb-right-off" onclick="usbPower('right', false)">R: USB Off</button>
+      <button class="btn btn-sm btn-dkgreen"  id="btn-usb-right-on"  onclick="usbPower('right', true)">R: USB On</button>
+      <button class="btn btn-sm btn-gray"     id="btn-reset-right"   onclick="resetBoard('right')">R: Reset</button>
     </div>
   </footer>
 

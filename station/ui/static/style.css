@@ -53,6 +53,21 @@ header {
   transition: background 0.4s;
 }
 
+.ci-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 4px 11px;
+  border-radius: 20px;
+  border: 1px solid #333;
+  transition: background 0.4s, color 0.4s;
+}
+
+.ci-badge[data-ci="unknown"] { background: #222;    color: #555;    border-color: #333; }
+.ci-badge[data-ci="idle"]    { background: #1a3320; color: #7ec87e; border-color: #2E7D32; }
+.ci-badge[data-ci="running"] { background: #4a2800; color: #FFB74D; border-color: #E65100;
+                                animation: pulse 1s infinite; }
+
 .clock {
   font-size: 13px;
   color: #666;
@@ -154,6 +169,15 @@ footer {
   background: #37474F;
   padding: 0;
 }
+
+.btn-red     { background: #7B1212; }
+.btn-red:hover:not(:disabled)     { background: #9C2020; }
+.btn-dkgreen { background: #1B4D1B; }
+.btn-dkgreen:hover:not(:disabled) { background: #27602A; }
+
+.btn-sm { height: 42px; font-size: 13px; }
+
+.button-row-util { margin-top: 8px; }
 
 /* ── Status colour theming ── */
 body[data-status="idle"]           .status-dot { background: #4CAF50; }

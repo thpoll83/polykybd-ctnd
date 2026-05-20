@@ -35,5 +35,9 @@ MASS_STORAGE_LABEL = _c["qmk"]["mass_storage_label"]
 UI_HOST = _c["ui"]["host"]
 UI_PORT = _c["ui"]["port"]
 
+# GitHub Actions CI status (optional)
+GITHUB_REPO  = _c.get("github", {}).get("repo", "")
+GITHUB_TOKEN = _c.get("github", {}).get("token", "")
+
 # Firmware directory (relative to repo root)
 FIRMWARE_DIR = str(_root / "firmware")
