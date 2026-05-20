@@ -51,6 +51,17 @@ function runTests() {
 
 function clearLog() { logEl.textContent = ''; }
 
+function copyLog() {
+  const text = logEl.textContent;
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById('btn-copy');
+    const prev = btn.textContent;
+    btn.textContent = '✓ Copied';
+    setTimeout(() => { btn.textContent = prev; }, 1500);
+  });
+}
+
 function refreshFirmware() {
   fetch('/firmware')
     .then(r => r.json())
