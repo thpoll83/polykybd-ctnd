@@ -180,6 +180,12 @@ footer {
 
 .btn-sm { height: 42px; font-size: 13px; }
 
+.btn-bootsel { border: 2px solid transparent; transition: background 0.2s, border-color 0.2s; }
+.btn-bootsel[data-state="released"] { background: #37474F; border-color: transparent; }
+.btn-bootsel[data-state="asserted"] { background: #4a2e00; border-color: #FF9800; }
+.btn-bootsel[data-state="released"]:hover:not(:disabled) { background: #455A64; }
+.btn-bootsel[data-state="asserted"]:hover:not(:disabled) { background: #5c3a00; }
+
 .button-row-util { margin-top: 8px; }
 
 /* ── Status colour theming ── */

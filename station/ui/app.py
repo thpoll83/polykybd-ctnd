@@ -16,9 +16,10 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "polykybd-ctnd"
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-_status   = {"value": "idle"}
-_ci_state = {"running": False, "url": None}
-_usb_state = {"left": None, "right": None}  # None = unknown, True/False = on/off
+_status         = {"value": "idle"}
+_ci_state       = {"running": False, "url": None}
+_usb_state      = {"left": None,  "right": None}   # None = unknown
+_bootsel_state  = {"left": False, "right": False}   # False = released (HIGH)
 
 
 def emit_log(msg: str) -> None:
@@ -72,7 +73,7 @@ def _query_usb_state_at_startup():
             fc.cleanup()
         socketio.emit("usb_state", dict(_usb_state))
     except Exception:
-        pass  # GPIO / uhubctl not available (e.g. dev machine) — stay as None
+        pass  # GPIO / uhubctl not available (e.g. dev machine)
 
 
 threading.Thread(target=_query_usb_state_at_startup, daemon=True).start()
@@ -98,8 +99,9 @@ def list_firmware():
 
 @socketio.on("connect")
 def on_connect(_auth=None):
-    socketio.emit("status", {"value": _status["value"]})
-    socketio.emit("usb_state", dict(_usb_state))
+    socketio.emit("status",        {"value": _status["value"]})
+    socketio.emit("usb_state",     dict(_usb_state))
+    socketio.emit("bootsel_state", dict(_bootsel_state))
     if GITHUB_REPO:
         socketio.emit("ci_status", dict(_ci_state))
 
@@ -149,6 +151,28 @@ def on_usb_power(data):
             socketio.emit("usb_state", dict(_usb_state))
         except Exception as exc:
             emit_log(f"[ui] USB error: {exc}")
+        finally:
+            fc.cleanup()
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+@socketio.on("bootsel")
+def on_bootsel(data):
+    side     = data.get("side")
+    asserted = data.get("asserted")
+    if side not in ("left", "right") or not isinstance(asserted, bool):
+        return
+
+    def _do():
+        from station.flash import FlashController
+        fc = FlashController()
+        try:
+            fc.set_bootsel(side, asserted, log=emit_log)
+            _bootsel_state[side] = asserted
+            socketio.emit("bootsel_state", dict(_bootsel_state))
+        except Exception as exc:
+            emit_log(f"[ui] BOOTSEL error: {exc}")
         finally:
             fc.cleanup()
 
@@ -209,6 +233,7 @@ def _on_sigterm(signum, frame):
             except Exception:
                 pass
         fc.cleanup()
+        FlashController.gpio_cleanup_final()
     except Exception:
         pass
     raise SystemExit(0)

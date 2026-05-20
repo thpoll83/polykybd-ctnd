@@ -7,8 +7,8 @@ const statusEl  = document.getElementById('status-text');
 const clockEl   = document.getElementById('clock');
 const actionBtns = [
   'btn-flash-left', 'btn-flash-right', 'btn-run',
-  'btn-usb-left', 'btn-reset-left',
-  'btn-usb-right', 'btn-reset-right',
+  'btn-usb-left',     'btn-bootsel-left',  'btn-reset-left',
+  'btn-usb-right',    'btn-bootsel-right', 'btn-reset-right',
 ].map(id => document.getElementById(id));
 
 /* ── Clock ── */
@@ -79,6 +79,23 @@ function copyLog() {
 socket.on('usb_state', state => {
   ['left', 'right'].forEach(side => updateUsbBtn(side, state[side]));
 });
+
+socket.on('bootsel_state', state => {
+  ['left', 'right'].forEach(side => updateBootselBtn(side, state[side]));
+});
+
+function updateBootselBtn(side, asserted) {
+  const btn = document.getElementById(`btn-bootsel-${side}`);
+  const prefix = side === 'left' ? 'L' : 'R';
+  btn.dataset.state = asserted ? 'asserted' : 'released';
+  btn.textContent   = asserted ? `${prefix}: BOOT ●` : `${prefix}: BOOTSEL`;
+}
+
+function toggleBootsel(side) {
+  const btn      = document.getElementById(`btn-bootsel-${side}`);
+  const asserted = btn.dataset.state !== 'asserted';
+  socket.emit('bootsel', { side, asserted });
+}
 
 function updateUsbBtn(side, state) {
   const btn = document.getElementById(`btn-usb-${side}`);

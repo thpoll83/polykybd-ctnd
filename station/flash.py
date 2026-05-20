@@ -18,12 +18,27 @@ _SIDES = {
     "right": (RIGHT_RUN_PIN, RIGHT_BOOTSEL_PIN, RIGHT_USB_PORT),
 }
 
+# Persist BOOTSEL pin state across FlashController instances so that
+# asserting BOOTSEL via the UI button survives subsequent reset/flash calls.
+_bootsel_asserted = {"left": False, "right": False}
+_gpio_ready = False
+
+
+def _ensure_gpio():
+    global _gpio_ready
+    if _gpio_ready:
+        return
+    GPIO.setmode(GPIO.BCM)
+    for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_BOOTSEL_PIN]:
+        GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
+    _gpio_ready = True
+
 
 class FlashController:
     def __init__(self):
-        GPIO.setmode(GPIO.BCM)
-        for pin in [LEFT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_RUN_PIN, RIGHT_BOOTSEL_PIN]:
-            GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
+        _ensure_gpio()
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _usb_power(self, port: int, on: bool) -> None:
         subprocess.run(
@@ -62,6 +77,8 @@ class FlashController:
             ) from exc
         subprocess.run(["sudo", "picotool", "reboot"], check=True, capture_output=True)
 
+    # ── Public API ────────────────────────────────────────────────────────────
+
     def flash(self, side: str, firmware_path: str, log=print) -> None:
         if side not in _SIDES:
             raise ValueError(f"Unknown side '{side}' — expected 'left' or 'right'")
@@ -71,14 +88,12 @@ class FlashController:
 
         run_pin, bootsel_pin, usb_port = _SIDES[side]
 
-        # Power off first so the device has no USB power at all.
         log(f"[flash:{side}] powering off USB port {usb_port}")
         self._usb_power(usb_port, False)
         time.sleep(0.5)
 
         # Assert BOOTSEL and toggle RUN while USB is still off.
-        # BOOTSEL must still be held when USB (and therefore board power)
-        # comes back — that is when the RP2040 samples the pin.
+        # BOOTSEL must still be held when USB (board power) comes back.
         log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
         GPIO.output(bootsel_pin, GPIO.LOW)
         time.sleep(0.05)
@@ -86,11 +101,11 @@ class FlashController:
         time.sleep(0.05)
         GPIO.output(run_pin, GPIO.HIGH)
 
-        # Power on with BOOTSEL still held → device boots into BOOTSEL mode.
         log(f"[flash:{side}] powering on USB port {usb_port}")
         self._usb_power(usb_port, True)
         time.sleep(0.2)
-        GPIO.output(bootsel_pin, GPIO.HIGH)  # release after boot has started
+        # Restore BOOTSEL to whatever the user has set, not necessarily released.
+        GPIO.output(bootsel_pin, GPIO.LOW if _bootsel_asserted[side] else GPIO.HIGH)
 
         if ext == ".uf2":
             log(f"[flash:{side}] waiting for mass storage")
@@ -101,6 +116,14 @@ class FlashController:
 
         log(f"[flash:{side}] complete — waiting for reboot")
         time.sleep(2.5)
+
+    def set_bootsel(self, side: str, asserted: bool, log=print) -> None:
+        if side not in _SIDES:
+            raise ValueError(f"Unknown side '{side}'")
+        _, bootsel_pin, _ = _SIDES[side]
+        _bootsel_asserted[side] = asserted
+        GPIO.output(bootsel_pin, GPIO.LOW if asserted else GPIO.HIGH)
+        log(f"[bootsel:{side}] BCM{bootsel_pin} → {'asserted (LOW)' if asserted else 'released (HIGH)'}")
 
     def usb_power(self, side: str, on: bool, log=print) -> None:
         if side not in _SIDES:
@@ -132,17 +155,26 @@ class FlashController:
         time.sleep(0.2)
         GPIO.output(run_pin, GPIO.HIGH)
         # Hold HIGH for 500 ms so the RP2040 is well into its boot sequence
-        # before GPIO.cleanup() releases the pin to a floating input.
+        # before the caller does anything else (e.g. GPIO cleanup).
         time.sleep(0.5)
         log(f"[reset:{side}] released RUN high (BCM{run_pin})")
 
     def cleanup(self) -> None:
-        # Drive all pins HIGH before switching to input so the RP2040's
-        # internal pull-ups don't have to fight any residual LOW drive
-        # from a previous operation.
-        for pin in [LEFT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_RUN_PIN, RIGHT_BOOTSEL_PIN]:
+        # Drive RUN pins HIGH; leave BOOTSEL at its tracked state.
+        # GPIO stays initialised for the service's lifetime — only
+        # gpio_cleanup_final() does the actual GPIO.cleanup().
+        for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN]:
             try:
                 GPIO.output(pin, GPIO.HIGH)
             except Exception:
                 pass
-        GPIO.cleanup()
+
+    @staticmethod
+    def gpio_cleanup_final() -> None:
+        """Release all GPIO — call only on service exit."""
+        global _gpio_ready
+        try:
+            GPIO.cleanup()
+        except Exception:
+            pass
+        _gpio_ready = False
