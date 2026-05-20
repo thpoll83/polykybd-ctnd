@@ -116,11 +116,11 @@ chmod +x scripts/setup.sh
 ```
 
 This will:
-- Install `uhubctl`, `libhidapi`, `chromium-browser`, Python 3 + venv
-- Add `pi` to the `gpio` and `plugdev` groups
+- Install `uhubctl`, `libhidapi`, `chromium` (or `chromium-browser` on older OS), Python 3 + venv
+- Add the current user to the `gpio` and `plugdev` groups
 - Install a udev rule for HID access without root
 - Copy the app to `/opt/polykybd-ctnd/` and create a venv
-- Install and enable the `polykybd-ctnd` and `polykybd-kiosk` systemd services
+- Install and enable the `polykybd-ctnd` and `polykybd-kiosk` systemd services with the correct username
 - Print instructions for registering the GitHub Actions runner
 
 ### 3. Update config
@@ -182,6 +182,104 @@ Copy any `.uf2` file into `/opt/polykybd-ctnd/firmware/` — the UI picks it up 
 
 Copy `.github/workflows/qmk-test.yml` from this repo into `thpoll83/qmk_firmware/.github/workflows/`.
 The workflow builds both halves on a cloud runner, uploads the UF2 artifacts, then runs the HIL test job on the `polykybd-ctnd` self-hosted runner.
+
+---
+
+## Troubleshooting
+
+### Port 5000 not reachable after reboot
+
+**Check if the service is running:**
+
+```bash
+sudo systemctl status polykybd-ctnd.service
+```
+
+If it shows `could not be found` the service was never installed — `setup.sh` did not complete successfully. Re-run it from the repo root (see below).
+
+If it shows `failed`, inspect the logs:
+
+```bash
+sudo journalctl -u polykybd-ctnd -n 50
+```
+
+**Check whether anything is listening on port 5000:**
+
+```bash
+ss -tlnp | grep 5000
+```
+
+No output means the process is not running. If it shows `0.0.0.0:5000` the service is up; check your firewall (see below).
+
+**Test locally on the Pi first:**
+
+```bash
+curl http://localhost:5000
+```
+
+If this works but a remote browser cannot connect, a firewall is blocking the port:
+
+```bash
+sudo ufw status
+sudo ufw allow 5000/tcp
+```
+
+---
+
+### `setup.sh` fails — `chromium-browser` not found
+
+Raspberry Pi OS **Bookworm** (Debian 12) renamed the package to `chromium`. The current `setup.sh` detects this automatically. If you are on an older version of the script, update first:
+
+```bash
+git pull
+./scripts/setup.sh
+```
+
+---
+
+### `setup.sh` must be run from the repository root
+
+The script copies the current directory into `/opt/polykybd-ctnd/`. Running it from the wrong location installs an empty or incorrect tree and the service will fail to start.
+
+Always run it as:
+
+```bash
+cd ~/polykybd-ctnd   # the cloned repo root
+chmod +x scripts/setup.sh
+./scripts/setup.sh
+```
+
+---
+
+### Service installed but failing — wrong username
+
+The systemd service file contains a `User=` entry set at install time by `setup.sh`. If the service was installed while logged in as a different user, the unit may reference the wrong account.
+
+Reinstall the service units for the current user without re-running the full setup:
+
+```bash
+cd ~/polykybd-ctnd
+CTND_USER="${SUDO_USER:-$USER}"
+CTND_HOME=$(getent passwd "$CTND_USER" | cut -d: -f6)
+
+sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g" \
+  systemd/polykybd-ctnd.service | sudo tee /etc/systemd/system/polykybd-ctnd.service > /dev/null
+
+sudo systemctl daemon-reload
+sudo systemctl restart polykybd-ctnd.service
+```
+
+---
+
+### Updating after a code change
+
+Pull the latest changes and restart the service — no reboot needed:
+
+```bash
+git -C /opt/polykybd-ctnd pull
+sudo systemctl restart polykybd-ctnd.service
+sudo systemctl status polykybd-ctnd.service
+```
 
 ---
 
