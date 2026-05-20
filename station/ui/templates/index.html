@@ -37,12 +37,10 @@
       <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>
     </div>
     <div class="button-row button-row-util">
-      <button class="btn btn-sm btn-red"      id="btn-usb-left-off"  onclick="usbPower('left',  false)">L: USB Off</button>
-      <button class="btn btn-sm btn-dkgreen"  id="btn-usb-left-on"   onclick="usbPower('left',  true)">L: USB On</button>
-      <button class="btn btn-sm btn-gray"     id="btn-reset-left"    onclick="resetBoard('left')">L: Reset</button>
-      <button class="btn btn-sm btn-red"      id="btn-usb-right-off" onclick="usbPower('right', false)">R: USB Off</button>
-      <button class="btn btn-sm btn-dkgreen"  id="btn-usb-right-on"  onclick="usbPower('right', true)">R: USB On</button>
-      <button class="btn btn-sm btn-gray"     id="btn-reset-right"   onclick="resetBoard('right')">R: Reset</button>
+      <button class="btn btn-sm btn-usb" id="btn-usb-left"  data-state="unknown" onclick="toggleUsb('left')">L: USB ?</button>
+      <button class="btn btn-sm btn-gray" id="btn-reset-left"  onclick="resetBoard('left')">L: Reset</button>
+      <button class="btn btn-sm btn-usb" id="btn-usb-right" data-state="unknown" onclick="toggleUsb('right')">R: USB ?</button>
+      <button class="btn btn-sm btn-gray" id="btn-reset-right" onclick="resetBoard('right')">R: Reset</button>
     </div>
   </footer>
 

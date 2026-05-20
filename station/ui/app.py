@@ -17,6 +17,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 _status   = {"value": "idle"}
 _ci_state = {"running": False, "url": None}
+_usb_state = {"left": None, "right": None}  # None = unknown, True/False = on/off
 
 
 def emit_log(msg: str) -> None:
@@ -78,6 +79,7 @@ def list_firmware():
 @socketio.on("connect")
 def on_connect(_auth=None):
     socketio.emit("status", {"value": _status["value"]})
+    socketio.emit("usb_state", dict(_usb_state))
     if GITHUB_REPO:
         socketio.emit("ci_status", dict(_ci_state))
 
@@ -123,6 +125,8 @@ def on_usb_power(data):
         fc = FlashController()
         try:
             fc.usb_power(side, on, log=emit_log)
+            _usb_state[side] = on
+            socketio.emit("usb_state", dict(_usb_state))
         except Exception as exc:
             emit_log(f"[ui] USB error: {exc}")
         finally:

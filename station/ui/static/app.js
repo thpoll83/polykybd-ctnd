@@ -7,8 +7,8 @@ const statusEl  = document.getElementById('status-text');
 const clockEl   = document.getElementById('clock');
 const actionBtns = [
   'btn-flash-left', 'btn-flash-right', 'btn-run',
-  'btn-usb-left-off', 'btn-usb-left-on', 'btn-reset-left',
-  'btn-usb-right-off', 'btn-usb-right-on', 'btn-reset-right',
+  'btn-usb-left', 'btn-reset-left',
+  'btn-usb-right', 'btn-reset-right',
 ].map(id => document.getElementById(id));
 
 /* ── Clock ── */
@@ -76,7 +76,21 @@ function copyLog() {
 }
 
 /* ── Utility actions ── */
-function usbPower(side, on) {
+socket.on('usb_state', state => {
+  ['left', 'right'].forEach(side => updateUsbBtn(side, state[side]));
+});
+
+function updateUsbBtn(side, state) {
+  const btn = document.getElementById(`btn-usb-${side}`);
+  const prefix = side === 'left' ? 'L' : 'R';
+  if (state === true)       { btn.dataset.state = 'on';      btn.textContent = `${prefix}: USB ON`;  }
+  else if (state === false) { btn.dataset.state = 'off';     btn.textContent = `${prefix}: USB OFF`; }
+  else                      { btn.dataset.state = 'unknown'; btn.textContent = `${prefix}: USB ?`;   }
+}
+
+function toggleUsb(side) {
+  const btn = document.getElementById(`btn-usb-${side}`);
+  const on = btn.dataset.state !== 'on';  // unknown → treat as off → turn on
   socket.emit('usb_power', { side, on });
 }
 

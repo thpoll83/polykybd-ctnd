@@ -170,10 +170,13 @@ footer {
   padding: 0;
 }
 
-.btn-red     { background: #7B1212; }
-.btn-red:hover:not(:disabled)     { background: #9C2020; }
-.btn-dkgreen { background: #1B4D1B; }
-.btn-dkgreen:hover:not(:disabled) { background: #27602A; }
+.btn-usb { border: 2px solid transparent; transition: background 0.2s, border-color 0.2s; }
+.btn-usb[data-state="on"]      { background: #1B4D1B; border-color: #4CAF50; }
+.btn-usb[data-state="off"]     { background: #7B1212; border-color: #e53935; }
+.btn-usb[data-state="unknown"] { background: #37474F; border-color: transparent; }
+.btn-usb[data-state="on"]:hover:not(:disabled)      { background: #27602A; }
+.btn-usb[data-state="off"]:hover:not(:disabled)     { background: #9C2020; }
+.btn-usb[data-state="unknown"]:hover:not(:disabled) { background: #455A64; }
 
 .btn-sm { height: 42px; font-size: 13px; }
 
