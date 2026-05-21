@@ -149,15 +149,28 @@ class FlashController:
     def reset(self, side: str, log=print) -> None:
         if side not in _SIDES:
             raise ValueError(f"Unknown side '{side}'")
-        run_pin, _, _ = _SIDES[side]
+        run_pin, _, usb_port = _SIDES[side]
+
+        # Cut USB data first so the host fully processes the disconnect before
+        # the board comes back up — prevents a half-broken HID re-enumeration.
+        log(f"[reset:{side}] cutting USB data (port {usb_port})")
+        self._usb_power(usb_port, False)
+        time.sleep(0.3)
+
         log(f"[reset:{side}] asserting RUN low (BCM{run_pin})")
         GPIO.output(run_pin, GPIO.LOW)
-        time.sleep(0.2)
-        GPIO.output(run_pin, GPIO.HIGH)
-        # Hold HIGH for 500 ms so the RP2040 is well into its boot sequence
-        # before the caller does anything else (e.g. GPIO cleanup).
-        time.sleep(0.5)
-        log(f"[reset:{side}] released RUN high (BCM{run_pin})")
+        time.sleep(0.3)
+        # Open-drain release: let the pull-up bring RUN HIGH smoothly.
+        GPIO.setup(run_pin, GPIO.IN)
+        time.sleep(0.8)  # board boots while USB is still gated
+
+        log(f"[reset:{side}] restoring USB data (port {usb_port})")
+        self._usb_power(usb_port, True)
+        time.sleep(1.5)  # allow clean re-enumeration
+
+        # Re-arm pin as output for subsequent operations.
+        GPIO.setup(run_pin, GPIO.OUT, initial=GPIO.HIGH)
+        log(f"[reset:{side}] done")
 
     def cleanup(self) -> None:
         # Drive RUN pins HIGH; leave BOOTSEL at its tracked state.
