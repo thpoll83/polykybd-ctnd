@@ -98,7 +98,7 @@ RPi GPIO ──[2.2 kΩ]──── Base    BC337 / 2N3904
 | Collector resistor | 330 Ω | Limits collector current when transistor is on |
 | Transistor | BC337 or 2N3904 | NPN BJT switch |
 
-Confirmed working with a BC337 and the existing `flash.py` code without any software changes.
+**Pinout note:** The article was designed for the 2N3904 (flat-face pin order: E-B-C). The BC337 has a different flat-face pin order (E-C-B), so Base and Collector are swapped when used as a drop-in. This inverts the circuit's logic — cancelling the original GPIO-HIGH=reset behaviour and producing GPIO-LOW=reset instead — which matches the existing `flash.py` code exactly. Confirmed working with a BC337 without any software changes.
 
 ### RP2040 pad locations
 
