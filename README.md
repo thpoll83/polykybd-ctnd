@@ -74,6 +74,35 @@ Pins 11–16 are a tight cluster on the header — all six connections (4 signal
      GND (39) ○ ○ (40) GPIO21
 ```
 
+### RUN pin driver circuit (recommended)
+
+Driving the RP2040 RUN pad directly from an RPi4 GPIO pin can cause unreliable resets due to drive-strength and signal-integrity issues on the wire.
+A simple NPN transistor circuit (originally described for [resetting a Raspberry Pi from a microcontroller](https://novamostra.com/2025/01/27/reset-raspberry-pi-using-a-raspberry-pico-or-arduino-microcontroller/)) was tested with a **BC337** (pin-compatible drop-in for the article's 2N3904) and works reliably.
+
+```
+RPi 3.3V ──[10 kΩ]──┬───────────── RUN pad (RP2040)
+                     │                    │
+                     │               [330 Ω]
+                     │                    │
+                     │               Collector
+RPi GPIO ──[2.2 kΩ]──── Base    BC337 / 2N3904
+                             Emitter
+                                │
+                               GND
+```
+
+| Component | Value | Purpose |
+|---|---|---|
+| Base resistor | 2.2 kΩ | Sets base current (~1.2 mA at 3.3 V logic) |
+| Pull-up resistor | 10 kΩ | Holds RUN HIGH when transistor is off |
+| Collector resistor | 330 Ω | Limits collector current when transistor is on |
+| Transistor | BC337 or 2N3904 | NPN BJT switch |
+
+**Logic is inverted:** GPIO **HIGH** turns the transistor on, pulling RUN LOW (reset).
+GPIO **LOW** (or input/floating) turns the transistor off; the 10 kΩ pull-up holds RUN HIGH (running).
+
+Because this inverts the polarity, `flash.py` drives the RUN pin **HIGH** to assert reset and **LOW** (or switches to input) to release — opposite to a direct-GPIO connection.
+
 ### RP2040 pad locations
 
 | Pad | Description | Behaviour |
