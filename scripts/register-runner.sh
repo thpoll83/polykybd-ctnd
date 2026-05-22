@@ -66,14 +66,16 @@ echo ""
 
 cd "$RUNNER_DIR"
 
-# ── Stop the service if running ───────────────────────────────────────────────
-SERVICE_NAME=$(ls /etc/systemd/system/actions.runner.*.service 2>/dev/null | head -1 | xargs basename 2>/dev/null || true)
-if [[ -n "$SERVICE_NAME" ]]; then
-    echo "Stopping service $SERVICE_NAME …"
-    sudo systemctl stop "$SERVICE_NAME" || true
+# ── Stop and uninstall the service (must happen before config.sh remove) ─────
+# svc.sh requires: stop → uninstall → config.sh remove, in that order.
+if [[ -f ".svc" ]]; then
+    echo "Stopping service …"
+    sudo ./svc.sh stop      2>/dev/null || true
+    echo "Uninstalling service …"
+    sudo ./svc.sh uninstall 2>/dev/null || true
 fi
 
-# ── Remove old registration (best-effort — already gone on GitHub's side) ─────
+# ── Remove old registration (best-effort — may already be gone on GitHub) ────
 if [[ -f ".runner" ]]; then
     echo "Removing stale runner config …"
     ./config.sh remove --token "$TOKEN" 2>/dev/null || true
