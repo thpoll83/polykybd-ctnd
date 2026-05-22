@@ -29,7 +29,12 @@ def _ensure_gpio():
     if _gpio_ready:
         return
     GPIO.setmode(GPIO.BCM)
-    for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_BOOTSEL_PIN]:
+    # RUN pins go through an NPN transistor (BC337): GPIO HIGH = transistor ON = RUN LOW = reset.
+    # Idle state is LOW (transistor OFF, pull-up holds RUN HIGH, boards running).
+    for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN]:
+        GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
+    # BOOTSEL pins are direct GPIO (no transistor): LOW = asserted, HIGH = released.
+    for pin in [LEFT_BOOTSEL_PIN, RIGHT_BOOTSEL_PIN]:
         GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
     _gpio_ready = True
 
@@ -92,14 +97,14 @@ class FlashController:
         self._usb_power(usb_port, False)
         time.sleep(0.5)
 
-        # Assert BOOTSEL and toggle RUN while USB is still off.
-        # BOOTSEL must still be held when USB (board power) comes back.
+        # Assert BOOTSEL then pulse RUN: HIGH=reset via transistor, LOW=release.
+        # BOOTSEL must still be held when RUN releases so the board boots into BOOTSEL mode.
         log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
         GPIO.output(bootsel_pin, GPIO.LOW)
         time.sleep(0.05)
-        GPIO.output(run_pin, GPIO.LOW)
+        GPIO.output(run_pin, GPIO.HIGH)   # assert reset (transistor ON → RUN LOW)
         time.sleep(0.05)
-        GPIO.output(run_pin, GPIO.HIGH)
+        GPIO.output(run_pin, GPIO.LOW)    # release reset (transistor OFF → RUN HIGH → boot into BOOTSEL)
 
         log(f"[flash:{side}] powering on USB port {usb_port}")
         self._usb_power(usb_port, True)
@@ -157,28 +162,25 @@ class FlashController:
         self._usb_power(usb_port, False)
         time.sleep(0.3)
 
-        log(f"[reset:{side}] asserting RUN low (BCM{run_pin})")
-        GPIO.output(run_pin, GPIO.LOW)
+        log(f"[reset:{side}] asserting reset (BCM{run_pin} HIGH → transistor ON → RUN LOW)")
+        GPIO.output(run_pin, GPIO.HIGH)
         time.sleep(0.3)
-        # Open-drain release: let the pull-up bring RUN HIGH smoothly.
-        GPIO.setup(run_pin, GPIO.IN)
+        log(f"[reset:{side}] releasing reset (BCM{run_pin} LOW → transistor OFF → RUN HIGH)")
+        GPIO.output(run_pin, GPIO.LOW)
         time.sleep(0.8)  # board boots while USB is still gated
 
         log(f"[reset:{side}] restoring USB data (port {usb_port})")
         self._usb_power(usb_port, True)
         time.sleep(1.5)  # allow clean re-enumeration
-
-        # Re-arm pin as output for subsequent operations.
-        GPIO.setup(run_pin, GPIO.OUT, initial=GPIO.HIGH)
         log(f"[reset:{side}] done")
 
     def cleanup(self) -> None:
-        # Drive RUN pins HIGH; leave BOOTSEL at its tracked state.
+        # Drive RUN pins LOW: transistor OFF, boards free to run.
         # GPIO stays initialised for the service's lifetime — only
         # gpio_cleanup_final() does the actual GPIO.cleanup().
         for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN]:
             try:
-                GPIO.output(pin, GPIO.HIGH)
+                GPIO.output(pin, GPIO.LOW)
             except Exception:
                 pass
 

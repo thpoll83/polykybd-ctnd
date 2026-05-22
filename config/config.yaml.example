@@ -19,13 +19,13 @@ usb:
 # QMK HID identifiers
 # Find these in keyboards/polykbd/config.h in qmk_firmware
 qmk:
-  vendor_id:  0x4B50  # update with actual value
-  product_id: 0x0001  # update with actual value
+  vendor_id:  0x2021  # PolyFabriq PolyKybd Split72
+  product_id: 0x2007
   # HID usage pages (QMK standard defaults — only change if your firmware differs)
   console_usage_page: 0xFF31
   console_usage:      0x0074
-  raw_usage_page:     0xFF60
-  raw_usage:          0x0061
+  raw_usage_page:     0xFF61  # from RAW_USAGE_PAGE in split72/config.h
+  raw_usage:          0x0062  # from RAW_USAGE_ID in split72/config.h
   mass_storage_label: "RPI-RP2"
 
 # Web UI

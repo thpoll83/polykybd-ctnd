@@ -53,7 +53,7 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 
 - **uhubctl per-port power switching** is used instead of a debug probe. The RPi4's own USB controller supports per-port power control natively (no external hub needed). This also doubles as a manual flash station for new boards.
 - **GPIO pins** (BCM 17/18 for left, 22/23 for right) drive the RUN and BOOTSEL pads on the PCB via 100 Ω series resistors. Pads are exposed on the assembled boards since no key switches are fitted.
-- **MASTER_LEFT** must be set in QMK `config.h` because both halves are USB-connected to the RPi simultaneously. `SPLIT_USB_DETECT` would be ambiguous.
+- **EE_HANDS** is used in the firmware (side stored in EEPROM). Because both halves are USB-connected to the RPi simultaneously, `SPLIT_USB_DETECT` would be ambiguous. The EEPROM side marker must be set once on each half (e.g. via QMK Toolbox or a keymap combo) before the first HIL run; it survives subsequent UF2 reflashes so this is a one-time step.
 - **Flask-SocketIO** (threading mode) is used for the web UI so log lines stream to the browser in real time without polling.
 - **Right half is flashed first** in `test_runner.py` because it communicates via the PIO UART split cable, not USB HID, so a brief USB reboot on the right half doesn't disrupt the test HID path.
 
