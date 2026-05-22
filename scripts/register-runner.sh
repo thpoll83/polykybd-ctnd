@@ -66,8 +66,7 @@ echo ""
 
 cd "$RUNNER_DIR"
 
-# ── Stop and uninstall the service (must happen before config.sh remove) ─────
-# svc.sh requires: stop → uninstall → config.sh remove, in that order.
+# ── Stop and uninstall the service ───────────────────────────────────────────
 if [[ -f ".svc" ]]; then
     echo "Stopping service …"
     sudo ./svc.sh stop      2>/dev/null || true
@@ -75,10 +74,12 @@ if [[ -f ".svc" ]]; then
     sudo ./svc.sh uninstall 2>/dev/null || true
 fi
 
-# ── Remove old registration (best-effort — may already be gone on GitHub) ────
+# ── Wipe stale runner credentials ────────────────────────────────────────────
+# config.sh remove can fail if the server-side registration is already gone.
+# Deleting these three files is equivalent to what config.sh remove does locally.
 if [[ -f ".runner" ]]; then
-    echo "Removing stale runner config …"
-    ./config.sh remove --token "$TOKEN" 2>/dev/null || true
+    echo "Removing stale runner credentials …"
+    rm -f .runner .credentials .credentials_rsaparams
 fi
 
 # ── Re-register ───────────────────────────────────────────────────────────────
