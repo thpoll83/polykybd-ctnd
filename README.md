@@ -98,10 +98,7 @@ RPi GPIO ──[2.2 kΩ]──── Base    BC337 / 2N3904
 | Collector resistor | 330 Ω | Limits collector current when transistor is on |
 | Transistor | BC337 or 2N3904 | NPN BJT switch |
 
-**Logic is inverted:** GPIO **HIGH** turns the transistor on, pulling RUN LOW (reset).
-GPIO **LOW** (or input/floating) turns the transistor off; the 10 kΩ pull-up holds RUN HIGH (running).
-
-Because this inverts the polarity, `flash.py` drives the RUN pin **HIGH** to assert reset and **LOW** (or switches to input) to release — opposite to a direct-GPIO connection.
+Confirmed working with a BC337 and the existing `flash.py` code without any software changes.
 
 ### RP2040 pad locations
 
