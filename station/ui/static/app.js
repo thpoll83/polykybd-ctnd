@@ -115,6 +115,18 @@ function resetBoard(side) {
   socket.emit('reset_board', { side });
 }
 
+function openMore()  {
+  document.getElementById('main-controls').hidden = true;
+  document.getElementById('more-panel').hidden = false;
+}
+
+function closeMore() {
+  document.getElementById('more-panel').hidden = true;
+  document.getElementById('main-controls').hidden = false;
+}
+
+function quitApp() { window.close(); }
+
 function refreshFirmware() {
   fetch('/firmware')
     .then(r => r.json())
