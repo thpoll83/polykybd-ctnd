@@ -315,6 +315,42 @@ sudo systemctl restart polykybd-ctnd.service
 
 ---
 
+### GitHub Actions runner: registration deleted / "waiting for a runner"
+
+If the CI job sits at **"Waiting for a runner to pick up this job..."** and the runner service log shows:
+
+```
+Failed to create a session. The runner registration has been deleted from the server
+```
+
+The runner registration token has expired or was removed from GitHub. Re-register with the helper script:
+
+```bash
+# 1. Get a fresh token from:
+#    https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new
+#    → Linux / ARM64 → copy the --token value
+
+sudo git -C /opt/polykybd-ctnd pull
+cd /opt/polykybd-ctnd
+./scripts/register-runner.sh --token <PASTE_TOKEN_HERE>
+```
+
+The script handles the full teardown sequence (stop → uninstall → wipe credentials → re-configure → install → start) and prints the final service status.
+
+**Manual equivalent** (if the script is unavailable):
+```bash
+cd ~/actions-runner
+sudo ./svc.sh stop
+sudo ./svc.sh uninstall
+rm -f .runner .credentials .credentials_rsaparams
+./config.sh --url https://github.com/thpoll83/qmk_firmware \
+            --token <TOKEN> --name RP4-HIL --labels polykybd-ctnd --unattended
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+---
+
 ### Updating after a code change
 
 `/opt/polykybd-ctnd` is a git clone, so pull and restart — no reboot or re-copy needed:
@@ -350,8 +386,9 @@ polykybd-ctnd/
 │   ├── polykybd-ctnd.service    Station daemon
 │   └── polykybd-kiosk.service   Chromium kiosk
 ├── scripts/
-│   ├── setup.sh           One-shot RPi setup
-│   └── kiosk.sh           Manual kiosk launch
+│   ├── setup.sh              One-shot RPi setup
+│   ├── register-runner.sh    Re-register the GitHub Actions self-hosted runner
+│   └── kiosk.sh              Manual kiosk launch
 └── .github/workflows/
     └── qmk-test.yml       Example CI workflow (copy to qmk_firmware)
 ```
