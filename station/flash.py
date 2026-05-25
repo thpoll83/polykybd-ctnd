@@ -33,9 +33,11 @@ def _ensure_gpio():
     # Idle state is LOW (transistor OFF, pull-up holds RUN HIGH, boards running).
     for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN]:
         GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
-    # BOOTSEL pins are direct GPIO (no transistor): LOW = asserted, HIGH = released.
+    # BOOTSEL pins also go through an NPN transistor (same circuit as RUN):
+    # GPIO HIGH = transistor ON = BOOTSEL LOW = button pressed.
+    # Idle state is LOW (transistor OFF, internal pull-up holds BOOTSEL HIGH = released).
     for pin in [LEFT_BOOTSEL_PIN, RIGHT_BOOTSEL_PIN]:
-        GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
+        GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
     _gpio_ready = True
 
 
@@ -100,17 +102,17 @@ class FlashController:
         # Assert BOOTSEL then pulse RUN: HIGH=reset via transistor, LOW=release.
         # BOOTSEL must still be held when RUN releases so the board boots into BOOTSEL mode.
         log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
-        GPIO.output(bootsel_pin, GPIO.LOW)
+        GPIO.output(bootsel_pin, GPIO.HIGH)  # transistor ON → BOOTSEL LOW → button pressed
         time.sleep(0.05)
-        GPIO.output(run_pin, GPIO.HIGH)   # assert reset (transistor ON → RUN LOW)
+        GPIO.output(run_pin, GPIO.HIGH)      # assert reset (transistor ON → RUN LOW)
         time.sleep(0.05)
-        GPIO.output(run_pin, GPIO.LOW)    # release reset (transistor OFF → RUN HIGH → boot into BOOTSEL)
+        GPIO.output(run_pin, GPIO.LOW)       # release reset → board boots with BOOTSEL held
 
         log(f"[flash:{side}] powering on USB port {usb_port}")
         self._usb_power(usb_port, True)
         time.sleep(0.2)
         # Restore BOOTSEL to whatever the user has set, not necessarily released.
-        GPIO.output(bootsel_pin, GPIO.LOW if _bootsel_asserted[side] else GPIO.HIGH)
+        GPIO.output(bootsel_pin, GPIO.HIGH if _bootsel_asserted[side] else GPIO.LOW)
 
         if ext == ".uf2":
             log(f"[flash:{side}] waiting for mass storage")
@@ -127,8 +129,8 @@ class FlashController:
             raise ValueError(f"Unknown side '{side}'")
         _, bootsel_pin, _ = _SIDES[side]
         _bootsel_asserted[side] = asserted
-        GPIO.output(bootsel_pin, GPIO.LOW if asserted else GPIO.HIGH)
-        log(f"[bootsel:{side}] BCM{bootsel_pin} → {'asserted (LOW)' if asserted else 'released (HIGH)'}")
+        GPIO.output(bootsel_pin, GPIO.HIGH if asserted else GPIO.LOW)
+        log(f"[bootsel:{side}] BCM{bootsel_pin} → {'HIGH (transistor ON → BOOTSEL asserted)' if asserted else 'LOW (transistor OFF → BOOTSEL released)'}")
 
     def usb_power(self, side: str, on: bool, log=print) -> None:
         if side not in _SIDES:

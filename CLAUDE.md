@@ -62,7 +62,8 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 - **VID/PID**: `0x2021:0x2007` (PolyFabriq PolyKybd Split72) — in `config/config.yaml`
 - **Raw HID usage**: `RAW_USAGE_PAGE 0xFF61`, `RAW_USAGE_ID 0x62` — from `split72/config.h`
 - **RUN pin circuit**: NPN transistor (BC337 / 2N3904 TO-92 E-B-C) — GPIO HIGH → transistor ON → RUN LOW → reset. Idle is GPIO LOW. See README for full schematic.
-- **GPIO logic**: HIGH = assert reset, LOW = idle/running (inverted vs direct-drive; transistor provides the inversion)
+- **BOOTSEL pin circuit**: Same NPN transistor circuit as RUN — GPIO HIGH → transistor ON → BOOTSEL LOW → button pressed. Idle is GPIO LOW (released).
+- **GPIO logic**: HIGH = assert (reset or BOOTSEL), LOW = idle/released. Both RUN and BOOTSEL use inverted logic via the transistor.
 - **EE_HANDS**: firmware stores master/slave side in EEPROM (`#define EE_HANDS` in `split72/config.h`). Must be set once per half before first HIL run; survives all UF2 reflashes.
 - **CI workflow**: `.github/workflows/qmk-test.yml` is live in `thpoll83/qmk_firmware` on the `PolyKeyboard` branch.
 
