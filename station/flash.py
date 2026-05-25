@@ -99,27 +99,30 @@ class FlashController:
         self._usb_power(usb_port, False)
         time.sleep(0.5)
 
-        # Assert BOOTSEL then pulse RUN: HIGH=reset via transistor, LOW=release.
-        # BOOTSEL must still be held when RUN releases so the board boots into BOOTSEL mode.
+        # Correct RP2040 BOOTSEL entry sequence (both pins via NPN transistor):
+        #   1. Assert RESET first (RUN LOW)
+        #   2. Assert BOOTSEL while RESET is held
+        #   3. Release RESET — board starts booting with BOOTSEL held → enters BOOTSEL mode
+        #   4. Release BOOTSEL after enumeration
         log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
-        GPIO.output(bootsel_pin, GPIO.HIGH)  # transistor ON → BOOTSEL LOW → button pressed
+        GPIO.output(run_pin, GPIO.HIGH)      # 1. transistor ON → RUN LOW → reset asserted
         time.sleep(0.05)
-        GPIO.output(run_pin, GPIO.HIGH)      # assert reset (transistor ON → RUN LOW)
+        GPIO.output(bootsel_pin, GPIO.HIGH)  # 2. transistor ON → BOOTSEL LOW → button pressed
         time.sleep(0.05)
-        GPIO.output(run_pin, GPIO.LOW)       # release reset → board boots with BOOTSEL held
+        GPIO.output(run_pin, GPIO.LOW)       # 3. transistor OFF → RUN HIGH → board boots into BOOTSEL mode
 
         log(f"[flash:{side}] powering on USB port {usb_port}")
         self._usb_power(usb_port, True)
-        time.sleep(0.2)
-        # Restore BOOTSEL to whatever the user has set, not necessarily released.
+        time.sleep(2.0)  # hold BOOTSEL until the board has fully enumerated
+
+        # 4. Restore BOOTSEL to whatever the user has set, not necessarily released.
         GPIO.output(bootsel_pin, GPIO.HIGH if _bootsel_asserted[side] else GPIO.LOW)
 
         if ext == ".uf2":
             log(f"[flash:{side}] waiting for mass storage")
             self._flash_uf2(firmware_path, log)
         else:
-            time.sleep(1.8)  # wait for USB enumeration (2 s total with the 0.2 s above)
-            self._flash_bin(firmware_path, log)
+            self._flash_bin(firmware_path, log)  # 2 s hold above covers USB enumeration
 
         log(f"[flash:{side}] complete — waiting for reboot")
         time.sleep(2.5)
