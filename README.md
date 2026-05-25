@@ -74,6 +74,32 @@ Pins 11–16 are a tight cluster on the header — all six connections (4 signal
      GND (39) ○ ○ (40) GPIO21
 ```
 
+### RUN pin driver circuit (recommended)
+
+Driving the RP2040 RUN pad directly from an RPi4 GPIO pin can cause unreliable resets due to drive-strength and signal-integrity issues on the wire.
+A simple NPN transistor circuit (originally described for [resetting a Raspberry Pi from a microcontroller](https://novamostra.com/2025/01/27/reset-raspberry-pi-using-a-raspberry-pico-or-arduino-microcontroller/)) was tested with a **BC337** (pin-compatible drop-in for the article's 2N3904) and works reliably.
+
+```
+RPi 3.3V ──[10 kΩ]──┬───────────── RUN pad (RP2040)
+                     │                    │
+                     │               [330 Ω]
+                     │                    │
+                     │               Collector
+RPi GPIO ──[2.2 kΩ]──── Base    BC337 / 2N3904
+                             Emitter
+                                │
+                               GND
+```
+
+| Component | Value | Purpose |
+|---|---|---|
+| Base resistor | 2.2 kΩ | Sets base current (~1.2 mA at 3.3 V logic) |
+| Pull-up resistor | 10 kΩ | Holds RUN HIGH when transistor is off |
+| Collector resistor | 330 Ω | Limits collector current when transistor is on |
+| Transistor | BC337 or 2N3904 | NPN BJT switch |
+
+The BC337 is pin-compatible with the 2N3904 in TO-92 packages with pin order E-B-C. Confirmed working with a BC337 and the existing `flash.py` code without any software changes.
+
 ### RP2040 pad locations
 
 | Pad | Description | Behaviour |
@@ -289,6 +315,42 @@ sudo systemctl restart polykybd-ctnd.service
 
 ---
 
+### GitHub Actions runner: registration deleted / "waiting for a runner"
+
+If the CI job sits at **"Waiting for a runner to pick up this job..."** and the runner service log shows:
+
+```
+Failed to create a session. The runner registration has been deleted from the server
+```
+
+The runner registration token has expired or was removed from GitHub. Re-register with the helper script:
+
+```bash
+# 1. Get a fresh token from:
+#    https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new
+#    → Linux / ARM64 → copy the --token value
+
+sudo git -C /opt/polykybd-ctnd pull
+cd /opt/polykybd-ctnd
+./scripts/register-runner.sh --token <PASTE_TOKEN_HERE>
+```
+
+The script handles the full teardown sequence (stop → uninstall → wipe credentials → re-configure → install → start) and prints the final service status.
+
+**Manual equivalent** (if the script is unavailable):
+```bash
+cd ~/actions-runner
+sudo ./svc.sh stop
+sudo ./svc.sh uninstall
+rm -f .runner .credentials .credentials_rsaparams
+./config.sh --url https://github.com/thpoll83/qmk_firmware \
+            --token <TOKEN> --name RP4-HIL --labels polykybd-ctnd --unattended
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+---
+
 ### Updating after a code change
 
 `/opt/polykybd-ctnd` is a git clone, so pull and restart — no reboot or re-copy needed:
@@ -324,8 +386,9 @@ polykybd-ctnd/
 │   ├── polykybd-ctnd.service    Station daemon
 │   └── polykybd-kiosk.service   Chromium kiosk
 ├── scripts/
-│   ├── setup.sh           One-shot RPi setup
-│   └── kiosk.sh           Manual kiosk launch
+│   ├── setup.sh              One-shot RPi setup
+│   ├── register-runner.sh    Re-register the GitHub Actions self-hosted runner
+│   └── kiosk.sh              Manual kiosk launch
 └── .github/workflows/
     └── qmk-test.yml       Example CI workflow (copy to qmk_firmware)
 ```

@@ -22,27 +22,37 @@
   </main>
 
   <footer>
-    <div class="firmware-row">
-      <label>Left</label>
-      <select id="left-fw"><option value="">— select firmware —</option></select>
-      <label>Right</label>
-      <select id="right-fw"><option value="">— select firmware —</option></select>
-      <button class="btn btn-icon" onclick="refreshFirmware()" title="Refresh">&#x21BB;</button>
+    <div id="main-controls">
+      <div class="firmware-row">
+        <label>Left</label>
+        <select id="left-fw"><option value="">— select firmware —</option></select>
+        <label>Right</label>
+        <select id="right-fw"><option value="">— select firmware —</option></select>
+        <button class="btn btn-icon" onclick="refreshFirmware()" title="Refresh">&#x21BB;</button>
+      </div>
+      <div class="button-row">
+        <button class="btn btn-blue"  id="btn-flash-left"  onclick="flashSide('left')">Flash Left</button>
+        <button class="btn btn-blue"  id="btn-flash-right" onclick="flashSide('right')">Flash Right</button>
+        <button class="btn btn-green" id="btn-run"         onclick="runTests()">Run Tests</button>
+        <button class="btn btn-gray"  id="btn-copy"        onclick="copyLog()">Copy Log</button>
+        <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>
+        <button class="btn btn-gray"                       onclick="openMore()">More ···</button>
+      </div>
     </div>
-    <div class="button-row">
-      <button class="btn btn-blue"  id="btn-flash-left"  onclick="flashSide('left')">Flash Left</button>
-      <button class="btn btn-blue"  id="btn-flash-right" onclick="flashSide('right')">Flash Right</button>
-      <button class="btn btn-green" id="btn-run"         onclick="runTests()">Run Tests</button>
-      <button class="btn btn-gray"  id="btn-copy"        onclick="copyLog()">Copy Log</button>
-      <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>
-    </div>
-    <div class="button-row button-row-util">
-      <button class="btn btn-sm btn-usb"     id="btn-usb-left"      data-state="unknown" onclick="toggleUsb('left')">L: USB ?</button>
-      <button class="btn btn-sm btn-bootsel" id="btn-bootsel-left"  data-state="released" onclick="toggleBootsel('left')">L: BOOTSEL</button>
-      <button class="btn btn-sm btn-gray"    id="btn-reset-left"    onclick="resetBoard('left')">L: Reset</button>
-      <button class="btn btn-sm btn-usb"     id="btn-usb-right"     data-state="unknown" onclick="toggleUsb('right')">R: USB ?</button>
-      <button class="btn btn-sm btn-bootsel" id="btn-bootsel-right" data-state="released" onclick="toggleBootsel('right')">R: BOOTSEL</button>
-      <button class="btn btn-sm btn-gray"    id="btn-reset-right"   onclick="resetBoard('right')">R: Reset</button>
+
+    <div id="more-panel" hidden>
+      <div class="button-row">
+        <button class="btn btn-sm btn-usb"     id="btn-usb-left"      data-state="unknown"  onclick="toggleUsb('left')">L: USB ?</button>
+        <button class="btn btn-sm btn-bootsel" id="btn-bootsel-left"  data-state="released" onclick="toggleBootsel('left')">L: BOOTSEL</button>
+        <button class="btn btn-sm btn-gray"    id="btn-reset-left"                          onclick="resetBoard('left')">L: Reset</button>
+        <button class="btn btn-sm btn-usb"     id="btn-usb-right"     data-state="unknown"  onclick="toggleUsb('right')">R: USB ?</button>
+        <button class="btn btn-sm btn-bootsel" id="btn-bootsel-right" data-state="released" onclick="toggleBootsel('right')">R: BOOTSEL</button>
+        <button class="btn btn-sm btn-gray"    id="btn-reset-right"                         onclick="resetBoard('right')">R: Reset</button>
+      </div>
+      <div class="button-row more-nav">
+        <button class="btn btn-gray" onclick="closeMore()">&#8592; Back</button>
+        <button class="btn btn-red"  onclick="quitApp()">Quit ✕</button>
+      </div>
     </div>
   </footer>
 
