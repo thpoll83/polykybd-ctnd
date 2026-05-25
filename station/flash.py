@@ -95,10 +95,6 @@ class FlashController:
 
         run_pin, bootsel_pin, usb_port = _SIDES[side]
 
-        log(f"[flash:{side}] powering off USB port {usb_port}")
-        self._usb_power(usb_port, False)
-        time.sleep(0.5)
-
         # Correct RP2040 BOOTSEL entry sequence (both pins via NPN transistor):
         #   1. Assert RESET first (RUN LOW)
         #   2. Assert BOOTSEL while RESET is held
@@ -111,8 +107,7 @@ class FlashController:
         time.sleep(0.05)
         GPIO.output(run_pin, GPIO.LOW)       # 3. transistor OFF → RUN HIGH → board boots into BOOTSEL mode
 
-        log(f"[flash:{side}] powering on USB port {usb_port}")
-        self._usb_power(usb_port, True)
+        log(f"[flash:{side}] waiting for BOOTSEL enumeration")
         time.sleep(2.0)  # hold BOOTSEL until the board has fully enumerated
 
         # 4. Restore BOOTSEL to whatever the user has set, not necessarily released.
