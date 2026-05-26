@@ -10,8 +10,14 @@ import RPi.GPIO as GPIO
 from .config import (
     LEFT_BOOTSEL_PIN, LEFT_RUN_PIN, LEFT_USB_PORT,
     RIGHT_BOOTSEL_PIN, RIGHT_RUN_PIN, RIGHT_USB_PORT,
-    USB_HUB_LOCATION, MASS_STORAGE_LABEL,
+    USB_HUB_LOCATION, MASS_STORAGE_LABEL, GPIO_INVERTED,
 )
+
+# Signal levels for asserting / releasing active-low pins.
+# Inverted (NPN transistor): GPIO HIGH → transistor ON → pin LOW = asserted.
+# Direct:                    GPIO LOW  = pin LOW = asserted.
+_ASSERT  = GPIO.HIGH if GPIO_INVERTED else GPIO.LOW
+_RELEASE = GPIO.LOW  if GPIO_INVERTED else GPIO.HIGH
 
 _SIDES = {
     "left":  (LEFT_RUN_PIN,  LEFT_BOOTSEL_PIN,  LEFT_USB_PORT),
@@ -30,10 +36,9 @@ def _ensure_gpio():
     if _gpio_ready:
         return
     GPIO.setmode(GPIO.BCM)
-    # Direct (non-inverting) drive: GPIO HIGH = pin HIGH, GPIO LOW = pin LOW.
-    # Default HIGH = RUN released (boards running), BOOTSEL released (button up).
+    # All pins idle at _RELEASE so boards run freely and BOOTSEL is up.
     for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_BOOTSEL_PIN]:
-        GPIO.setup(pin, GPIO.OUT, initial=GPIO.HIGH)
+        GPIO.setup(pin, GPIO.OUT, initial=_RELEASE)
     _gpio_ready = True
 
 
@@ -97,17 +102,17 @@ class FlashController:
         #   3. Release RESET (RUN HIGH) — board boots with BOOTSEL held → BOOTSEL mode
         #   4. Release BOOTSEL after enumeration
         log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
-        GPIO.output(run_pin, GPIO.LOW)      # 1. RUN LOW → reset asserted
+        GPIO.output(run_pin, _ASSERT)      # 1. assert reset
         time.sleep(0.05)
-        GPIO.output(bootsel_pin, GPIO.LOW)  # 2. BOOTSEL LOW → button pressed
+        GPIO.output(bootsel_pin, _ASSERT)  # 2. assert BOOTSEL while reset held
         time.sleep(0.05)
-        GPIO.output(run_pin, GPIO.HIGH)     # 3. RUN HIGH → board boots into BOOTSEL mode
+        GPIO.output(run_pin, _RELEASE)     # 3. release reset → board boots into BOOTSEL mode
 
         log(f"[flash:{side}] waiting for BOOTSEL enumeration")
         time.sleep(2.0)  # hold BOOTSEL until the board has fully enumerated
 
         # 4. Restore BOOTSEL to whatever the user has set, not necessarily released.
-        GPIO.output(bootsel_pin, GPIO.LOW if _bootsel_asserted[side] else GPIO.HIGH)
+        GPIO.output(bootsel_pin, _ASSERT if _bootsel_asserted[side] else _RELEASE)
 
         if ext == ".uf2":
             log(f"[flash:{side}] waiting for mass storage")
@@ -123,16 +128,16 @@ class FlashController:
             raise ValueError(f"Unknown side '{side}'")
         _, bootsel_pin, _ = _SIDES[side]
         _bootsel_asserted[side] = asserted
-        GPIO.output(bootsel_pin, GPIO.LOW if asserted else GPIO.HIGH)
-        log(f"[bootsel:{side}] BCM{bootsel_pin} → {'LOW (asserted)' if asserted else 'HIGH (released)'}")
+        GPIO.output(bootsel_pin, _ASSERT if asserted else _RELEASE)
+        log(f"[bootsel:{side}] BCM{bootsel_pin} → {'asserted' if asserted else 'released'}")
 
     def set_run(self, side: str, asserted: bool, log=print) -> None:
         if side not in _SIDES:
             raise ValueError(f"Unknown side '{side}'")
         run_pin, _, _ = _SIDES[side]
         _run_asserted[side] = asserted
-        GPIO.output(run_pin, GPIO.LOW if asserted else GPIO.HIGH)
-        log(f"[run:{side}] BCM{run_pin} → {'LOW (reset asserted)' if asserted else 'HIGH (released)'}")
+        GPIO.output(run_pin, _ASSERT if asserted else _RELEASE)
+        log(f"[run:{side}] BCM{run_pin} → {'asserted (reset held)' if asserted else 'released'}")
 
     def usb_power(self, side: str, on: bool, log=print) -> None:
         if side not in _SIDES:
@@ -164,21 +169,28 @@ class FlashController:
         # host-side disconnect is needed:
         #   self._usb_power(_usb_port, False); time.sleep(0.3)
 
-        log(f"[reset:{side}] asserting reset (BCM{run_pin} LOW)")
-        GPIO.output(run_pin, GPIO.LOW)
+        log(f"[reset:{side}] asserting reset (BCM{run_pin})")
+        GPIO.output(run_pin, _ASSERT)
+        _run_asserted[side] = True
         time.sleep(0.1)
-        log(f"[reset:{side}] releasing reset (BCM{run_pin} HIGH)")
-        GPIO.output(run_pin, GPIO.HIGH)
+        log(f"[reset:{side}] releasing reset (BCM{run_pin})")
+        GPIO.output(run_pin, _RELEASE)
+        _run_asserted[side] = False
         time.sleep(0.8)
         log(f"[reset:{side}] done")
 
     def cleanup(self) -> None:
-        # Drive all pins HIGH: RUN released (boards running), BOOTSEL released.
+        # Restore each pin to its current tracked toggle state so that a
+        # user-held BOOTSEL or RUN pin survives the end of a flash/reset call.
         # GPIO stays initialised for the service's lifetime — only
         # gpio_cleanup_final() does the actual GPIO.cleanup().
-        for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_BOOTSEL_PIN]:
+        for side, (run_pin, bootsel_pin, _) in _SIDES.items():
             try:
-                GPIO.output(pin, GPIO.HIGH)
+                GPIO.output(run_pin,     _ASSERT if _run_asserted[side]     else _RELEASE)
+            except Exception:
+                pass
+            try:
+                GPIO.output(bootsel_pin, _ASSERT if _bootsel_asserted[side] else _RELEASE)
             except Exception:
                 pass
 

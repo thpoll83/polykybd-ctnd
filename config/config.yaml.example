@@ -8,6 +8,9 @@ gpio:
   left_bootsel:  18
   right_run:     22
   right_bootsel: 23
+  # inverted: true  = NPN transistor circuit (GPIO HIGH → transistor ON → pin LOW = asserted)
+  # inverted: false = direct drive           (GPIO LOW  = pin LOW = asserted)
+  inverted: true
 
 # uhubctl — USB hub and port assignments
 # Find your hub location by running: uhubctl

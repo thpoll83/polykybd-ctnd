@@ -14,6 +14,7 @@ LEFT_RUN_PIN      = _c["gpio"]["left_run"]
 LEFT_BOOTSEL_PIN  = _c["gpio"]["left_bootsel"]
 RIGHT_RUN_PIN     = _c["gpio"]["right_run"]
 RIGHT_BOOTSEL_PIN = _c["gpio"]["right_bootsel"]
+GPIO_INVERTED     = bool(_c["gpio"].get("inverted", True))
 
 # uhubctl
 USB_HUB_LOCATION = _c["usb"]["hub_location"]
