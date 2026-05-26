@@ -20,6 +20,7 @@ _status         = {"value": "idle"}
 _ci_state       = {"running": False, "url": None}
 _usb_state      = {"left": None,  "right": None}   # None = unknown
 _bootsel_state  = {"left": False, "right": False}   # False = released (HIGH)
+_run_state      = {"left": False, "right": False}   # False = released (HIGH)
 
 
 def emit_log(msg: str) -> None:
@@ -102,6 +103,7 @@ def on_connect(_auth=None):
     socketio.emit("status",        {"value": _status["value"]})
     socketio.emit("usb_state",     dict(_usb_state))
     socketio.emit("bootsel_state", dict(_bootsel_state))
+    socketio.emit("run_state",     dict(_run_state))
     if GITHUB_REPO:
         socketio.emit("ci_status", dict(_ci_state))
 
@@ -181,15 +183,18 @@ def on_bootsel(data):
 
 @socketio.on("reset_board")
 def on_reset_board(data):
-    side = data.get("side")
-    if side not in ("left", "right"):
+    side     = data.get("side")
+    asserted = data.get("asserted")
+    if side not in ("left", "right") or not isinstance(asserted, bool):
         return
 
     def _do():
         from station.flash import FlashController
         fc = FlashController()
         try:
-            fc.reset(side, log=emit_log)
+            fc.set_run(side, asserted, log=emit_log)
+            _run_state[side] = asserted
+            socketio.emit("run_state", dict(_run_state))
         except Exception as exc:
             emit_log(f"[ui] reset error: {exc}")
         finally:

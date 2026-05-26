@@ -84,6 +84,10 @@ socket.on('bootsel_state', state => {
   ['left', 'right'].forEach(side => updateBootselBtn(side, state[side]));
 });
 
+socket.on('run_state', state => {
+  ['left', 'right'].forEach(side => updateRunBtn(side, state[side]));
+});
+
 function updateBootselBtn(side, asserted) {
   const btn = document.getElementById(`btn-bootsel-${side}`);
   const prefix = side === 'left' ? 'L' : 'R';
@@ -91,10 +95,23 @@ function updateBootselBtn(side, asserted) {
   btn.textContent   = asserted ? `${prefix}: BOOT ●` : `${prefix}: BOOTSEL`;
 }
 
+function updateRunBtn(side, asserted) {
+  const btn = document.getElementById(`btn-reset-${side}`);
+  const prefix = side === 'left' ? 'L' : 'R';
+  btn.dataset.state = asserted ? 'asserted' : 'released';
+  btn.textContent   = asserted ? `${prefix}: RST ●` : `${prefix}: Reset`;
+}
+
 function toggleBootsel(side) {
   const btn      = document.getElementById(`btn-bootsel-${side}`);
   const asserted = btn.dataset.state !== 'asserted';
   socket.emit('bootsel', { side, asserted });
+}
+
+function toggleRun(side) {
+  const btn      = document.getElementById(`btn-reset-${side}`);
+  const asserted = btn.dataset.state !== 'asserted';
+  socket.emit('reset_board', { side, asserted });
 }
 
 function updateUsbBtn(side, state) {
@@ -111,9 +128,6 @@ function toggleUsb(side) {
   socket.emit('usb_power', { side, on });
 }
 
-function resetBoard(side) {
-  socket.emit('reset_board', { side });
-}
 
 function openMore()  {
   document.getElementById('main-controls').hidden = true;

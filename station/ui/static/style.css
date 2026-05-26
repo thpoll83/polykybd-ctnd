@@ -186,6 +186,12 @@ footer {
 .btn-bootsel[data-state="released"]:hover:not(:disabled) { background: #455A64; }
 .btn-bootsel[data-state="asserted"]:hover:not(:disabled) { background: #5c3a00; }
 
+.btn-reset { border: 2px solid transparent; transition: background 0.2s, border-color 0.2s; }
+.btn-reset[data-state="released"] { background: #37474F; border-color: transparent; }
+.btn-reset[data-state="asserted"] { background: #4a1212; border-color: #ef5350; }
+.btn-reset[data-state="released"]:hover:not(:disabled) { background: #455A64; }
+.btn-reset[data-state="asserted"]:hover:not(:disabled) { background: #5c1a1a; }
+
 .more-nav { margin-top: 8px; }
 
 .btn-red { background: #7B1212; }
