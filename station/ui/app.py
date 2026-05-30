@@ -143,10 +143,13 @@ if GITHUB_REPO:
 # request), connectivity, then a plain-language verdict. Triggered by the RUNNER
 # badge or the "Diagnose Runner" button.
 
-def _diag_local_runner(log) -> bool:
-    """Report the local runner systemd service + process. Return True if a
-    Runner.Listener process is alive."""
-    if shutil.which("systemctl"):
+def _diag_local_runner(log) -> dict:
+    """Report the local runner systemd service + process. Returns
+    {"systemctl": bool, "unit": str|None, "active": bool, "process_running": bool}
+    so the verdict can give an exact start command."""
+    info = {"systemctl": bool(shutil.which("systemctl")),
+            "unit": None, "active": False, "process_running": False}
+    if info["systemctl"]:
         try:
             out = subprocess.run(
                 ["systemctl", "list-units", "--all", "--no-legend", "--plain",
@@ -160,23 +163,25 @@ def _diag_local_runner(log) -> bool:
                     sub    = parts[3] if len(parts) > 3 else "?"
                     mark   = "✓" if sub == "running" else "✗"
                     log(f"    [{mark}] {name}  {active}/{sub}")
+                    info["unit"] = info["unit"] or name
+                    if sub == "running":
+                        info["active"] = True
             else:
                 log("    [✗] no actions.runner.*.service installed (run svc.sh install)")
         except Exception as exc:
             log(f"    [?] systemctl: {exc}")
 
-    running = False
     try:
         proc = subprocess.run(["pgrep", "-af", "Runner.Listener"],
                               capture_output=True, text=True, timeout=5)
         if proc.returncode == 0 and proc.stdout.strip():
             log(f"    [✓] Runner.Listener running (pid {proc.stdout.split()[0]})")
-            running = True
+            info["process_running"] = True
         else:
             log("    [✗] Runner.Listener process not running")
     except Exception as exc:
         log(f"    [?] pgrep: {exc}")
-    return running
+    return info
 
 
 def _diag_github_runners(log) -> dict:
@@ -256,6 +261,19 @@ def _diag_network(log) -> None:
 def _diag_verdict(facts) -> list:
     """Turn the collected facts into a short, plain-language likely-cause list."""
     out = []
+    local = facts.get("local") or {}
+
+    # Local runner state is the most common and most actionable cause — lead with it.
+    if local.get("unit") and not local.get("active"):
+        out.append("Root cause (local): the runner service is installed but NOT running —")
+        out.append("nothing on this Pi will ever pick up the job. Start it:")
+        out.append(f"  sudo systemctl start {local['unit']}")
+        out.append("  (or:  cd ~/actions-runner && sudo ./svc.sh start)")
+        out.append(f"  why it stopped:  sudo journalctl -u {local['unit']} -n 50 --no-pager")
+    elif local.get("systemctl") and not local.get("unit") and not local.get("process_running"):
+        out.append("Root cause (local): no runner service is installed on this Pi.")
+        out.append("  install/register:  scripts/register-runner.sh --token <TOKEN>")
+
     if not facts["repo"]:
         out.append("github.repo not set in config.yaml — GitHub-side checks skipped.")
     if not facts["token"]:
@@ -265,7 +283,7 @@ def _diag_verdict(facts) -> list:
     gh = facts.get("gh") or {}
     runners = gh.get("runners")
     if runners is None:
-        if facts["local_running"]:
+        if local.get("process_running"):
             out.append("Runner.Listener is up locally but GitHub status couldn't be read.")
             out.append("Fix the token scope above to confirm it's registered and online.")
         return out
@@ -299,7 +317,7 @@ def _diag_verdict(facts) -> list:
         out.append("scripts/register-runner.sh (it sets --labels polykybd-ctnd).")
     else:
         out.append("Root cause: the matching runner is OFFLINE.")
-        if facts["local_running"]:
+        if local.get("process_running"):
             out.append("It runs locally but GitHub sees it offline → outbound HTTPS to")
             out.append("*.actions.githubusercontent.com may be blocked, or it is a duplicate")
             out.append("registration. Check ~/actions-runner/_diag/ logs.")
@@ -319,7 +337,7 @@ def _run_diagnostics():
     facts = {"repo": bool(GITHUB_REPO), "token": bool(GITHUB_TOKEN)}
 
     log("• local runner")
-    facts["local_running"] = _diag_local_runner(log)
+    facts["local"] = _diag_local_runner(log)
 
     if GITHUB_REPO:
         log("• github registration")
