@@ -5,22 +5,38 @@
 # has been deleted from GitHub (e.g. after a token expiry or manual removal).
 #
 # Usage:
-#   ./scripts/register-runner.sh --token <TOKEN>
+#   ./scripts/register-runner.sh                  # mint token from a stored PAT
+#   ./scripts/register-runner.sh --pat <PAT>      # mint token from this PAT
+#   ./scripts/register-runner.sh --token <TOKEN>  # use a manual registration token
 #
-# Get a fresh token at:
+# Registration tokens expire in ~1 hour, so copying one from the GitHub UI for
+# every re-register is tedious. Instead, store a long-lived PAT once and this
+# script mints a fresh registration token for you via the API. PAT is read from
+# (first match wins):  --pat  →  $GITHUB_PAT  →  github.token in config/config.yaml
+# The PAT needs repo "Administration: write" (fine-grained) or "repo" scope
+# (classic). The same token also powers the RUNNER status badge if you grant it
+# "Administration: read" as well.
+#
+# Manual fallback — get a one-off registration token at:
 #   https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new
 #   → Linux / ARM64 → copy the --token value from the ./config.sh command shown
 #
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_SLUG="thpoll83/qmk_firmware"
+REPO_URL="https://github.com/${REPO_SLUG}"
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 TOKEN=""
+PAT=""
 RUNNER_NAME="RP4-HIL"
 RUNNER_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --token)   TOKEN="$2";       shift 2 ;;
+        --pat)     PAT="$2";         shift 2 ;;
         --name)    RUNNER_NAME="$2"; shift 2 ;;
         --dir)     RUNNER_DIR="$2";  shift 2 ;;
         -h|--help)
@@ -30,16 +46,87 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── Resolve a registration token ──────────────────────────────────────────────
+# A registration token (--token) is used as-is. Otherwise mint one from a PAT.
+
+read_cfg_token() {
+    local cfg="$SCRIPT_DIR/../config/config.yaml"
+    [[ -f "$cfg" ]] || return 0
+    local venv_py="$SCRIPT_DIR/../venv/bin/python"
+    if [[ -x "$venv_py" ]]; then
+        "$venv_py" - "$cfg" <<'PY' 2>/dev/null
+import sys, yaml
+try:
+    c = yaml.safe_load(open(sys.argv[1])) or {}
+    print((c.get("github") or {}).get("token") or "")
+except Exception:
+    pass
+PY
+    else
+        # Best-effort fallback: `token: "ghp_xxx"  # comment`
+        grep -E '^[[:space:]]*token:' "$cfg" | head -1 \
+            | sed -E 's/^[[:space:]]*token:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^["'\'']//; s/["'\'']$//'
+    fi
+}
+
+mint_token() {  # $1 = PAT → echoes a registration token, or nothing on failure
+    local pat="$1"
+    local api="https://api.github.com/repos/${REPO_SLUG}/actions/runners/registration-token"
+    local resp=""
+    if command -v curl >/dev/null 2>&1; then
+        resp=$(curl -fsSL -X POST \
+            -H "Authorization: Bearer ${pat}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$api" 2>/dev/null) || true
+    elif command -v python3 >/dev/null 2>&1; then
+        resp=$(python3 - "$pat" "$api" <<'PY' 2>/dev/null
+import sys, json, urllib.request
+pat, api = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(api, method="POST", headers={
+    "Authorization": f"Bearer {pat}",
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "polykybd-ctnd-register/1.0",
+})
+try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+        print(r.read().decode())
+except Exception:
+    pass
+PY
+        ) || true
+    fi
+    printf '%s' "$resp" | grep -oE '"token"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"token"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+}
+
 if [[ -z "$TOKEN" ]]; then
-    echo "Error: --token is required." >&2
-    echo ""
-    echo "Get one at: https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new" >&2
-    echo "  → Linux / ARM64 → copy the --token value from the ./config.sh command shown." >&2
-    exit 1
+    [[ -z "$PAT" ]] && PAT="${GITHUB_PAT:-}"
+    [[ -z "$PAT" ]] && PAT="$(read_cfg_token)"
+    if [[ -z "$PAT" ]]; then
+        echo "Error: no registration token and no PAT to mint one." >&2
+        echo "" >&2
+        echo "Either store a PAT (so this works with no arguments next time):" >&2
+        echo "  • set github.token in config/config.yaml, or export GITHUB_PAT=…, or pass --pat" >&2
+        echo "    (PAT needs repo 'Administration: write' / classic 'repo' scope)" >&2
+        echo "Or pass a one-off registration token with --token:" >&2
+        echo "  https://github.com/${REPO_SLUG}/settings/actions/runners/new" >&2
+        exit 1
+    fi
+    echo "Minting a fresh registration token from the PAT …"
+    TOKEN="$(mint_token "$PAT")"
+    if [[ -z "$TOKEN" ]]; then
+        echo "Error: could not mint a registration token." >&2
+        echo "Check the PAT has repo 'Administration: write' (fine-grained) or 'repo'" >&2
+        echo "scope (classic), and that the Pi can reach api.github.com." >&2
+        exit 1
+    fi
+    echo "Got a registration token (valid ~1 hour)."
 fi
 
 # ── Locate runner directory ───────────────────────────────────────────────────
-CTND_USER="${SUDO_USER:-$USER}"
+# id -un is the robust fallback when neither SUDO_USER nor USER is exported.
+CTND_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 CTND_HOME=$(getent passwd "$CTND_USER" | cut -d: -f6)
 
 if [[ -z "$RUNNER_DIR" ]]; then
@@ -89,7 +176,7 @@ fi
 # on GitHub (e.g. showing offline), it is replaced instead of erroring out.
 echo "Configuring runner …"
 sudo -u "$CTND_USER" ./config.sh \
-    --url https://github.com/thpoll83/qmk_firmware \
+    --url "$REPO_URL" \
     --token "$TOKEN" \
     --name "$RUNNER_NAME" \
     --labels polykybd-ctnd \
