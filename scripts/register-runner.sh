@@ -8,6 +8,8 @@
 #   ./scripts/register-runner.sh                  # mint token from a stored PAT
 #   ./scripts/register-runner.sh --pat <PAT>      # mint token from this PAT
 #   ./scripts/register-runner.sh --token <TOKEN>  # use a manual registration token
+#   ./scripts/register-runner.sh --no-reinstall   # re-config + restart only (kiosk
+#                                                 # button path; no svc.sh reinstall)
 #
 # Registration tokens expire in ~1 hour, so copying one from the GitHub UI for
 # every re-register is tedious. Instead, store a long-lived PAT once and this
@@ -32,13 +34,15 @@ TOKEN=""
 PAT=""
 RUNNER_NAME="RP4-HIL"
 RUNNER_DIR=""
+NO_REINSTALL=false   # re-config + systemctl restart only; don't touch the unit
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --token)   TOKEN="$2";       shift 2 ;;
-        --pat)     PAT="$2";         shift 2 ;;
-        --name)    RUNNER_NAME="$2"; shift 2 ;;
-        --dir)     RUNNER_DIR="$2";  shift 2 ;;
+        --token)        TOKEN="$2";       shift 2 ;;
+        --pat)          PAT="$2";         shift 2 ;;
+        --name)         RUNNER_NAME="$2"; shift 2 ;;
+        --dir)          RUNNER_DIR="$2";  shift 2 ;;
+        --no-reinstall) NO_REINSTALL=true; shift ;;
         -h|--help)
             grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -153,8 +157,37 @@ echo ""
 
 cd "$RUNNER_DIR"
 
-# ── Stop and uninstall the service ───────────────────────────────────────────
-if [[ -f ".svc" ]]; then
+# run config.sh as the runner user — but skip sudo when we already are that user
+# (e.g. invoked from the Flask UI service, which has no password-less sudo -u).
+run_as_ctnd() {
+    if [[ "$(id -un)" == "$CTND_USER" ]]; then
+        "$@"
+    else
+        sudo -u "$CTND_USER" "$@"
+    fi
+}
+
+# Discover the installed systemd unit (read-only, no sudo needed).
+RUNNER_UNIT=""
+if command -v systemctl >/dev/null 2>&1; then
+    RUNNER_UNIT=$(systemctl list-units --all --no-legend --plain --type=service \
+                  'actions.runner.*' 2>/dev/null | awk 'NR==1{print $1}')
+fi
+
+# ── Stop the service ─────────────────────────────────────────────────────────
+# --no-reinstall (the kiosk button) only needs systemctl stop/start on the unit,
+# which is granted password-less in sudoers. The full path uses svc.sh, which
+# also (re)installs the unit and needs broader root — fine over SSH.
+if $NO_REINSTALL; then
+    if [[ -n "$RUNNER_UNIT" ]]; then
+        echo "Stopping $RUNNER_UNIT …"
+        sudo systemctl stop "$RUNNER_UNIT" 2>/dev/null || true
+    else
+        echo "Error: no installed actions.runner unit found." >&2
+        echo "Run once over SSH without --no-reinstall to install the service first." >&2
+        exit 1
+    fi
+elif [[ -f ".svc" ]]; then
     echo "Stopping service …"
     sudo ./svc.sh stop      2>/dev/null || true
     echo "Uninstalling service …"
@@ -175,7 +208,7 @@ fi
 # --replace makes this idempotent: if a runner with the same name still exists
 # on GitHub (e.g. showing offline), it is replaced instead of erroring out.
 echo "Configuring runner …"
-sudo -u "$CTND_USER" ./config.sh \
+run_as_ctnd ./config.sh \
     --url "$REPO_URL" \
     --token "$TOKEN" \
     --name "$RUNNER_NAME" \
@@ -183,12 +216,23 @@ sudo -u "$CTND_USER" ./config.sh \
     --replace \
     --unattended
 
-# ── Re-install and start the service ─────────────────────────────────────────
-echo "Installing service …"
-sudo ./svc.sh install "$CTND_USER" 2>/dev/null || sudo ./svc.sh install
-echo "Starting service …"
-sudo ./svc.sh start
-
-echo ""
-echo "Done. Checking status:"
-sudo ./svc.sh status
+# ── (Re)install and start the service ────────────────────────────────────────
+if $NO_REINSTALL; then
+    echo "Starting $RUNNER_UNIT …"
+    sudo systemctl start "$RUNNER_UNIT"
+    sleep 2
+    if systemctl is-active --quiet "$RUNNER_UNIT"; then
+        echo "Done. $RUNNER_UNIT is active (running)."
+    else
+        echo "Warning: $RUNNER_UNIT did not stay active — check 'journalctl -u $RUNNER_UNIT'." >&2
+        exit 1
+    fi
+else
+    echo "Installing service …"
+    sudo ./svc.sh install "$CTND_USER" 2>/dev/null || sudo ./svc.sh install
+    echo "Starting service …"
+    sudo ./svc.sh start
+    echo ""
+    echo "Done. Checking status:"
+    sudo ./svc.sh status
+fi

@@ -415,6 +415,46 @@ def on_run_diagnostics(_data=None):
     threading.Thread(target=_run_diagnostics, daemon=True).start()
 
 
+@socketio.on("reregister_runner")
+def on_reregister_runner(_data=None):
+    if _status["value"] == "registering":
+        return
+    set_status("registering")
+
+    def _do():
+        script = str(Path(__file__).resolve().parents[2] / "scripts" / "register-runner.sh")
+        emit_log("")
+        emit_log("════════ RE-REGISTER RUNNER ════════")
+        rc = None
+        try:
+            proc = subprocess.Popen(
+                ["bash", script, "--no-reinstall"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            for line in proc.stdout:
+                emit_log(line.rstrip())
+            rc = proc.wait()
+        except Exception as exc:
+            emit_log(f"[ui] re-register error: {exc}")
+            set_status("error")
+        else:
+            if rc == 0:
+                emit_log("[ui] runner re-registered ✓")
+                set_status("idle")
+            else:
+                emit_log(f"[ui] re-register failed (exit {rc})")
+                set_status("error")
+        finally:
+            emit_log("════════════════════════════════════")
+            try:
+                _runner_poll_once()
+            except Exception:
+                pass
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 @socketio.on("flash")
 def on_flash(data):
     side = data.get("side")

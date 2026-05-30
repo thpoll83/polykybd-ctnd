@@ -6,7 +6,7 @@ const logEl     = document.getElementById('log-output');
 const statusEl  = document.getElementById('status-text');
 const clockEl   = document.getElementById('clock');
 const actionBtns = [
-  'btn-flash-left', 'btn-flash-right', 'btn-run',
+  'btn-flash-left', 'btn-flash-right', 'btn-run', 'btn-reregister',
   'btn-usb-left',     'btn-bootsel-left',  'btn-reset-left',
   'btn-usb-right',    'btn-bootsel-right', 'btn-reset-right',
 ].map(id => document.getElementById(id));
@@ -82,6 +82,28 @@ function runTests() {
 function runDiagnostics() {
   appendLog('[ui] running runner diagnostics…');
   socket.emit('run_diagnostics');
+}
+
+/* Re-register the GitHub Actions runner. Disruptive (stops → reconfigures →
+   restarts the runner), so require a two-tap confirm before firing. */
+let _reregTimer = null;
+function reregisterRunner() {
+  const btn = document.getElementById('btn-reregister');
+  if (btn.dataset.armed !== 'true') {
+    btn.dataset.label = btn.textContent;          // remember the real label
+    btn.dataset.armed = 'true';
+    btn.textContent = '⚠ Tap to confirm';
+    _reregTimer = setTimeout(() => {
+      btn.dataset.armed = 'false';
+      btn.textContent = btn.dataset.label;
+    }, 3000);
+    return;
+  }
+  clearTimeout(_reregTimer);
+  btn.dataset.armed = 'false';
+  btn.textContent = btn.dataset.label;
+  appendLog('[ui] re-registering runner (stops, reconfigures, restarts it)…');
+  socket.emit('reregister_runner');
 }
 
 function clearLog() { logEl.textContent = ''; }

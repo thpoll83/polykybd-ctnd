@@ -76,6 +76,18 @@ printf '%s ALL=(ALL) NOPASSWD: %s\n' "$CTND_USER" "$PICOTOOL_BIN" \
   | sudo tee -a /etc/sudoers.d/polykybd-usb > /dev/null
 sudo chmod 0440 /etc/sudoers.d/polykybd-usb
 
+# Allow the station user to start/stop the GitHub Actions runner service without
+# a password, so the "Re-register runner" button in the touch UI can recover the
+# runner without SSH. Scoped to start/stop/restart on actions.runner.* units only
+# (no 'status' — that can open a pager and is a known privilege-escalation vector).
+SYSTEMCTL_BIN=$(command -v systemctl)
+if [[ -n "$SYSTEMCTL_BIN" ]]; then
+  printf '%s ALL=(root) NOPASSWD: %s start actions.runner.*, %s stop actions.runner.*, %s restart actions.runner.*\n' \
+    "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
+    | sudo tee /etc/sudoers.d/polykybd-runner > /dev/null
+  sudo chmod 0440 /etc/sudoers.d/polykybd-runner
+fi
+
 # Install application
 if $LOCAL; then
     # Running in place — repo is already here, nothing to clone

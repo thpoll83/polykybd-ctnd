@@ -156,6 +156,20 @@ footer {
   gap: 10px;
 }
 
+.runner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.runner-row label {
+  color: #777;
+  font-size: 13px;
+  white-space: nowrap;
+  min-width: 52px;
+}
+
 /* ── Buttons ── */
 .btn {
   flex: 1;
@@ -217,11 +231,17 @@ footer {
 .btn-red { background: #7B1212; }
 .btn-red:hover:not(:disabled) { background: #9C2020; }
 
+.btn-amber { background: #E65100; }
+.btn-amber:hover:not(:disabled) { background: #F57C00; }
+/* armed = waiting for the confirming second tap */
+.btn-amber[data-armed="true"] { background: #b71c1c; animation: pulse 1s infinite; }
+
 /* ── Status colour theming ── */
 body[data-status="idle"]           .status-dot { background: #4CAF50; }
 body[data-status="flashing-left"]  .status-dot,
 body[data-status="flashing-right"] .status-dot { background: #FF9800; animation: pulse 1s infinite; }
 body[data-status="testing"]        .status-dot { background: #2196F3; animation: pulse 1s infinite; }
+body[data-status="registering"]    .status-dot { background: #E65100; animation: pulse 1s infinite; }
 body[data-status="error"]          .status-dot { background: #f44336; }
 
 @keyframes pulse {
