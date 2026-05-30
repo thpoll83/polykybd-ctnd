@@ -38,6 +38,23 @@ socket.on('ci_status', ({ running, url }) => {
   badge.onclick = url ? () => window.open(url, '_blank') : null;
 });
 
+const RUNNER_BADGE = {
+  unknown: ['RUNNER',   'Runner status unknown — tap to run diagnostics'],
+  online:  ['RUNNER ✓', 'Runner online & idle — tap to run diagnostics'],
+  busy:    ['RUNNER ▶', 'Runner online, busy with a job — tap to run diagnostics'],
+  offline: ['RUNNER ✕', 'Runner registered but OFFLINE — tap to run diagnostics'],
+  missing: ['RUNNER !', 'No runner has the required labels — tap to run diagnostics'],
+  noauth:  ['RUNNER ⚿', 'Token lacks runner-admin scope — tap to run diagnostics'],
+};
+
+socket.on('runner_status', ({ status }) => {
+  const badge = document.getElementById('rn-badge');
+  const [text, title] = RUNNER_BADGE[status] || RUNNER_BADGE.unknown;
+  badge.dataset.rn  = status;
+  badge.textContent = text;
+  badge.title       = title;
+});
+
 socket.on('test_result', result => {
   const icon = result.passed ? '✓ PASS' : '✗ FAIL';
   appendLog(`\n── ${icon} ──`);
@@ -60,6 +77,11 @@ function runTests() {
   const right = document.getElementById('right-fw').value;
   if (!left || !right) { appendLog('[ui] select both left and right firmware files first'); return; }
   socket.emit('run_tests', { left_uf2: left, right_uf2: right });
+}
+
+function runDiagnostics() {
+  appendLog('[ui] running runner diagnostics…');
+  socket.emit('run_diagnostics');
 }
 
 function clearLog() { logEl.textContent = ''; }
