@@ -178,11 +178,26 @@ usb:
   hub_location: "1-1"  # verify with: uhubctl
   left_port:  1
   right_port: 2
+
+github:
+  repo: "thpoll83/qmk_firmware"
+  token: ""  # personal access token (PAT) — see below
+  runner_labels: [self-hosted, polykybd-ctnd]  # must match runs-on: in qmk-test.yml
 ```
 
 `config/config.yaml` is gitignored — `git pull` will never overwrite your settings.
 
+**About `github.token` (optional but recommended).** A long-lived PAT unlocks three things:
+
+- the **CI** header badge (needs `Actions: Read`),
+- the **RUNNER** header badge + **⚕ Diagnose** runner status (needs `Administration: Read`),
+- token-free **re-registration**: `register-runner.sh` mints its own short-lived registration token from this PAT, so you never copy a token from the GitHub UI again (needs `Administration: Read and write`).
+
+Create a fine-grained PAT scoped to `thpoll83/qmk_firmware` with **Administration: Read and write** (and optionally **Actions: Read**) to enable all three. The PAT lives only in the gitignored `config.yaml`. Leave `token: ""` to skip these conveniences — registration then needs a manual `--token` (see §4).
+
 ### 4. Register GitHub Actions runner
+
+**First-time install** — download and install the runner agent + systemd service once:
 
 1. Go to `https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new`
 2. Select **Linux / ARM64**
@@ -193,6 +208,16 @@ usb:
    sudo ./svc.sh install
    sudo ./svc.sh start
    ```
+
+After this one-time install, you should **not** need to touch a token again — a configured runner survives reboots and firmware reflashes. If the registration ever breaks (`"waiting for a runner"`, `Not configured`, registration deleted), re-register with the helper script — and if you set a PAT in §3, it needs no token argument:
+
+```bash
+cd /opt/polykybd-ctnd
+./scripts/register-runner.sh                 # PAT in config.yaml mints the token
+./scripts/register-runner.sh --token <TOK>   # or paste a one-off registration token
+```
+
+Or recover straight from the **touchscreen** — no SSH — with the **Runner** row's **⟳ Restart** / **↻ Re-register** buttons (see [Troubleshooting](#github-actions-runner-waiting-for-a-runner)).
 
 ### 5. Reboot
 
@@ -214,9 +239,27 @@ The touchscreen UI starts automatically. It is also accessible from any machine 
 | **⟳ button** | Refresh the firmware file list |
 | **Flash Left / Flash Right** | Flash a single half |
 | **Run Tests** | Flash both halves then execute the test suite |
-| **Clear Log** | Clear the log panel |
+| **Clear Log / Copy Log** | Clear or copy the log panel |
+| **Runner ⚕ Diagnose** | Print a full self-hosted-runner diagnostic to the log (see below) |
+| **Runner ⟳ Restart** | `systemctl restart` the runner service — for a configured-but-wedged runner |
+| **Runner ↻ Re-register** | Stop → reconfigure → restart the runner (two-tap confirm) — for a broken/`Not configured` registration |
 
-The status dot in the header pulses amber while flashing, blue while testing, and turns red on error.
+The status dot in the header pulses amber while flashing, blue while testing, amber again while (re)registering the runner, and turns red on error.
+
+**Header badges:**
+
+- **CI** — turns green (`CI ✓`) when no job is running and orange (`CI ▶`) while a workflow runs (tap to open it). Polls every 60 s.
+- **RUNNER** — at-a-glance self-hosted runner health (tap to run the diagnostic). Polls every 30 s:
+
+  | Badge | Meaning |
+  |---|---|
+  | `RUNNER ✓` (green) | a runner with the required labels is online & idle |
+  | `RUNNER ▶` (orange) | matching runner online but busy with a job |
+  | `RUNNER ✕` (red) | matching runner registered but offline |
+  | `RUNNER !` (red) | no runner advertises all required labels |
+  | `RUNNER ⚿` (yellow) | the token can't read runner status (needs repo-admin scope) |
+
+  The CI and RUNNER badges require a `github:` block in `config.yaml` (see [§3 Update config](#3-update-config)).
 
 ### Dropping firmware manually
 
@@ -315,27 +358,38 @@ sudo systemctl restart polykybd-ctnd.service
 
 ---
 
-### GitHub Actions runner: registration deleted / "waiting for a runner"
+### GitHub Actions runner: "waiting for a runner"
 
-If the CI job sits at **"Waiting for a runner to pick up this job..."** and the runner service log shows:
+If a CI job sits at **"Waiting for a runner to pick up this job..."** forever, the self-hosted runner isn't matching `runs-on: [self-hosted, polykybd-ctnd]`. **Start with the diagnostic** — tap the **RUNNER** badge or the **⚕ Diagnose** button on the touchscreen. It reports, and gives a plain-language verdict for, the common causes (headless, check the same things with `systemctl status 'actions.runner.*'` and `journalctl -u 'actions.runner.*' -n 50`):
 
-```
-Failed to create a session. The runner registration has been deleted from the server
-```
+| What Diagnose shows | Cause | Fix |
+|---|---|---|
+| `actions.runner.*.service inactive/dead` + `An error occurred: Not configured` in the journal | Runner agent installed but never configured (no `.runner`/`.credentials`) | **Re-register** (below) — a restart alone won't help |
+| service `inactive/dead`, otherwise configured | Runner crashed or was stopped | **Restart** (below) |
+| runner OFFLINE on GitHub | Service down, or outbound HTTPS to `*.actions.githubusercontent.com` blocked | Restart; check network |
+| `LABEL MISMATCH` / `RUNNER !` | No runner advertises both labels | Re-register (sets `--labels polykybd-ctnd`), or fix `runner_labels` in config |
+| matching runner online & idle, job still queued | PR is **from a fork** | Open the run on GitHub → **Approve and run** |
+| `RUNNER ⚿` / `403`/`401` | `github.token` missing or lacks `Administration: Read` | Add/scope the PAT (see [§3](#3-update-config)) |
 
-The runner registration token has expired or was removed from GitHub. Re-register with the helper script:
+**Restart** (configured but wedged) — just bounces the service:
 
 ```bash
-# 1. Get a fresh token from:
-#    https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new
-#    → Linux / ARM64 → copy the --token value
-
-sudo git -C /opt/polykybd-ctnd pull
 cd /opt/polykybd-ctnd
-./scripts/register-runner.sh --token <PASTE_TOKEN_HERE>
+./scripts/register-runner.sh --restart-only      # or tap ⟳ Restart on the touchscreen
 ```
 
-The script handles the full teardown sequence (stop → uninstall → wipe credentials → re-configure → install → start) and prints the final service status.
+**Re-register** (broken/`Not configured`/deleted registration) — full teardown → reconfigure → restart:
+
+```bash
+sudo git -C /opt/polykybd-ctnd pull
+cd /opt/polykybd-ctnd
+./scripts/register-runner.sh                     # PAT in config.yaml mints the token, or:
+./scripts/register-runner.sh --token <TOKEN>     # paste a one-off token from the GitHub UI
+```
+
+…or tap **↻ Re-register** on the touchscreen (two-tap confirm). Get a manual token, if you need one, from `https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new` → **Linux / ARM64**. Registration tokens expire in ~1 hour; a stored PAT (§3) avoids the copy-paste entirely.
+
+> **Kiosk buttons need a one-time sudoers grant** so the UI service can control the runner. Fresh `setup.sh` runs add it automatically (`/etc/sudoers.d/polykybd-runner`, scoped to `systemctl start/stop/restart actions.runner.*`). On an existing box, re-run `setup.sh` or pull and restart. The **first-ever** registration still needs one SSH run (it installs the systemd unit); after that the touchscreen can recover it.
 
 **Manual equivalent** (if the script is unavailable):
 ```bash
@@ -344,7 +398,7 @@ sudo ./svc.sh stop
 sudo ./svc.sh uninstall
 rm -f .runner .credentials .credentials_rsaparams
 ./config.sh --url https://github.com/thpoll83/qmk_firmware \
-            --token <TOKEN> --name RP4-HIL --labels polykybd-ctnd --unattended
+            --token <TOKEN> --name RP4-HIL --labels polykybd-ctnd --replace --unattended
 sudo ./svc.sh install
 sudo ./svc.sh start
 ```
