@@ -10,6 +10,8 @@
 #   ./scripts/register-runner.sh --token <TOKEN>  # use a manual registration token
 #   ./scripts/register-runner.sh --no-reinstall   # re-config + restart only (kiosk
 #                                                 # button path; no svc.sh reinstall)
+#   ./scripts/register-runner.sh --restart-only   # just restart the runner service
+#                                                 # (no reconfigure, no token needed)
 #
 # Registration tokens expire in ~1 hour, so copying one from the GitHub UI for
 # every re-register is tedious. Instead, store a long-lived PAT once and this
@@ -35,6 +37,7 @@ PAT=""
 RUNNER_NAME="RP4-HIL"
 RUNNER_DIR=""
 NO_REINSTALL=false   # re-config + systemctl restart only; don't touch the unit
+RESTART_ONLY=false   # just systemctl restart the unit; no reconfigure, no token
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,12 +46,65 @@ while [[ $# -gt 0 ]]; do
         --name)         RUNNER_NAME="$2"; shift 2 ;;
         --dir)          RUNNER_DIR="$2";  shift 2 ;;
         --no-reinstall) NO_REINSTALL=true; shift ;;
+        --restart-only) RESTART_ONLY=true; shift ;;
         -h|--help)
             grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+
+if $NO_REINSTALL && $RESTART_ONLY; then
+    echo "Error: --no-reinstall and --restart-only are mutually exclusive." >&2
+    exit 1
+fi
+
+# ── Locate the installed runner systemd unit (read-only, no sudo) ─────────────
+# Must never return non-zero: it is used in `UNIT="$(find_runner_unit)"` under
+# `set -e`/`pipefail`, where a failing systemctl would otherwise abort the script
+# before the friendly "no unit found" message.
+find_runner_unit() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    systemctl list-units --all --no-legend --plain --type=service \
+        'actions.runner.*' 2>/dev/null | awk 'NR==1{print $1}' || true
+}
+
+# Start the unit and report whether it stayed up. $1 = unit name.
+start_and_verify() {
+    local unit="$1"
+    echo "Starting $unit …"
+    sudo systemctl start "$unit"
+    sleep 2
+    if systemctl is-active --quiet "$unit"; then
+        echo "Done. $unit is active (running)."
+    else
+        echo "Warning: $unit did not stay active — check 'journalctl -u $unit'." >&2
+        return 1
+    fi
+}
+
+# ── Restart-only fast path ────────────────────────────────────────────────────
+# Just bounce the runner service. No reconfigure, no token, no runner dir needed
+# — for the common "configured but wedged" case. Exits when done.
+if $RESTART_ONLY; then
+    UNIT="$(find_runner_unit)"
+    if [[ -z "$UNIT" ]]; then
+        echo "Error: no installed actions.runner unit found to restart." >&2
+        echo "Register the runner first (run without --restart-only)." >&2
+        exit 1
+    fi
+    echo "=== PolyKybd CTND — restart runner service ==="
+    echo "Restarting $UNIT …"
+    sudo systemctl restart "$UNIT"
+    sleep 2
+    if systemctl is-active --quiet "$UNIT"; then
+        echo "Done. $UNIT is active (running)."
+        exit 0
+    fi
+    echo "Warning: $UNIT did not stay active after restart." >&2
+    echo "It may be unconfigured/wedged — try Re-register. See 'journalctl -u $UNIT'." >&2
+    exit 1
+fi
 
 # ── Resolve a registration token ──────────────────────────────────────────────
 # A registration token (--token) is used as-is. Otherwise mint one from a PAT.
@@ -168,11 +224,7 @@ run_as_ctnd() {
 }
 
 # Discover the installed systemd unit (read-only, no sudo needed).
-RUNNER_UNIT=""
-if command -v systemctl >/dev/null 2>&1; then
-    RUNNER_UNIT=$(systemctl list-units --all --no-legend --plain --type=service \
-                  'actions.runner.*' 2>/dev/null | awk 'NR==1{print $1}')
-fi
+RUNNER_UNIT="$(find_runner_unit)"
 
 # ── Stop the service ─────────────────────────────────────────────────────────
 # --no-reinstall (the kiosk button) only needs systemctl stop/start on the unit,
@@ -218,15 +270,7 @@ run_as_ctnd ./config.sh \
 
 # ── (Re)install and start the service ────────────────────────────────────────
 if $NO_REINSTALL; then
-    echo "Starting $RUNNER_UNIT …"
-    sudo systemctl start "$RUNNER_UNIT"
-    sleep 2
-    if systemctl is-active --quiet "$RUNNER_UNIT"; then
-        echo "Done. $RUNNER_UNIT is active (running)."
-    else
-        echo "Warning: $RUNNER_UNIT did not stay active — check 'journalctl -u $RUNNER_UNIT'." >&2
-        exit 1
-    fi
+    start_and_verify "$RUNNER_UNIT" || exit 1
 else
     echo "Installing service …"
     sudo ./svc.sh install "$CTND_USER" 2>/dev/null || sudo ./svc.sh install

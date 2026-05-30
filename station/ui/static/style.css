@@ -231,6 +231,9 @@ footer {
 .btn-red { background: #7B1212; }
 .btn-red:hover:not(:disabled) { background: #9C2020; }
 
+.btn-teal { background: #00695C; }
+.btn-teal:hover:not(:disabled) { background: #00897B; }
+
 .btn-amber { background: #E65100; }
 .btn-amber:hover:not(:disabled) { background: #F57C00; }
 /* armed = waiting for the confirming second tap */

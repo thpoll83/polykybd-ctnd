@@ -6,7 +6,7 @@ const logEl     = document.getElementById('log-output');
 const statusEl  = document.getElementById('status-text');
 const clockEl   = document.getElementById('clock');
 const actionBtns = [
-  'btn-flash-left', 'btn-flash-right', 'btn-run', 'btn-reregister',
+  'btn-flash-left', 'btn-flash-right', 'btn-run', 'btn-reregister', 'btn-restart',
   'btn-usb-left',     'btn-bootsel-left',  'btn-reset-left',
   'btn-usb-right',    'btn-bootsel-right', 'btn-reset-right',
 ].map(id => document.getElementById(id));
@@ -82,6 +82,13 @@ function runTests() {
 function runDiagnostics() {
   appendLog('[ui] running runner diagnostics…');
   socket.emit('run_diagnostics');
+}
+
+/* Restart the runner service. Non-destructive (just bounces it), so no confirm.
+   Fixes the common "configured but wedged" case without a reconfigure. */
+function restartRunner() {
+  appendLog('[ui] restarting runner service…');
+  socket.emit('restart_runner');
 }
 
 /* Re-register the GitHub Actions runner. Disruptive (stops → reconfigures →

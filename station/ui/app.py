@@ -415,8 +415,9 @@ def on_run_diagnostics(_data=None):
     threading.Thread(target=_run_diagnostics, daemon=True).start()
 
 
-@socketio.on("reregister_runner")
-def on_reregister_runner(_data=None):
+def _run_runner_script(flag: str, banner: str, ok_msg: str, fail_msg: str):
+    """Stream `register-runner.sh <flag>` output to the log panel and reflect the
+    result in the status dot + RUNNER badge. Runs on a background thread."""
     if _status["value"] == "registering":
         return
     set_status("registering")
@@ -424,11 +425,11 @@ def on_reregister_runner(_data=None):
     def _do():
         script = str(Path(__file__).resolve().parents[2] / "scripts" / "register-runner.sh")
         emit_log("")
-        emit_log("════════ RE-REGISTER RUNNER ════════")
+        emit_log(f"════════ {banner} ════════")
         rc = None
         try:
             proc = subprocess.Popen(
-                ["bash", script, "--no-reinstall"],
+                ["bash", script, flag],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
             )
@@ -436,14 +437,14 @@ def on_reregister_runner(_data=None):
                 emit_log(line.rstrip())
             rc = proc.wait()
         except Exception as exc:
-            emit_log(f"[ui] re-register error: {exc}")
+            emit_log(f"[ui] {fail_msg}: {exc}")
             set_status("error")
         else:
             if rc == 0:
-                emit_log("[ui] runner re-registered ✓")
+                emit_log(f"[ui] {ok_msg}")
                 set_status("idle")
             else:
-                emit_log(f"[ui] re-register failed (exit {rc})")
+                emit_log(f"[ui] {fail_msg} (exit {rc})")
                 set_status("error")
         finally:
             emit_log("════════════════════════════════════")
@@ -453,6 +454,18 @@ def on_reregister_runner(_data=None):
                 pass
 
     threading.Thread(target=_do, daemon=True).start()
+
+
+@socketio.on("reregister_runner")
+def on_reregister_runner(_data=None):
+    _run_runner_script("--no-reinstall", "RE-REGISTER RUNNER",
+                       "runner re-registered ✓", "re-register failed")
+
+
+@socketio.on("restart_runner")
+def on_restart_runner(_data=None):
+    _run_runner_script("--restart-only", "RESTART RUNNER",
+                       "runner restarted ✓", "restart failed")
 
 
 @socketio.on("flash")
