@@ -14,8 +14,12 @@ from .config import (
 )
 
 # Signal levels for asserting / releasing active-low pins.
-# Inverted (NPN transistor): GPIO HIGH → transistor ON → pin LOW = asserted.
-# Direct:                    GPIO LOW  = pin LOW = asserted.
+# Inverted (2N2222 NPN BJT low-side switch, default):
+#   GPIO HIGH → BJT saturated → pin ~0.1 V = asserted.
+#   GPIO LOW  → BJT off → pin held HIGH by RP2040 internal pull-up = released.
+# Direct (open-drain or direct wire, gpio.inverted: false):
+#   GPIO LOW  = pin LOW = asserted.
+#   GPIO HIGH = pin HIGH = released.
 _ASSERT  = GPIO.HIGH if GPIO_INVERTED else GPIO.LOW
 _RELEASE = GPIO.LOW  if GPIO_INVERTED else GPIO.HIGH
 
