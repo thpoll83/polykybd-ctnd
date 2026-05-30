@@ -77,18 +77,23 @@ fi
 # ── Wipe stale runner credentials ────────────────────────────────────────────
 # config.sh remove can fail if the server-side registration is already gone.
 # Deleting these three files is equivalent to what config.sh remove does locally.
-if [[ -f ".runner" ]]; then
+# Also covers the "Not configured" state, where the listener starts but exits
+# because .runner is missing while other artefacts may linger.
+if [[ -f ".runner" || -f ".credentials" || -f ".credentials_rsaparams" ]]; then
     echo "Removing stale runner credentials …"
     rm -f .runner .credentials .credentials_rsaparams
 fi
 
 # ── Re-register ───────────────────────────────────────────────────────────────
+# --replace makes this idempotent: if a runner with the same name still exists
+# on GitHub (e.g. showing offline), it is replaced instead of erroring out.
 echo "Configuring runner …"
 sudo -u "$CTND_USER" ./config.sh \
     --url https://github.com/thpoll83/qmk_firmware \
     --token "$TOKEN" \
     --name "$RUNNER_NAME" \
     --labels polykybd-ctnd \
+    --replace \
     --unattended
 
 # ── Re-install and start the service ─────────────────────────────────────────
