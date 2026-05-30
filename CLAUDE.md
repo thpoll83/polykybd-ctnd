@@ -52,7 +52,7 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 ## Key design decisions
 
 - **uhubctl per-port power switching** is used instead of a debug probe. The RPi4's own USB controller supports per-port power control natively (no external hub needed). This also doubles as a manual flash station for new boards.
-- **GPIO pins** (BCM 17/18 for left, 22/23 for right) drive the RUN and BOOTSEL pads on the PCB via 100 Ω series resistors. Pads are exposed on the assembled boards since no key switches are fitted.
+- **GPIO pins** (BCM 17/18 for left, 22/23 for right) drive the RUN and BOOTSEL pads on the PCB via a 2N2222 NPN BJT low-side switch circuit (see below). Pads are exposed on the assembled boards since no key switches are fitted.
 - **EE_HANDS** is used in the firmware (side stored in EEPROM). Because both halves are USB-connected to the RPi simultaneously, `SPLIT_USB_DETECT` would be ambiguous. The EEPROM side marker must be set once on each half (e.g. via QMK Toolbox or a keymap combo) before the first HIL run; it survives subsequent UF2 reflashes so this is a one-time step.
 - **Flask-SocketIO** (threading mode) is used for the web UI so log lines stream to the browser in real time without polling.
 - **Right half is flashed first** in `test_runner.py` because it communicates via the PIO UART split cable, not USB HID, so a brief USB reboot on the right half doesn't disrupt the test HID path.
@@ -61,10 +61,44 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 
 - **VID/PID**: `0x2021:0x2007` (PolyFabriq PolyKybd Split72) — in `config/config.yaml`
 - **Raw HID usage**: `RAW_USAGE_PAGE 0xFF61`, `RAW_USAGE_ID 0x62` — from `split72/config.h`
-- **RUN pin circuit**: NPN transistor (BC337 / 2N3904 TO-92 E-B-C) — GPIO HIGH → transistor ON → RUN LOW → reset. Idle is GPIO LOW. See README for full schematic.
-- **GPIO logic**: HIGH = assert reset, LOW = idle/running (inverted vs direct-drive; transistor provides the inversion)
+- **RUN and BOOTSEL circuits**: identical 2N2222 NPN BJT low-side switch (see schematic below). `gpio.inverted: true` in config (the default).
+- **GPIO logic**: GPIO HIGH → BJT saturated → pin pulled to ~0.1 V (asserted). GPIO LOW → BJT off → pin held HIGH by RP2040 internal pull-up (~50 kΩ) → running/released. Idle state is GPIO LOW.
 - **EE_HANDS**: firmware stores master/slave side in EEPROM (`#define EE_HANDS` in `split72/config.h`). Must be set once per half before first HIL run; survives all UF2 reflashes.
 - **CI workflow**: `.github/workflows/qmk-test.yml` is live in `thpoll83/qmk_firmware` on the `PolyKeyboard` branch.
+
+### Reset / BOOTSEL driver circuit (per pin)
+
+```
+              RP2040
+                │
+            RUN ●──────────────┐
+            (or               ─┴─ C1 100 nF (optional, noise immunity)
+           BOOTSEL)            ─┬─
+                │               │
+           Collector            │
+                │               │
+         ┌──────┴──────┐        │
+         │   2N2222    │        │
+         │    (NPN)    │        │
+         └──Base──Emit─┘        │
+               │      │         │
+  RPi4 GPIO ──[R1 1kΩ]┤         │
+               │      │         │
+            [R2 82kΩ] │         │
+               │      │         │
+              GND─────●─────────●─── GND (shared)
+```
+
+| RPi4 GPIO | Q1 state | Pin voltage | RP2040 state |
+|-----------|----------|-------------|--------------|
+| HIGH (3.3 V) | Saturated | ~0.1–0.2 V | **Asserted** (reset / BOOTSEL held) |
+| LOW (0 V) | Off | ~3.3 V (internal pull-up) | **Released** (running / button up) |
+
+**Design notes:**
+- A 2N7000 MOSFET was tried first but R_DS(on) is too high at 3.3 V gate drive to pull RUN below the RP2040 reset threshold. The saturated 2N2222 drops only V_CE(sat) ≈ 0.1–0.2 V.
+- Do **not** use a Darlington (e.g. TIP120): V_CE(sat) ≈ 0.9–1.2 V, above the RP2040 reset threshold (~0.8 V).
+- 2N2222 pinout varies by package and manufacturer (TO-18 vs TO-92; some clones reverse C and E). Verify with a multimeter in diode mode before powering up. Swapped C/E gives inverse-active mode with V_CE ≈ 0.6–1.2 V — insufficient to assert reset.
+- R2 (82 kΩ base pull-down) keeps Q1 off during RPi4 boot when the GPIO may be high-impedance.
 
 ## What still needs doing
 
