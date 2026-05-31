@@ -285,7 +285,7 @@ The display blanks itself after **5 minutes of no input** and wakes the instant
 you touch it — no button, no SSH. This is plain X11 DPMS, configured by the
 kiosk service (`systemd/polykybd-kiosk.service`):
 
-```
+```bash
 xset s off          # disable the gray screensaver; DPMS is the only blanker
 xset +dpms
 xset dpms 0 0 300   # standby=0 suspend=0 off=300s → blank HDMI after 5 min idle
