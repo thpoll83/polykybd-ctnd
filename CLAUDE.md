@@ -107,7 +107,7 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 - [ ] Verify `USB_HUB_LOCATION`, `LEFT_USB_PORT`, `RIGHT_USB_PORT` by running `uhubctl` on the RPi4 and update `config/config.yaml`
 - [ ] Set EE_HANDS EEPROM marker on each half once (QMK Toolbox → "Set EEPROM Hand", or a keymap combo) before the first HIL run
 - [ ] Register (or re-register) the GitHub Actions self-hosted runner — see `scripts/register-runner.sh`
-- [ ] Write concrete test cases in `test_runner.py` — currently the list is empty; tests get `(raw_hid: RawHID, log: Callable)` and return `bool`
+- [x] Write concrete test cases — first two live in `station/hil_tests.py` (`single master enumerates`, `raw HID GET_ID`), wired into the `test_runner.py` CLI. Backlog of further tests is in `docs/FUTURE_TESTS.md`.
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 

@@ -19,6 +19,23 @@ def _find_path(vendor_id: int, product_id: int, usage_page: int, usage: int) -> 
     return None
 
 
+def enumerate_raw_interfaces(
+    vendor_id: int = QMK_VENDOR_ID, product_id: int = QMK_PRODUCT_ID
+) -> list[dict]:
+    """Return every enumerated Raw HID interface for the PolyKybd VID/PID.
+
+    On the HIL rig the slave half calls usb_disconnect(), so a correctly
+    flashed pair exposes exactly one Raw HID interface (the master's). A list
+    longer than one means both halves enumerated as master — the failure this
+    whole POLYKYBD_HIL build exists to prevent.
+    """
+    return [
+        d
+        for d in hid.enumerate(vendor_id, product_id)
+        if d["usage_page"] == HID_RAW_USAGE_PAGE and d["usage"] == HID_RAW_USAGE
+    ]
+
+
 class HIDConsole:
     """Reads QMK's built-in HID console output (equivalent to hid-listen)."""
 

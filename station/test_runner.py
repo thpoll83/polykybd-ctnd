@@ -67,11 +67,12 @@ class TestRunner:
 
 if __name__ == "__main__":
     import argparse
+    from .hil_tests import TESTS
     parser = argparse.ArgumentParser(description="Flash and test PolyKybd firmware")
     parser.add_argument("--left",  required=True, help="Path to left half UF2")
     parser.add_argument("--right", required=True, help="Path to right half UF2")
     args = parser.parse_args()
     runner = TestRunner()
-    result = runner.flash_and_test(args.left, args.right)
+    result = runner.flash_and_test(args.left, args.right, tests=TESTS)
     runner.cleanup()
     sys.exit(0 if result["passed"] else 1)
