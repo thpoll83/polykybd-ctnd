@@ -189,8 +189,22 @@ fi
 CTND_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 CTND_HOME=$(getent passwd "$CTND_USER" | cut -d: -f6)
 
+# Most reliable source: the installed unit's WorkingDirectory. This handles
+# non-standard locations (e.g. a --local install nested under the repo) that the
+# fixed candidate list below would miss.
 if [[ -z "$RUNNER_DIR" ]]; then
-    for candidate in "$CTND_HOME/actions-runner" /opt/actions-runner; do
+    _unit="$(find_runner_unit)"
+    if [[ -n "$_unit" ]] && command -v systemctl >/dev/null 2>&1; then
+        _wd="$(systemctl show -p WorkingDirectory --value "$_unit" 2>/dev/null || true)"
+        if [[ -n "$_wd" && -f "$_wd/config.sh" ]]; then
+            RUNNER_DIR="$_wd"
+        fi
+    fi
+fi
+
+if [[ -z "$RUNNER_DIR" ]]; then
+    for candidate in "$CTND_HOME/actions-runner" "$CTND_HOME/polykybd-ctnd/actions-runner" \
+                     /opt/actions-runner /opt/polykybd-ctnd/actions-runner; do
         if [[ -f "$candidate/config.sh" ]]; then
             RUNNER_DIR="$candidate"
             break
