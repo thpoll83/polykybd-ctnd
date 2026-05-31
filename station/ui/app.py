@@ -143,19 +143,32 @@ if GITHUB_REPO:
 # request), connectivity, then a plain-language verdict. Triggered by the RUNNER
 # badge or the "Diagnose Runner" button.
 
-def _runner_dir():
+def _runner_dir(unit=None):
     """Best-effort location of the actions-runner install (for the .runner check).
-    Returns a Path or None."""
+    Prefers the systemd unit's WorkingDirectory (most reliable, no sudo); falls
+    back to common paths. Returns a Path or None."""
     candidates = []
     env_dir = os.environ.get("CTND_RUNNER_DIR")
     if env_dir:
         candidates.append(Path(env_dir))
+    if unit and shutil.which("systemctl"):
+        try:
+            wd = subprocess.run(
+                ["systemctl", "show", "-p", "WorkingDirectory", "--value", unit],
+                capture_output=True, text=True, timeout=5).stdout.strip()
+            if wd:
+                candidates.append(Path(wd))
+        except Exception:
+            pass
     home = Path.home()
     candidates += [home / "actions-runner", Path("/opt/actions-runner"),
                    Path("/home/pi/actions-runner")]
     for c in candidates:
-        if (c / "config.sh").exists():
-            return c
+        try:
+            if (c / "config.sh").exists():
+                return c
+        except Exception:
+            pass
     return None
 
 
@@ -189,7 +202,7 @@ def _diag_local_runner(log) -> dict:
         except Exception as exc:
             log(f"    [?] systemctl: {exc}")
 
-    rdir = _runner_dir()
+    rdir = _runner_dir(info["unit"])
     if rdir is not None:
         info["configured"] = (rdir / ".runner").exists()
         if info["configured"]:
@@ -351,14 +364,23 @@ def _diag_verdict(facts) -> list:
         out.append("GitHub (Settings → Actions → Runners → ⚙) or re-run")
         out.append("scripts/register-runner.sh (it sets --labels polykybd-ctnd).")
     else:
-        out.append("Root cause: the matching runner is OFFLINE.")
-        if local.get("process_running"):
+        out.append("Root cause: the matching runner is registered but OFFLINE.")
+        if local.get("configured") is False:
+            # GitHub still lists a stale registration, but the Pi lost its
+            # credentials → start/restart can't reconnect it. Must re-register.
+            out.append("GitHub still lists this runner, but the Pi has no local")
+            out.append("registration (.runner missing) — a stale split-brain. Starting")
+            out.append("the service won't reconnect it. RE-REGISTER to replace it:")
+            out.append("  • touchscreen: Runner ↻ Re-register, or")
+            out.append("  • SSH:  cd /opt/polykybd-ctnd && ./scripts/register-runner.sh")
+        elif local.get("process_running"):
             out.append("It runs locally but GitHub sees it offline → outbound HTTPS to")
             out.append("*.actions.githubusercontent.com may be blocked, or it is a duplicate")
             out.append("registration. Check ~/actions-runner/_diag/ logs.")
         else:
-            out.append("Start it on the Pi:  cd ~/actions-runner && sudo ./svc.sh start")
-            out.append("(or re-register:  scripts/register-runner.sh --token <TOKEN>)")
+            out.append("Start it on the Pi (touchscreen Runner ⟳ Restart, or")
+            out.append("cd ~/actions-runner && sudo ./svc.sh start). If it then exits with")
+            out.append("'Not configured', RE-REGISTER instead (↻ Re-register).")
     return out
 
 
