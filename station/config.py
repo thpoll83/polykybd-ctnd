@@ -39,6 +39,9 @@ UI_PORT = _c["ui"]["port"]
 # GitHub Actions CI status (optional)
 GITHUB_REPO  = _c.get("github", {}).get("repo", "")
 GITHUB_TOKEN = _c.get("github", {}).get("token", "")
+# Labels the HIL job requires (must match `runs-on:` in qmk-test.yml). Used by the
+# runner-status badge and the on-screen diagnostics.
+RUNNER_LABELS = _c.get("github", {}).get("runner_labels") or ["self-hosted", "polykybd-ctnd"]
 
 # Firmware directory (relative to repo root)
 FIRMWARE_DIR = str(_root / "firmware")

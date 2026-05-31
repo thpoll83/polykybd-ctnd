@@ -6,7 +6,7 @@ const logEl     = document.getElementById('log-output');
 const statusEl  = document.getElementById('status-text');
 const clockEl   = document.getElementById('clock');
 const actionBtns = [
-  'btn-flash-left', 'btn-flash-right', 'btn-run',
+  'btn-flash-left', 'btn-flash-right', 'btn-run', 'btn-reregister', 'btn-restart',
   'btn-usb-left',     'btn-bootsel-left',  'btn-reset-left',
   'btn-usb-right',    'btn-bootsel-right', 'btn-reset-right',
 ].map(id => document.getElementById(id));
@@ -38,6 +38,23 @@ socket.on('ci_status', ({ running, url }) => {
   badge.onclick = url ? () => window.open(url, '_blank') : null;
 });
 
+const RUNNER_BADGE = {
+  unknown: ['RUNNER',   'Runner status unknown — tap to run diagnostics'],
+  online:  ['RUNNER ✓', 'Runner online & idle — tap to run diagnostics'],
+  busy:    ['RUNNER ▶', 'Runner online, busy with a job — tap to run diagnostics'],
+  offline: ['RUNNER ✕', 'Runner registered but OFFLINE — tap to run diagnostics'],
+  missing: ['RUNNER !', 'No runner has the required labels — tap to run diagnostics'],
+  noauth:  ['RUNNER ⚿', 'Token lacks runner-admin scope — tap to run diagnostics'],
+};
+
+socket.on('runner_status', ({ status }) => {
+  const badge = document.getElementById('rn-badge');
+  const [text, title] = RUNNER_BADGE[status] || RUNNER_BADGE.unknown;
+  badge.dataset.rn  = status;
+  badge.textContent = text;
+  badge.title       = title;
+});
+
 socket.on('test_result', result => {
   const icon = result.passed ? '✓ PASS' : '✗ FAIL';
   appendLog(`\n── ${icon} ──`);
@@ -60,6 +77,40 @@ function runTests() {
   const right = document.getElementById('right-fw').value;
   if (!left || !right) { appendLog('[ui] select both left and right firmware files first'); return; }
   socket.emit('run_tests', { left_uf2: left, right_uf2: right });
+}
+
+function runDiagnostics() {
+  appendLog('[ui] running runner diagnostics…');
+  socket.emit('run_diagnostics');
+}
+
+/* Restart the runner service. Non-destructive (just bounces it), so no confirm.
+   Fixes the common "configured but wedged" case without a reconfigure. */
+function restartRunner() {
+  appendLog('[ui] restarting runner service…');
+  socket.emit('restart_runner');
+}
+
+/* Re-register the GitHub Actions runner. Disruptive (stops → reconfigures →
+   restarts the runner), so require a two-tap confirm before firing. */
+let _reregTimer = null;
+function reregisterRunner() {
+  const btn = document.getElementById('btn-reregister');
+  if (btn.dataset.armed !== 'true') {
+    btn.dataset.label = btn.textContent;          // remember the real label
+    btn.dataset.armed = 'true';
+    btn.textContent = '⚠ Tap to confirm';
+    _reregTimer = setTimeout(() => {
+      btn.dataset.armed = 'false';
+      btn.textContent = btn.dataset.label;
+    }, 3000);
+    return;
+  }
+  clearTimeout(_reregTimer);
+  btn.dataset.armed = 'false';
+  btn.textContent = btn.dataset.label;
+  appendLog('[ui] re-registering runner (stops, reconfigures, restarts it)…');
+  socket.emit('reregister_runner');
 }
 
 function clearLog() { logEl.textContent = ''; }

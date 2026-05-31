@@ -5,24 +5,49 @@
 # has been deleted from GitHub (e.g. after a token expiry or manual removal).
 #
 # Usage:
-#   ./scripts/register-runner.sh --token <TOKEN>
+#   ./scripts/register-runner.sh                  # mint token from a stored PAT
+#   ./scripts/register-runner.sh --pat <PAT>      # mint token from this PAT
+#   ./scripts/register-runner.sh --token <TOKEN>  # use a manual registration token
+#   ./scripts/register-runner.sh --no-reinstall   # re-config + restart only (kiosk
+#                                                 # button path; no svc.sh reinstall)
+#   ./scripts/register-runner.sh --restart-only   # just restart the runner service
+#                                                 # (no reconfigure, no token needed)
 #
-# Get a fresh token at:
+# Registration tokens expire in ~1 hour, so copying one from the GitHub UI for
+# every re-register is tedious. Instead, store a long-lived PAT once and this
+# script mints a fresh registration token for you via the API. PAT is read from
+# (first match wins):  --pat  →  $GITHUB_PAT  →  github.token in config/config.yaml
+# The PAT needs repo "Administration: write" (fine-grained) or "repo" scope
+# (classic). The same token also powers the RUNNER status badge if you grant it
+# "Administration: read" as well.
+#
+# Manual fallback — get a one-off registration token at:
 #   https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new
 #   → Linux / ARM64 → copy the --token value from the ./config.sh command shown
 #
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Default repo; overridden below by github.repo in config.yaml so the runner
+# always registers against the same repo the UI diagnostics target (no drift).
+REPO_SLUG_DEFAULT="thpoll83/qmk_firmware"
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 TOKEN=""
+PAT=""
 RUNNER_NAME="RP4-HIL"
 RUNNER_DIR=""
+NO_REINSTALL=false   # re-config + systemctl restart only; don't touch the unit
+RESTART_ONLY=false   # just systemctl restart the unit; no reconfigure, no token
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --token)   TOKEN="$2";       shift 2 ;;
-        --name)    RUNNER_NAME="$2"; shift 2 ;;
-        --dir)     RUNNER_DIR="$2";  shift 2 ;;
+        --token)        TOKEN="$2";       shift 2 ;;
+        --pat)          PAT="$2";         shift 2 ;;
+        --name)         RUNNER_NAME="$2"; shift 2 ;;
+        --dir)          RUNNER_DIR="$2";  shift 2 ;;
+        --no-reinstall) NO_REINSTALL=true; shift ;;
+        --restart-only) RESTART_ONLY=true; shift ;;
         -h|--help)
             grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -30,20 +55,190 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$TOKEN" ]]; then
-    echo "Error: --token is required." >&2
-    echo ""
-    echo "Get one at: https://github.com/thpoll83/qmk_firmware/settings/actions/runners/new" >&2
-    echo "  → Linux / ARM64 → copy the --token value from the ./config.sh command shown." >&2
+if $NO_REINSTALL && $RESTART_ONLY; then
+    echo "Error: --no-reinstall and --restart-only are mutually exclusive." >&2
     exit 1
 fi
 
+# ── Locate the installed runner systemd unit (read-only, no sudo) ─────────────
+# Must never return non-zero: it is used in `UNIT="$(find_runner_unit)"` under
+# `set -e`/`pipefail`, where a failing systemctl would otherwise abort the script
+# before the friendly "no unit found" message.
+find_runner_unit() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    systemctl list-units --all --no-legend --plain --type=service \
+        'actions.runner.*' 2>/dev/null | awk 'NR==1{print $1}' || true
+}
+
+# Start the unit and report whether it stayed up. $1 = unit name.
+start_and_verify() {
+    local unit="$1"
+    echo "Starting $unit …"
+    sudo systemctl start "$unit"
+    sleep 2
+    if systemctl is-active --quiet "$unit"; then
+        echo "Done. $unit is active (running)."
+    else
+        echo "Warning: $unit did not stay active — check 'journalctl -u $unit'." >&2
+        return 1
+    fi
+}
+
+# ── Restart-only fast path ────────────────────────────────────────────────────
+# Just bounce the runner service. No reconfigure, no token, no runner dir needed
+# — for the common "configured but wedged" case. Exits when done.
+if $RESTART_ONLY; then
+    UNIT="$(find_runner_unit)"
+    if [[ -z "$UNIT" ]]; then
+        echo "Error: no installed actions.runner unit found to restart." >&2
+        echo "Register the runner first (run without --restart-only)." >&2
+        exit 1
+    fi
+    echo "=== PolyKybd CTND — restart runner service ==="
+    echo "Restarting $UNIT …"
+    sudo systemctl restart "$UNIT"
+    sleep 2
+    if systemctl is-active --quiet "$UNIT"; then
+        echo "Done. $UNIT is active (running)."
+        exit 0
+    fi
+    echo "Warning: $UNIT did not stay active after restart." >&2
+    echo "It may be unconfigured/wedged — try Re-register. See 'journalctl -u $UNIT'." >&2
+    exit 1
+fi
+
+# ── Resolve a registration token ──────────────────────────────────────────────
+# A registration token (--token) is used as-is. Otherwise mint one from a PAT.
+
+# read_cfg <key> → echoes config.yaml's github.<key> (token|repo), or nothing.
+read_cfg() {
+    local key="$1"
+    local cfg="$SCRIPT_DIR/../config/config.yaml"
+    [[ -f "$cfg" ]] || return 0
+    local py
+    py="$(command -v python3 || true)"
+    [[ -x "$SCRIPT_DIR/../venv/bin/python" ]] && py="$SCRIPT_DIR/../venv/bin/python"
+    if [[ -n "$py" ]]; then
+        "$py" - "$cfg" "$key" <<'PY' 2>/dev/null
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)  # caller falls back to grep/sed
+try:
+    c = yaml.safe_load(open(sys.argv[1])) or {}
+    print((c.get("github") or {}).get(sys.argv[2]) or "")
+except Exception:
+    pass
+PY
+    fi
+    # Fallback (no python/yaml): `key: "value"  # comment`. Only emits if the
+    # python path above printed nothing, so guard with a marker in the caller.
+}
+
+# read_cfg_or_grep <key> → python/yaml first, then a loose grep/sed fallback.
+read_cfg_or_grep() {
+    local key="$1" val
+    val="$(read_cfg "$key")"
+    if [[ -z "$val" ]]; then
+        local cfg="$SCRIPT_DIR/../config/config.yaml"
+        [[ -f "$cfg" ]] && val="$(grep -E "^[[:space:]]*${key}:" "$cfg" | head -1 \
+            | sed -E "s/^[[:space:]]*${key}:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"']$//")"
+    fi
+    printf '%s' "$val"
+}
+
+read_cfg_token() { read_cfg_or_grep token; }
+
+# Resolve the target repo: github.repo in config.yaml, else the default. Keeps
+# registration aligned with the UI's GITHUB_REPO so they can't drift apart.
+REPO_SLUG="$(read_cfg_or_grep repo)"
+REPO_SLUG="${REPO_SLUG:-$REPO_SLUG_DEFAULT}"
+REPO_URL="https://github.com/${REPO_SLUG}"
+
+mint_token() {  # $1 = PAT → echoes a registration token, or nothing on failure
+    local pat="$1"
+    local api="https://api.github.com/repos/${REPO_SLUG}/actions/runners/registration-token"
+    local resp=""
+    # Fail fast with a specific message when no HTTP client exists, rather than
+    # returning empty and surfacing a misleading "check PAT scope/network" error.
+    if ! command -v curl >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+        echo "Error: need 'curl' or 'python3' to mint a registration token; neither found." >&2
+        echo "Install one, or pass a manual --token <TOKEN>." >&2
+        return 1
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        resp=$(curl -fsSL -X POST \
+            -H "Authorization: Bearer ${pat}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$api" 2>/dev/null) || true
+    elif command -v python3 >/dev/null 2>&1; then
+        resp=$(python3 - "$pat" "$api" <<'PY' 2>/dev/null
+import sys, json, urllib.request
+pat, api = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(api, method="POST", headers={
+    "Authorization": f"Bearer {pat}",
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "polykybd-ctnd-register/1.0",
+})
+try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+        print(r.read().decode())
+except Exception:
+    pass
+PY
+        ) || true
+    fi
+    printf '%s' "$resp" | grep -oE '"token"[[:space:]]*:[[:space:]]*"[^"]+"' | head -1 \
+        | sed -E 's/.*"token"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+}
+
+if [[ -z "$TOKEN" ]]; then
+    [[ -z "$PAT" ]] && PAT="${GITHUB_PAT:-}"
+    [[ -z "$PAT" ]] && PAT="$(read_cfg_token)"
+    if [[ -z "$PAT" ]]; then
+        echo "Error: no registration token and no PAT to mint one." >&2
+        echo "" >&2
+        echo "Either store a PAT (so this works with no arguments next time):" >&2
+        echo "  • set github.token in config/config.yaml, or export GITHUB_PAT=…, or pass --pat" >&2
+        echo "    (PAT needs repo 'Administration: write' / classic 'repo' scope)" >&2
+        echo "Or pass a one-off registration token with --token:" >&2
+        echo "  https://github.com/${REPO_SLUG}/settings/actions/runners/new" >&2
+        exit 1
+    fi
+    echo "Minting a fresh registration token from the PAT …"
+    TOKEN="$(mint_token "$PAT")"
+    if [[ -z "$TOKEN" ]]; then
+        echo "Error: could not mint a registration token." >&2
+        echo "Check the PAT has repo 'Administration: write' (fine-grained) or 'repo'" >&2
+        echo "scope (classic), and that the Pi can reach api.github.com." >&2
+        exit 1
+    fi
+    echo "Got a registration token (valid ~1 hour)."
+fi
+
 # ── Locate runner directory ───────────────────────────────────────────────────
-CTND_USER="${SUDO_USER:-$USER}"
+# id -un is the robust fallback when neither SUDO_USER nor USER is exported.
+CTND_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 CTND_HOME=$(getent passwd "$CTND_USER" | cut -d: -f6)
 
+# Most reliable source: the installed unit's WorkingDirectory. This handles
+# non-standard locations (e.g. a --local install nested under the repo) that the
+# fixed candidate list below would miss.
 if [[ -z "$RUNNER_DIR" ]]; then
-    for candidate in "$CTND_HOME/actions-runner" /opt/actions-runner; do
+    _unit="$(find_runner_unit)"
+    if [[ -n "$_unit" ]] && command -v systemctl >/dev/null 2>&1; then
+        _wd="$(systemctl show -p WorkingDirectory --value "$_unit" 2>/dev/null || true)"
+        if [[ -n "$_wd" && -f "$_wd/config.sh" ]]; then
+            RUNNER_DIR="$_wd"
+        fi
+    fi
+fi
+
+if [[ -z "$RUNNER_DIR" ]]; then
+    for candidate in "$CTND_HOME/actions-runner" "$CTND_HOME/polykybd-ctnd/actions-runner" \
+                     /opt/actions-runner /opt/polykybd-ctnd/actions-runner; do
         if [[ -f "$candidate/config.sh" ]]; then
             RUNNER_DIR="$candidate"
             break
@@ -66,8 +261,33 @@ echo ""
 
 cd "$RUNNER_DIR"
 
-# ── Stop and uninstall the service ───────────────────────────────────────────
-if [[ -f ".svc" ]]; then
+# run config.sh as the runner user — but skip sudo when we already are that user
+# (e.g. invoked from the Flask UI service, which has no password-less sudo -u).
+run_as_ctnd() {
+    if [[ "$(id -un)" == "$CTND_USER" ]]; then
+        "$@"
+    else
+        sudo -u "$CTND_USER" "$@"
+    fi
+}
+
+# Discover the installed systemd unit (read-only, no sudo needed).
+RUNNER_UNIT="$(find_runner_unit)"
+
+# ── Stop the service ─────────────────────────────────────────────────────────
+# --no-reinstall (the kiosk button) only needs systemctl stop/start on the unit,
+# which is granted password-less in sudoers. The full path uses svc.sh, which
+# also (re)installs the unit and needs broader root — fine over SSH.
+if $NO_REINSTALL; then
+    if [[ -n "$RUNNER_UNIT" ]]; then
+        echo "Stopping $RUNNER_UNIT …"
+        sudo systemctl stop "$RUNNER_UNIT" 2>/dev/null || true
+    else
+        echo "Error: no installed actions.runner unit found." >&2
+        echo "Run once over SSH without --no-reinstall to install the service first." >&2
+        exit 1
+    fi
+elif [[ -f ".svc" ]]; then
     echo "Stopping service …"
     sudo ./svc.sh stop      2>/dev/null || true
     echo "Uninstalling service …"
@@ -77,26 +297,34 @@ fi
 # ── Wipe stale runner credentials ────────────────────────────────────────────
 # config.sh remove can fail if the server-side registration is already gone.
 # Deleting these three files is equivalent to what config.sh remove does locally.
-if [[ -f ".runner" ]]; then
+# Also covers the "Not configured" state, where the listener starts but exits
+# because .runner is missing while other artefacts may linger.
+if [[ -f ".runner" || -f ".credentials" || -f ".credentials_rsaparams" ]]; then
     echo "Removing stale runner credentials …"
     rm -f .runner .credentials .credentials_rsaparams
 fi
 
 # ── Re-register ───────────────────────────────────────────────────────────────
+# --replace makes this idempotent: if a runner with the same name still exists
+# on GitHub (e.g. showing offline), it is replaced instead of erroring out.
 echo "Configuring runner …"
-sudo -u "$CTND_USER" ./config.sh \
-    --url https://github.com/thpoll83/qmk_firmware \
+run_as_ctnd ./config.sh \
+    --url "$REPO_URL" \
     --token "$TOKEN" \
     --name "$RUNNER_NAME" \
     --labels polykybd-ctnd \
+    --replace \
     --unattended
 
-# ── Re-install and start the service ─────────────────────────────────────────
-echo "Installing service …"
-sudo ./svc.sh install "$CTND_USER" 2>/dev/null || sudo ./svc.sh install
-echo "Starting service …"
-sudo ./svc.sh start
-
-echo ""
-echo "Done. Checking status:"
-sudo ./svc.sh status
+# ── (Re)install and start the service ────────────────────────────────────────
+if $NO_REINSTALL; then
+    start_and_verify "$RUNNER_UNIT" || exit 1
+else
+    echo "Installing service …"
+    sudo ./svc.sh install "$CTND_USER" 2>/dev/null || sudo ./svc.sh install
+    echo "Starting service …"
+    sudo ./svc.sh start
+    echo ""
+    echo "Done. Checking status:"
+    sudo ./svc.sh status
+fi
