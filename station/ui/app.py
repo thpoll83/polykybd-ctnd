@@ -24,6 +24,11 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 # `Linux`, `ARM64` automatically; `polykybd-ctnd` comes from the runner config.
 REQUIRED_LABELS = {label.lower() for label in RUNNER_LABELS}
 
+# This repo's root — the install can live anywhere (setup.sh --local), so derive
+# it from __file__ rather than hardcoding /opt/polykybd-ctnd in user-facing hints.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REGISTER_SCRIPT = REPO_ROOT / "scripts" / "register-runner.sh"
+
 _status         = {"value": "idle"}
 _ci_state       = {"running": False, "url": None}
 _runner_state   = {"status": "unknown"}            # unknown|online|busy|offline|missing|noauth
@@ -161,7 +166,9 @@ def _runner_dir(unit=None):
         except Exception:
             pass
     home = Path.home()
-    candidates += [home / "actions-runner", Path("/opt/actions-runner"),
+    candidates += [home / "actions-runner", home / "polykybd-ctnd" / "actions-runner",
+                   REPO_ROOT / "actions-runner",
+                   Path("/opt/actions-runner"), Path("/opt/polykybd-ctnd/actions-runner"),
                    Path("/home/pi/actions-runner")]
     for c in candidates:
         try:
@@ -175,11 +182,12 @@ def _runner_dir(unit=None):
 def _diag_local_runner(log) -> dict:
     """Report the local runner systemd service + process. Returns
     {"systemctl": bool, "unit": str|None, "active": bool, "process_running": bool,
-     "configured": bool|None} so the verdict can tell "just stopped" (start it)
-    from "Not configured" (must re-register). configured=None means unknown."""
+     "configured": bool|None, "runner_dir": str|None} so the verdict can tell
+    "just stopped" (start it) from "Not configured" (must re-register), and quote
+    the real install path. configured=None means unknown."""
     info = {"systemctl": bool(shutil.which("systemctl")),
             "unit": None, "active": False, "process_running": False,
-            "configured": None}
+            "configured": None, "runner_dir": None}
     if info["systemctl"]:
         try:
             out = subprocess.run(
@@ -204,6 +212,7 @@ def _diag_local_runner(log) -> dict:
 
     rdir = _runner_dir(info["unit"])
     if rdir is not None:
+        info["runner_dir"] = str(rdir)
         info["configured"] = (rdir / ".runner").exists()
         if info["configured"]:
             log(f"    [✓] runner configured ({rdir}/.runner present)")
@@ -303,6 +312,8 @@ def _diag_verdict(facts) -> list:
     out = []
     local = facts.get("local") or {}
 
+    ssh_hint = f"cd {REPO_ROOT} && ./scripts/register-runner.sh"
+
     # Local runner state is the most common and most actionable cause — lead with it.
     if local.get("unit") and not local.get("active") and local.get("configured") is False:
         # Service installed but no .runner identity → start/restart can't help.
@@ -310,7 +321,7 @@ def _diag_verdict(facts) -> list:
         out.append("it has no registration, so starting the service just exits with")
         out.append("'Not configured'. You must RE-REGISTER (not Restart):")
         out.append("  • touchscreen: Runner ↻ Re-register, or")
-        out.append("  • SSH:  cd /opt/polykybd-ctnd && ./scripts/register-runner.sh")
+        out.append(f"  • SSH:  {ssh_hint}")
         out.append("    (needs a PAT in config.yaml, or pass --token <TOKEN>)")
     elif local.get("unit") and not local.get("active"):
         out.append("Root cause (local): the runner service is installed but NOT running —")
@@ -364,6 +375,7 @@ def _diag_verdict(facts) -> list:
         out.append("GitHub (Settings → Actions → Runners → ⚙) or re-run")
         out.append("scripts/register-runner.sh (it sets --labels polykybd-ctnd).")
     else:
+        rdir = local.get("runner_dir") or "~/actions-runner"
         out.append("Root cause: the matching runner is registered but OFFLINE.")
         if local.get("configured") is False:
             # GitHub still lists a stale registration, but the Pi lost its
@@ -372,14 +384,14 @@ def _diag_verdict(facts) -> list:
             out.append("registration (.runner missing) — a stale split-brain. Starting")
             out.append("the service won't reconnect it. RE-REGISTER to replace it:")
             out.append("  • touchscreen: Runner ↻ Re-register, or")
-            out.append("  • SSH:  cd /opt/polykybd-ctnd && ./scripts/register-runner.sh")
+            out.append(f"  • SSH:  {ssh_hint}")
         elif local.get("process_running"):
             out.append("It runs locally but GitHub sees it offline → outbound HTTPS to")
             out.append("*.actions.githubusercontent.com may be blocked, or it is a duplicate")
-            out.append("registration. Check ~/actions-runner/_diag/ logs.")
+            out.append(f"registration. Check {rdir}/_diag/ logs.")
         else:
             out.append("Start it on the Pi (touchscreen Runner ⟳ Restart, or")
-            out.append("cd ~/actions-runner && sudo ./svc.sh start). If it then exits with")
+            out.append(f"cd {rdir} && sudo ./svc.sh start). If it then exits with")
             out.append("'Not configured', RE-REGISTER instead (↻ Re-register).")
     return out
 
@@ -480,7 +492,7 @@ def _run_runner_script(flag: str, banner: str, ok_msg: str, fail_msg: str):
     set_status("registering")
 
     def _do():
-        script = str(Path(__file__).resolve().parents[2] / "scripts" / "register-runner.sh")
+        script = str(REGISTER_SCRIPT)
         emit_log("")
         emit_log(f"════════ {banner} ════════")
         rc = None

@@ -157,6 +157,12 @@ chmod +x scripts/setup.sh
 ./scripts/setup.sh --local
 ```
 
+> **Install path.** The default location is `/opt/polykybd-ctnd`, used throughout
+> this README. With `--local` the app runs from wherever you cloned it (e.g.
+> `/home/<user>/polykybd-ctnd`) — substitute that path in the commands below. The
+> app derives its own location at runtime, so the on-screen runner diagnostics
+> always quote the correct path regardless of where it's installed.
+
 This will:
 - Install `uhubctl`, `libhidapi`, `chromium` (or `chromium-browser` on older OS), Python 3 + venv
 - Add the current user to the `gpio` and `plugdev` groups
