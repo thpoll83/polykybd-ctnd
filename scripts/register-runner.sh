@@ -28,8 +28,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_SLUG="thpoll83/qmk_firmware"
-REPO_URL="https://github.com/${REPO_SLUG}"
+# Default repo; overridden below by github.repo in config.yaml so the runner
+# always registers against the same repo the UI diagnostics target (no drift).
+REPO_SLUG_DEFAULT="thpoll83/qmk_firmware"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 TOKEN=""
@@ -109,30 +110,63 @@ fi
 # ── Resolve a registration token ──────────────────────────────────────────────
 # A registration token (--token) is used as-is. Otherwise mint one from a PAT.
 
-read_cfg_token() {
+# read_cfg <key> → echoes config.yaml's github.<key> (token|repo), or nothing.
+read_cfg() {
+    local key="$1"
     local cfg="$SCRIPT_DIR/../config/config.yaml"
     [[ -f "$cfg" ]] || return 0
-    local venv_py="$SCRIPT_DIR/../venv/bin/python"
-    if [[ -x "$venv_py" ]]; then
-        "$venv_py" - "$cfg" <<'PY' 2>/dev/null
-import sys, yaml
+    local py
+    py="$(command -v python3 || true)"
+    [[ -x "$SCRIPT_DIR/../venv/bin/python" ]] && py="$SCRIPT_DIR/../venv/bin/python"
+    if [[ -n "$py" ]]; then
+        "$py" - "$cfg" "$key" <<'PY' 2>/dev/null
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)  # caller falls back to grep/sed
 try:
     c = yaml.safe_load(open(sys.argv[1])) or {}
-    print((c.get("github") or {}).get("token") or "")
+    print((c.get("github") or {}).get(sys.argv[2]) or "")
 except Exception:
     pass
 PY
-    else
-        # Best-effort fallback: `token: "ghp_xxx"  # comment`
-        grep -E '^[[:space:]]*token:' "$cfg" | head -1 \
-            | sed -E 's/^[[:space:]]*token:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^["'\'']//; s/["'\'']$//'
     fi
+    # Fallback (no python/yaml): `key: "value"  # comment`. Only emits if the
+    # python path above printed nothing, so guard with a marker in the caller.
 }
+
+# read_cfg_or_grep <key> → python/yaml first, then a loose grep/sed fallback.
+read_cfg_or_grep() {
+    local key="$1" val
+    val="$(read_cfg "$key")"
+    if [[ -z "$val" ]]; then
+        local cfg="$SCRIPT_DIR/../config/config.yaml"
+        [[ -f "$cfg" ]] && val="$(grep -E "^[[:space:]]*${key}:" "$cfg" | head -1 \
+            | sed -E "s/^[[:space:]]*${key}:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^[\"']//; s/[\"']$//")"
+    fi
+    printf '%s' "$val"
+}
+
+read_cfg_token() { read_cfg_or_grep token; }
+
+# Resolve the target repo: github.repo in config.yaml, else the default. Keeps
+# registration aligned with the UI's GITHUB_REPO so they can't drift apart.
+REPO_SLUG="$(read_cfg_or_grep repo)"
+REPO_SLUG="${REPO_SLUG:-$REPO_SLUG_DEFAULT}"
+REPO_URL="https://github.com/${REPO_SLUG}"
 
 mint_token() {  # $1 = PAT → echoes a registration token, or nothing on failure
     local pat="$1"
     local api="https://api.github.com/repos/${REPO_SLUG}/actions/runners/registration-token"
     local resp=""
+    # Fail fast with a specific message when no HTTP client exists, rather than
+    # returning empty and surfacing a misleading "check PAT scope/network" error.
+    if ! command -v curl >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+        echo "Error: need 'curl' or 'python3' to mint a registration token; neither found." >&2
+        echo "Install one, or pass a manual --token <TOKEN>." >&2
+        return 1
+    fi
     if command -v curl >/dev/null 2>&1; then
         resp=$(curl -fsSL -X POST \
             -H "Authorization: Bearer ${pat}" \

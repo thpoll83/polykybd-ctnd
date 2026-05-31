@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import json
+import logging
 import os
 import shutil
 import signal
@@ -15,6 +16,11 @@ from flask_socketio import SocketIO
 from station.config import (
     FIRMWARE_DIR, UI_HOST, UI_PORT, GITHUB_REPO, GITHUB_TOKEN, RUNNER_LABELS,
 )
+
+# Background pollers run unattended; log their failures (to journald via systemd)
+# instead of swallowing them silently, so a wedged poller is diagnosable.
+# Named _log to avoid colliding with the `log` emit-callback param used widely below.
+_log = logging.getLogger("polykybd-ctnd")
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "polykybd-ctnd"
@@ -90,7 +96,7 @@ def _ci_poll_loop():
         try:
             _ci_poll_once()
         except Exception:
-            pass
+            _log.warning("CI poll failed", exc_info=True)
         time.sleep(60)
 
 
@@ -133,7 +139,7 @@ def _runner_poll_loop():
         try:
             _runner_poll_once()
         except Exception:
-            pass
+            _log.warning("runner poll failed", exc_info=True)
         time.sleep(30)
 
 
@@ -477,7 +483,8 @@ def _query_usb_state_at_startup():
             fc.cleanup()
         socketio.emit("usb_state", dict(_usb_state))
     except Exception:
-        pass  # GPIO / uhubctl not available (e.g. dev machine)
+        # Expected on a dev machine without GPIO / uhubctl; debug-level only.
+        _log.debug("startup USB-state query unavailable", exc_info=True)
 
 
 threading.Thread(target=_query_usb_state_at_startup, daemon=True).start()
