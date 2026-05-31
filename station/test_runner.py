@@ -6,6 +6,13 @@ from typing import Callable
 from .flash import FlashController
 from .hid import HIDConsole, RawHID
 
+# Raw HID display-off control command — mirrors the firmware dispatcher in
+# keyboards/handwired/polykybd/hid_com.c (case 24 / 0x18). A command report is
+# data[0]='P' (channel marker) then data[1]=command id; the firmware replies "P\x18.".
+POLY_CHANNEL    = 0x50  # 'P'
+CMD_DISPLAY_OFF = 0x18
+ACK             = ord(".")
+
 
 class TestRunner:
     def __init__(self, log: Callable[[str], None] = print):
@@ -50,8 +57,14 @@ class TestRunner:
 
             if console_started:
                 self._console.stop()
+            passed = all(r["passed"] for r in results)
+            if passed:
+                # Successful HIL test/deploy — park the OLEDs so they don't sit
+                # lit between runs and age. (With no tests defined this is a bare
+                # successful flash, which is still a deploy worth blanking after.)
+                self._turn_off_displays()
             self.status = "idle"
-            return {"passed": all(r["passed"] for r in results), "results": results}
+            return {"passed": passed, "results": results}
 
         except Exception as exc:
             self.status = "error"
@@ -59,6 +72,21 @@ class TestRunner:
             raise
         finally:
             self._flash.cleanup()
+
+    def _turn_off_displays(self) -> None:
+        """Blank both OLEDs (status + per-key) after a passing run so the panels
+        don't sit lit and age/burn in. The firmware turns them off without
+        persisting to EEPROM (a key press or reboot restores brightness) and
+        stays USB-enumerated. Best-effort: a failure here must not fail the run."""
+        try:
+            resp = self._raw.send(bytes([POLY_CHANNEL, CMD_DISPLAY_OFF]))
+        except Exception as exc:
+            self.log(f"[runner] could not turn off displays (non-fatal): {exc}")
+            return
+        if resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL and resp[1] == CMD_DISPLAY_OFF and resp[2] == ACK:
+            self.log("[runner] displays off — OLEDs blanked to prevent wear")
+        else:
+            self.log(f"[runner] display-off sent; unexpected/no ACK: {resp!r}")
 
     def cleanup(self) -> None:
         self._flash.cleanup()
