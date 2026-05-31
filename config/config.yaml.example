@@ -37,8 +37,15 @@ ui:
   port: 5000
 
 # GitHub Actions CI status indicator (optional)
-# The UI polls this repo every 60 s and shows a badge when a job is running,
-# so you know not to flash while CI is verifying.
+# The UI polls this repo and shows a badge when a job is running, so you know not
+# to flash while CI is verifying. It also shows a "RUNNER" badge and an on-screen
+# "Diagnose Runner" button to troubleshoot why the self-hosted runner isn't
+# picking up jobs.
 github:
   repo: "thpoll83/qmk_firmware"
-  token: ""  # personal access token — required for private repos, higher rate limit
+  token: ""  # personal access token. 'actions:read' is enough for the CI badge;
+             # the RUNNER badge / diagnostics also need repo-admin
+             # ('administration:read') to query self-hosted runner status.
+  # Labels the HIL job requires — must match `runs-on:` in qmk-test.yml.
+  # The RUNNER badge turns green only when an online runner advertises all of these.
+  runner_labels: [self-hosted, polykybd-ctnd]

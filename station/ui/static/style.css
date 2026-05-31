@@ -68,6 +68,26 @@ header {
 .ci-badge[data-ci="running"] { background: #4a2800; color: #FFB74D; border-color: #E65100;
                                 animation: pulse 1s infinite; }
 
+.rn-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 4px 11px;
+  border-radius: 20px;
+  border: 1px solid #333;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.4s, color 0.4s;
+}
+
+.rn-badge[data-rn="unknown"] { background: #222;    color: #777;    border-color: #333; }
+.rn-badge[data-rn="online"]  { background: #1a3320; color: #7ec87e; border-color: #2E7D32; }
+.rn-badge[data-rn="busy"]    { background: #4a2800; color: #FFB74D; border-color: #E65100;
+                               animation: pulse 1s infinite; }
+.rn-badge[data-rn="offline"] { background: #4a1212; color: #ef9a9a; border-color: #c62828; }
+.rn-badge[data-rn="missing"] { background: #4a1212; color: #ef9a9a; border-color: #c62828; }
+.rn-badge[data-rn="noauth"]  { background: #3a2e00; color: #FFD54F; border-color: #9e7700; }
+
 .clock {
   font-size: 13px;
   color: #666;
@@ -136,6 +156,20 @@ footer {
   gap: 10px;
 }
 
+.runner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.runner-row label {
+  color: #777;
+  font-size: 13px;
+  white-space: nowrap;
+  min-width: 52px;
+}
+
 /* ── Buttons ── */
 .btn {
   flex: 1;
@@ -197,11 +231,20 @@ footer {
 .btn-red { background: #7B1212; }
 .btn-red:hover:not(:disabled) { background: #9C2020; }
 
+.btn-teal { background: #00695C; }
+.btn-teal:hover:not(:disabled) { background: #00897B; }
+
+.btn-amber { background: #E65100; }
+.btn-amber:hover:not(:disabled) { background: #F57C00; }
+/* armed = waiting for the confirming second tap */
+.btn-amber[data-armed="true"] { background: #b71c1c; animation: pulse 1s infinite; }
+
 /* ── Status colour theming ── */
 body[data-status="idle"]           .status-dot { background: #4CAF50; }
 body[data-status="flashing-left"]  .status-dot,
 body[data-status="flashing-right"] .status-dot { background: #FF9800; animation: pulse 1s infinite; }
 body[data-status="testing"]        .status-dot { background: #2196F3; animation: pulse 1s infinite; }
+body[data-status="registering"]    .status-dot { background: #E65100; animation: pulse 1s infinite; }
 body[data-status="error"]          .status-dot { background: #f44336; }
 
 @keyframes pulse {
