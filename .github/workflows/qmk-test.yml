@@ -1,11 +1,15 @@
 # Template — this file lives in polykybd-ctnd for reference.
 # The copy in thpoll83/qmk_firmware/.github/workflows/ is the live one.
+#
+# It is set to `workflow_dispatch` (manual) only: it cannot succeed in THIS
+# repo because the QMK keyboard sources live in thpoll83/qmk_firmware, not here,
+# so `qmk compile` has nothing to build. Auto-running it on push/PR just
+# produced a permanent red "Build firmware" failure. Copy it into qmk_firmware
+# (where it gets real push/pull_request triggers) to actually use it.
 name: Build and HIL Test
 
 on:
-  push:
-    branches: [PolyKeyboard, "PolyKybd/**"]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
