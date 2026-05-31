@@ -8,6 +8,16 @@ User=pi
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/pi/.Xauthority
 ExecStartPre=/bin/sleep 4
+# Blank the display after 5 min idle and wake it on the next touch.
+# The 52Pi panel's backlight follows the HDMI signal, so DPMS "off" darkens
+# the screen; the USB touch panel stays powered and any tap is a pointer event
+# that resets the DPMS timer and wakes the display — no extra daemon needed.
+# "xset s off" disables the plain gray screensaver so DPMS is the only blanker.
+# "dpms 0 0 300" → standby=0 suspend=0 off=300s (only the off phase is armed).
+# Leading "-" makes these non-fatal: a transient xset hiccup must not stop the
+# kiosk from starting. (Wayland note: xset is X11-only; under labwc/wlroots use
+# swayidle + wlr-randr instead. This service runs X11 — DISPLAY=:0 above.)
+ExecStartPre=-/bin/sh -c 'xset s off; xset +dpms; xset dpms 0 0 300'
 ExecStart=/usr/bin/chromium-browser \
   --kiosk \
   --noerrdialogs \

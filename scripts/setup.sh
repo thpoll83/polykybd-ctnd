@@ -51,6 +51,7 @@ sudo apt-get install -y --no-install-recommends \
   uhubctl \
   picotool \
   libhidapi-hidraw0 libhidapi-libusb0 \
+  x11-xserver-utils \
   "$CHROMIUM_PKG"
 
 # Allow the user to access GPIO and USB without root
