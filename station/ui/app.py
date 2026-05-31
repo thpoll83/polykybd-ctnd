@@ -182,12 +182,13 @@ def _runner_dir(unit=None):
 def _diag_local_runner(log) -> dict:
     """Report the local runner systemd service + process. Returns
     {"systemctl": bool, "unit": str|None, "active": bool, "process_running": bool,
-     "configured": bool|None, "runner_dir": str|None} so the verdict can tell
-    "just stopped" (start it) from "Not configured" (must re-register), and quote
-    the real install path. configured=None means unknown."""
+     "configured": bool|None, "runner_dir": str|None, "active_secs": float|None}
+    so the verdict can tell "just stopped" (start it) from "Not configured" (must
+    re-register), quote the real install path, and avoid crying "offline!" about a
+    runner that only started seconds ago. configured=None means unknown."""
     info = {"systemctl": bool(shutil.which("systemctl")),
             "unit": None, "active": False, "process_running": False,
-            "configured": None, "runner_dir": None}
+            "configured": None, "runner_dir": None, "active_secs": None}
     if info["systemctl"]:
         try:
             out = subprocess.run(
@@ -209,6 +210,23 @@ def _diag_local_runner(log) -> dict:
                 log("    [✗] no actions.runner.*.service installed (run svc.sh install)")
         except Exception as exc:
             log(f"    [?] systemctl: {exc}")
+
+    # How long has the unit been active? A runner that just started hasn't had
+    # time to connect to the Actions broker, so GitHub legitimately still shows
+    # it offline for ~15-60s — don't misdiagnose that as a network block.
+    if info["active"] and info["unit"]:
+        try:
+            ts = subprocess.run(
+                ["systemctl", "show", "-p", "ActiveEnterTimestampMonotonic",
+                 "--value", info["unit"]],
+                capture_output=True, text=True, timeout=5).stdout.strip()
+            mono = int(ts) / 1_000_000  # microseconds → seconds since boot
+            with open("/proc/uptime") as f:
+                uptime = float(f.read().split()[0])
+            if mono > 0:
+                info["active_secs"] = max(0.0, uptime - mono)
+        except Exception:
+            pass
 
     rdir = _runner_dir(info["unit"])
     if rdir is not None:
@@ -386,9 +404,16 @@ def _diag_verdict(facts) -> list:
             out.append("  • touchscreen: Runner ↻ Re-register, or")
             out.append(f"  • SSH:  {ssh_hint}")
         elif local.get("process_running"):
-            out.append("It runs locally but GitHub sees it offline → outbound HTTPS to")
-            out.append("*.actions.githubusercontent.com may be blocked, or it is a duplicate")
-            out.append(f"registration. Check {rdir}/_diag/ logs.")
+            secs = local.get("active_secs")
+            if secs is not None and secs < 60:
+                out.append(f"The runner only started {int(secs)}s ago and is still")
+                out.append("connecting to GitHub's Actions broker — this is normal. Wait")
+                out.append("~30s and re-run Diagnose; it should flip to online (queued")
+                out.append("jobs are then picked up automatically).")
+            else:
+                out.append("It runs locally but GitHub sees it offline → outbound HTTPS to")
+                out.append("*.actions.githubusercontent.com may be blocked, or it is a duplicate")
+                out.append(f"registration. Check {rdir}/_diag/ logs.")
         else:
             out.append("Start it on the Pi (touchscreen Runner ⟳ Restart, or")
             out.append(f"cd {rdir} && sudo ./svc.sh start). If it then exits with")
