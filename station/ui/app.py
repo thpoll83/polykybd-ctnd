@@ -293,16 +293,18 @@ def _diag_github_runners(log) -> dict:
     return {"runners": runners, "have_match": have_match}
 
 
-def _diag_queued(log) -> None:
-    """List queued workflow runs and the labels each waiting job requests."""
+def _diag_queued(log) -> bool:
+    """List queued workflow runs and the labels each waiting job requests.
+    Returns True if anything is queued, so the verdict can stay quiet when the
+    queue is empty (a healthy, idle station)."""
     code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=queued&per_page=5")
     if data is None:
         log(f"    [?] could not query queued runs (status {code})")
-        return
+        return False
     runs = data.get("workflow_runs", [])
     if not runs:
         log("    none queued")
-        return
+        return False
     for run in runs:
         log(f"    #{run.get('run_number')} '{run.get('name')}'  "
             f"{run.get('event')} on {run.get('head_branch')}")
@@ -311,6 +313,7 @@ def _diag_queued(log) -> None:
             if job.get("status") in ("queued", "waiting"):
                 labels = job.get("labels", [])
                 log(f"        ⏳ job '{job.get('name')}' wants [{', '.join(labels)}]")
+    return True
 
 
 def _diag_network(log) -> None:
@@ -373,10 +376,15 @@ def _diag_verdict(facts) -> list:
         return REQUIRED_LABELS <= {l["name"].lower() for l in r.get("labels", [])}
 
     if gh.get("have_match"):
+        # facts["queued"] is True/False from _diag_queued; None if not checked.
+        nothing_queued = facts.get("queued") is False
         if all((not has_labels(r)) or r.get("status") != "online" or r.get("busy")
                for r in runners):
             out.append("A matching runner exists but is BUSY — it will pick up the job")
             out.append("as soon as the current one finishes.")
+        elif nothing_queued:
+            out.append("All good: a matching runner is online & idle and nothing is")
+            out.append("queued. The station is ready to pick up the next HIL job.")
         else:
             out.append("A matching online runner exists, so if the job still waits it is")
             out.append("most likely one of:")
@@ -437,7 +445,7 @@ def _run_diagnostics():
         log("• github registration")
         facts["gh"] = _diag_github_runners(log)
         log("• queued jobs")
-        _diag_queued(log)
+        facts["queued"] = _diag_queued(log)
         log("• connectivity")
         _diag_network(log)
 
