@@ -143,12 +143,30 @@ if GITHUB_REPO:
 # request), connectivity, then a plain-language verdict. Triggered by the RUNNER
 # badge or the "Diagnose Runner" button.
 
+def _runner_dir():
+    """Best-effort location of the actions-runner install (for the .runner check).
+    Returns a Path or None."""
+    candidates = []
+    env_dir = os.environ.get("CTND_RUNNER_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    home = Path.home()
+    candidates += [home / "actions-runner", Path("/opt/actions-runner"),
+                   Path("/home/pi/actions-runner")]
+    for c in candidates:
+        if (c / "config.sh").exists():
+            return c
+    return None
+
+
 def _diag_local_runner(log) -> dict:
     """Report the local runner systemd service + process. Returns
-    {"systemctl": bool, "unit": str|None, "active": bool, "process_running": bool}
-    so the verdict can give an exact start command."""
+    {"systemctl": bool, "unit": str|None, "active": bool, "process_running": bool,
+     "configured": bool|None} so the verdict can tell "just stopped" (start it)
+    from "Not configured" (must re-register). configured=None means unknown."""
     info = {"systemctl": bool(shutil.which("systemctl")),
-            "unit": None, "active": False, "process_running": False}
+            "unit": None, "active": False, "process_running": False,
+            "configured": None}
     if info["systemctl"]:
         try:
             out = subprocess.run(
@@ -170,6 +188,15 @@ def _diag_local_runner(log) -> dict:
                 log("    [✗] no actions.runner.*.service installed (run svc.sh install)")
         except Exception as exc:
             log(f"    [?] systemctl: {exc}")
+
+    rdir = _runner_dir()
+    if rdir is not None:
+        info["configured"] = (rdir / ".runner").exists()
+        if info["configured"]:
+            log(f"    [✓] runner configured ({rdir}/.runner present)")
+        else:
+            log(f"    [✗] runner NOT configured — {rdir}/.runner missing "
+                f"(→ Re-register, not Restart)")
 
     try:
         proc = subprocess.run(["pgrep", "-af", "Runner.Listener"],
@@ -264,11 +291,19 @@ def _diag_verdict(facts) -> list:
     local = facts.get("local") or {}
 
     # Local runner state is the most common and most actionable cause — lead with it.
-    if local.get("unit") and not local.get("active"):
+    if local.get("unit") and not local.get("active") and local.get("configured") is False:
+        # Service installed but no .runner identity → start/restart can't help.
+        out.append("Root cause (local): the runner is installed but NOT configured —")
+        out.append("it has no registration, so starting the service just exits with")
+        out.append("'Not configured'. You must RE-REGISTER (not Restart):")
+        out.append("  • touchscreen: Runner ↻ Re-register, or")
+        out.append("  • SSH:  cd /opt/polykybd-ctnd && ./scripts/register-runner.sh")
+        out.append("    (needs a PAT in config.yaml, or pass --token <TOKEN>)")
+    elif local.get("unit") and not local.get("active"):
         out.append("Root cause (local): the runner service is installed but NOT running —")
         out.append("nothing on this Pi will ever pick up the job. Start it:")
         out.append(f"  sudo systemctl start {local['unit']}")
-        out.append("  (or:  cd ~/actions-runner && sudo ./svc.sh start)")
+        out.append("  (or: touchscreen Runner ⟳ Restart)")
         out.append(f"  why it stopped:  sudo journalctl -u {local['unit']} -n 50 --no-pager")
     elif local.get("systemctl") and not local.get("unit") and not local.get("process_running"):
         out.append("Root cause (local): no runner service is installed on this Pi.")
