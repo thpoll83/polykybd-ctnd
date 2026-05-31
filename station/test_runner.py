@@ -26,7 +26,16 @@ class TestRunner:
             self.log("[runner] waiting for keyboard to enumerate...")
             time.sleep(3)
 
-            self._console.start(lambda msg: self.log(f"[qmk] {msg}"))
+            # The QMK HID console (debug log streaming) is diagnostic only — it
+            # requires CONSOLE_ENABLE in the firmware, which the PolyKybd build
+            # does not set. Its absence (or any transient open failure) must not
+            # fail the test run, so treat startup as best-effort.
+            console_started = False
+            try:
+                self._console.start(lambda msg: self.log(f"[qmk] {msg}"))
+                console_started = True
+            except Exception as exc:
+                self.log(f"[runner] HID console unavailable (continuing without it): {exc}")
 
             self.status = "testing"
             for test in (tests or []):
@@ -39,7 +48,8 @@ class TestRunner:
                     results.append({"name": name, "passed": False, "error": str(exc)})
                     self.log(f"[test] ERROR: {name}: {exc}")
 
-            self._console.stop()
+            if console_started:
+                self._console.stop()
             self.status = "idle"
             return {"passed": all(r["passed"] for r in results), "results": results}
 
