@@ -112,16 +112,19 @@ On a bare PolyKybd PCB (no keys fitted) these pads are accessible solder points 
 ### Flash sequence (what the software does)
 
 ```
-1. uhubctl: power OFF the target USB port
-2. GPIO: BOOTSEL → LOW
-3. GPIO: RUN → LOW  (hold in reset)
-4. GPIO: RUN → HIGH (release reset)  ← RP2040 sees BOOTSEL=LOW, enters bootloader
-5. GPIO: BOOTSEL → HIGH
-6. uhubctl: power ON the target USB port
-7. Wait for /media/…/RPI-RP2 to appear
-8. cp firmware.uf2 /media/…/RPI-RP2/
-9. Wait 2.5 s for automatic reboot into new firmware
+1. GPIO: RUN → LOW  (hold in reset)
+2. GPIO: BOOTSEL → LOW (assert while reset is held)
+3. GPIO: RUN → HIGH (release reset)  ← RP2040 sees BOOTSEL=LOW, enters bootloader
+4. GPIO: BOOTSEL → HIGH
+5. Wait for /media/…/RPI-RP2 to appear
+6. cp firmware.uf2 /media/…/RPI-RP2/
+7. Wait 2.5 s for automatic reboot into new firmware
 ```
+
+> Flashing is driven entirely by the RUN/BOOTSEL GPIO pins — it does **not**
+> power-cycle the USB port. (It can't reliably: the RPi4's built-in USB ports
+> don't support per-port power switching via `uhubctl` — see below.) `uhubctl`
+> power control is exposed only as a manual UI convenience.
 
 ---
 
@@ -135,7 +138,16 @@ On a bare PolyKybd PCB (no keys fitted) these pads are accessible solder points 
 
 The split cable stays connected permanently. During flashing the right half reboots briefly; the left half tolerates a momentary loss of the split peer.
 
-Because both USB cables are always connected, set `MASTER_LEFT` in QMK's `config.h` so the firmware does not use `SPLIT_USB_DETECT` (which would be ambiguous with both sides powered).
+Because both USB cables are always connected, both halves see USB VBUS and the
+stock firmware (which picks the master from `USB_VBUS_PIN`/GP24) makes **both
+halves detect as master**. The RPi4 can't drop VBUS to disambiguate them
+(`uhubctl` power-off is a no-op on its built-in ports). The fix is in firmware:
+the CI builds a HIL-specific UF2 with `-e POLYKYBD_HIL=yes`, which forces the
+master to be chosen from the EE_HANDS handedness marker instead — **left half =
+master, right half = slave** — independent of VBUS. `test_runner.py` flashes
+that `*_hil.uf2` to both halves. See `is_keyboard_master_impl()` in
+`qmk_firmware`'s `split72/keymaps/default/keymap.c`. Normal user firmware omits
+the flag and keeps VBUS-based detection (plug USB into either half).
 
 ---
 
