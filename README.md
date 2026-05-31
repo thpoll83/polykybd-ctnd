@@ -296,10 +296,15 @@ the HDMI signal, so DPMS "off" darkens the screen, while the **USB touch panel
 stays powered** and any tap is a pointer event that resets the DPMS timer and
 wakes the display. No background watcher process is involved.
 
+A **"touch to wake" catch layer** in the UI (`station/ui/static/app.js`) makes
+the wake gesture safe: it mirrors the same idle timer and raises a full-screen
+overlay ~1 s before the backlight cuts, so the touch that wakes the panel lands
+on the overlay — not on a Flash/Run button underneath — and is swallowed. The
+following taps work normally.
+
 - **Change the timeout** by editing the `300` (seconds) in the kiosk unit, then
-  `sudo systemctl restart polykybd-kiosk` (or re-run `setup.sh`).
-- **First touch after blanking also lands as a tap** on whatever is under your
-  finger — harmless on this UI, but tap an empty area if you want to be sure.
+  `sudo systemctl restart polykybd-kiosk` (or re-run `setup.sh`). Keep the
+  `WAKE_AFTER_MS` constant in `app.js` in sync (it's `300 s − 1 s` of margin).
 - **If the screen never blanks**, Chromium may be holding a wake lock; confirm
   DPMS is armed with `xset q | grep -A2 DPMS`. Force it off to test:
   `DISPLAY=:0 xset dpms force off`.

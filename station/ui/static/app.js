@@ -211,6 +211,42 @@ function refreshFirmware() {
     .catch(() => appendLog('[ui] could not load firmware list'));
 }
 
+/* ── Idle screen-blank "touch to wake" catch layer ──
+   Mirrors the kiosk's X11 DPMS blanking (`xset dpms 0 0 300` in
+   polykybd-kiosk.service). After the same idle period we raise a full-screen
+   layer over the UI; because it sits on top, the touch that wakes the panel
+   lands on it — not on a Flash/Run button underneath — and is consumed here.
+   The layer rises ~1 s before DPMS cuts the backlight so it is guaranteed up
+   first. Keep WAKE_AFTER_MS in sync with the `off` value in the kiosk unit. */
+const WAKE_AFTER_MS = 299000;                 // ≈ DPMS off=300 s, minus 1 s margin
+const wakeLayer = document.getElementById('wake-overlay');
+let _idleTimer = null;
+
+function armIdle() {
+  clearTimeout(_idleTimer);
+  _idleTimer = setTimeout(() => { wakeLayer.hidden = false; }, WAKE_AFTER_MS);
+}
+
+/* The wake tap targets the overlay (it's topmost and covers the controls), so
+   the click never reaches a button — we just dismiss the layer and re-arm. */
+wakeLayer.addEventListener('click', () => { wakeLayer.hidden = true; armIdle(); });
+
+/* Any interaction re-arms the idle timer so the screen stays awake while in
+   use. A keypress while blanked also dismisses the layer (a hardware key isn't
+   blocked spatially the way a touch on the overlay is). */
+['pointerdown', 'mousedown', 'touchstart', 'wheel', 'keydown'].forEach(ev =>
+  document.addEventListener(ev, e => {
+    if (ev === 'keydown' && !wakeLayer.hidden) {
+      e.preventDefault();
+      e.stopPropagation();
+      wakeLayer.hidden = true;
+    }
+    armIdle();
+  }, { capture: true })
+);
+
+armIdle();
+
 /* ── Helpers ── */
 function appendLog(msg) {
   logEl.textContent += msg + '\n';
