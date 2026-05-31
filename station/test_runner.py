@@ -83,7 +83,7 @@ class TestRunner:
         except Exception as exc:
             self.log(f"[runner] could not turn off displays (non-fatal): {exc}")
             return
-        if resp and len(resp) >= 3 and resp[1] == CMD_DISPLAY_OFF and resp[2] == ACK:
+        if resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL and resp[1] == CMD_DISPLAY_OFF and resp[2] == ACK:
             self.log("[runner] displays off — OLEDs blanked to prevent wear")
         else:
             self.log(f"[runner] display-off sent; unexpected/no ACK: {resp!r}")
