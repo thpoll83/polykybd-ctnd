@@ -63,6 +63,9 @@ def test_get_id(raw: RawHID, log: Callable[[str], None]) -> bool:
     if response is None:
         log("  FAIL: no response to GET_ID")
         return False
+    if len(response) < 3:
+        log(f"  FAIL: response too short ({len(response)} bytes), expected at least 3")
+        return False
     if response[0] != POLY_CHANNEL or response[1] != CMD_GET_ID:
         log(f"  FAIL: bad header {response[0]:#04x} {response[1]:#04x}, want 'P' 0x06")
         return False
