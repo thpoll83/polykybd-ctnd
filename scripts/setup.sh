@@ -62,7 +62,7 @@ sudo usermod -aG gpio,plugdev "$CTND_USER"
 # volume.
 sudo tee /etc/udev/rules.d/99-polykybd.rules > /dev/null <<'EOF'
 # PolyKybd running keyboard — HID console + Raw HID
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="4b50", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="4b50", MODE="0660", GROUP="plugdev"
 # RP2040 in BOOTSEL mode — required for picotool
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0660", GROUP="plugdev"
 # RP2040 BOOTSEL mass-storage volume — hide it from UDisks2 / the desktop volume
