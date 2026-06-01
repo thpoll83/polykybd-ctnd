@@ -252,6 +252,29 @@ body[data-status="error"]          .status-dot { background: #f44336; }
   50%       { opacity: 0.4; }
 }
 
+/* ── Idle "touch to wake" catch layer ── */
+#wake-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  cursor: none;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Higher specificity than the rule above so [hidden] wins over display:flex. */
+#wake-overlay[hidden] { display: none; }
+
+#wake-overlay .hint {
+  color: #2e2e2e;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
 /* ── Scrollbar ── */
 main::-webkit-scrollbar { width: 4px; }
 main::-webkit-scrollbar-track { background: transparent; }

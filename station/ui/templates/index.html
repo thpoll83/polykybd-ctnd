@@ -65,6 +65,11 @@
     </div>
   </footer>
 
+  <!-- Full-screen catch layer for the idle screen-blank (see app.js). It rises
+       just before DPMS darkens the panel so the touch that wakes the display
+       lands here — not on a Flash/Run button underneath — and is swallowed. -->
+  <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
+
   <script src="/static/socket.io.min.js"></script>
   <script src="/static/app.js"></script>
 </body>

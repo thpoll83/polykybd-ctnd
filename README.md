@@ -279,6 +279,38 @@ The status dot in the header pulses amber while flashing, blue while testing, am
 
   The CI and RUNNER badges require a `github:` block in `config.yaml` (see [§3 Update config](#3-update-config)).
 
+### Screen blanking (idle power-off + wake on touch)
+
+The display blanks itself after **5 minutes of no input** and wakes the instant
+you touch it — no button, no SSH. This is plain X11 DPMS, configured by the
+kiosk service (`systemd/polykybd-kiosk.service`):
+
+```bash
+xset s off          # disable the gray screensaver; DPMS is the only blanker
+xset +dpms
+xset dpms 0 0 300   # standby=0 suspend=0 off=300s → blank HDMI after 5 min idle
+```
+
+It works because of how the rig is wired: the 52Pi panel's backlight follows
+the HDMI signal, so DPMS "off" darkens the screen, while the **USB touch panel
+stays powered** and any tap is a pointer event that resets the DPMS timer and
+wakes the display. No background watcher process is involved.
+
+A **"touch to wake" catch layer** in the UI (`station/ui/static/app.js`) makes
+the wake gesture safe: it mirrors the same idle timer and raises a full-screen
+overlay ~1 s before the backlight cuts, so the touch that wakes the panel lands
+on the overlay — not on a Flash/Run button underneath — and is swallowed. The
+following taps work normally.
+
+- **Change the timeout** by editing the `300` (seconds) in the kiosk unit, then
+  `sudo systemctl restart polykybd-kiosk` (or re-run `setup.sh`). Keep the
+  `WAKE_AFTER_MS` constant in `app.js` in sync (it's `300 s − 1 s` of margin).
+- **If the screen never blanks**, Chromium may be holding a wake lock; confirm
+  DPMS is armed with `xset q | grep -A2 DPMS`. Force it off to test:
+  `DISPLAY=:0 xset dpms force off`.
+- **Wayland note:** `xset` is X11-only. This rig runs X11 (the kiosk service
+  sets `DISPLAY=:0`); under labwc/wlroots use `swayidle` + `wlr-randr` instead.
+
 ### Dropping firmware manually
 
 Copy any `.uf2` file into `/opt/polykybd-ctnd/firmware/` — the UI picks it up on the next refresh.
