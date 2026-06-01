@@ -56,13 +56,15 @@ sudo apt-get install -y --no-install-recommends \
 # Allow the user to access GPIO and USB without root
 sudo usermod -aG gpio,plugdev "$CTND_USER"
 
-# udev rules: HID access for the running keyboard (update idVendor for actual QMK VID),
-# BOOTSEL access so picotool can talk to the RP2040 without root, and a rule
-# telling UDisks2 / the desktop volume monitor to ignore the RP2040 mass-storage
-# volume.
+# udev rules: HID access for the running keyboard (VID 2021 = PolyFabriq, the
+# PolyKybd Split72/corne42), BOOTSEL access so picotool can talk to the RP2040
+# without root, and a rule telling UDisks2 / the desktop volume monitor to
+# ignore the RP2040 mass-storage volume.
 sudo tee /etc/udev/rules.d/99-polykybd.rules > /dev/null <<'EOF'
-# PolyKybd running keyboard — HID console + Raw HID
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="4b50", MODE="0660", GROUP="plugdev"
+# PolyKybd running keyboard — HID console + Raw HID (VID 2021 = PolyFabriq).
+# Must match the keyboard's USB idVendor (see qmk:vendor_id in config.yaml), or
+# the hidraw node stays root-only and the station can't open it.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2021", MODE="0660", GROUP="plugdev"
 # RP2040 in BOOTSEL mode — required for picotool
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0660", GROUP="plugdev"
 # RP2040 BOOTSEL mass-storage volume — hide it from UDisks2 / the desktop volume
