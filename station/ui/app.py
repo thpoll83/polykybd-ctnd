@@ -497,6 +497,28 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/ci-jobs")
+def list_ci_jobs():
+    if not GITHUB_REPO:
+        return jsonify([])
+    jobs = []
+    for status in ("queued", "in_progress"):
+        _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page=10")
+        if data:
+            for run in data.get("workflow_runs", []):
+                jobs.append({
+                    "id":          run.get("id"),
+                    "name":        run.get("name"),
+                    "run_number":  run.get("run_number"),
+                    "status":      run.get("status"),
+                    "head_branch": run.get("head_branch"),
+                    "event":       run.get("event"),
+                    "html_url":    run.get("html_url"),
+                    "created_at":  run.get("created_at"),
+                })
+    return jsonify(jobs)
+
+
 @app.route("/firmware")
 def list_firmware():
     base = Path(FIRMWARE_DIR)

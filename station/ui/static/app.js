@@ -180,6 +180,58 @@ function toggleUsb(side) {
 }
 
 
+let _ciJobsTimer = null;
+
+function openRunner() {
+  document.getElementById('main-controls').hidden = true;
+  document.getElementById('runner-panel').hidden = false;
+  document.getElementById('log-panel').hidden = true;
+  document.getElementById('ci-jobs-panel').hidden = false;
+  fetchCiJobs();
+  _ciJobsTimer = setInterval(fetchCiJobs, 30000);
+}
+
+function closeRunner() {
+  clearInterval(_ciJobsTimer);
+  _ciJobsTimer = null;
+  document.getElementById('runner-panel').hidden = true;
+  document.getElementById('main-controls').hidden = false;
+  document.getElementById('ci-jobs-panel').hidden = true;
+  document.getElementById('log-panel').hidden = false;
+}
+
+function fetchCiJobs() {
+  fetch('/ci-jobs')
+    .then(r => r.json())
+    .then(renderCiJobs)
+    .catch(() => {
+      document.getElementById('ci-jobs-list').innerHTML =
+        '<p class="no-jobs">Could not load CI jobs.</p>';
+    });
+}
+
+function renderCiJobs(jobs) {
+  const list = document.getElementById('ci-jobs-list');
+  if (!jobs.length) {
+    list.innerHTML = '<p class="no-jobs">No scheduled or running CI jobs.</p>';
+    return;
+  }
+  list.innerHTML = jobs.map(j => {
+    const running = j.status === 'in_progress';
+    const icon    = running ? '▶' : '⏳';
+    const cls     = running ? 'ci-job-running' : 'ci-job-queued';
+    const label   = running ? 'Running' : 'Queued';
+    return `<div class="ci-job ${cls}">
+      <span class="ci-job-icon">${icon}</span>
+      <span class="ci-job-body">
+        <span class="ci-job-name">#${j.run_number} ${j.name}</span>
+        <span class="ci-job-meta">${j.event} · ${j.head_branch}</span>
+      </span>
+      <span class="ci-job-label">${label}</span>
+    </div>`;
+  }).join('');
+}
+
 function openMore()  {
   document.getElementById('main-controls').hidden = true;
   document.getElementById('more-panel').hidden = false;
