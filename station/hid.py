@@ -27,6 +27,17 @@ def _find_path(vendor_id: int, product_id: int, usage_page: int, usage: int) -> 
     return None
 
 
+def _frame(data: bytes) -> bytes:
+    """Wrap a command payload as the 65-byte numbered Raw HID report we write:
+    report id ``0x00`` + the 64-byte data block, zero-padded. Rejects an
+    oversized payload up front with a clear message instead of the cryptic
+    ``bytes: negative count`` that ``bytes(64 - len(data))`` would otherwise raise.
+    """
+    if len(data) > 64:
+        raise ValueError(f"raw HID payload too large: {len(data)} > 64 bytes")
+    return bytes([0x00]) + data + bytes(64 - len(data))
+
+
 def enumerate_raw_interfaces(
     vendor_id: int = QMK_VENDOR_ID, product_id: int = QMK_PRODUCT_ID
 ) -> list[dict]:
@@ -94,9 +105,122 @@ class RawHID:
             raise RuntimeError("QMK Raw HID interface not found")
         dev = hid.Device(path=path)
         try:
-            report = bytes([0x00]) + data + bytes(64 - len(data))
-            dev.write(report[:65])
+            dev.write(_frame(data))
             response = dev.read(64, timeout=timeout_ms)
             return bytes(response) if response else None
         finally:
             dev.close()
+
+    def send_and_read_all(
+        self,
+        data: bytes,
+        first_timeout_ms: int = 1000,
+        next_timeout_ms: int = 250,
+        max_reports: int = 8,
+    ) -> list[bytes]:
+        """Write one command, then read *every* input report it produces.
+
+        ``send()`` opens a fresh handle and reads exactly once, so it only ever
+        sees the first 64-byte packet. Some firmware commands answer with more
+        than one — e.g. GET_LANG_LIST splits the language codes across two
+        reports. This opens the handle once, writes, then keeps reading (with a
+        short per-read timeout) until a read returns nothing or ``max_reports``
+        is hit, returning the packets in order. Opening a single handle for the
+        whole exchange is what keeps the firmware's back-to-back replies from
+        being dropped by the per-open hidraw queue being torn down between reads.
+        """
+        path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
+        if path is None:
+            raise RuntimeError("QMK Raw HID interface not found")
+        dev = hid.Device(path=path)
+        try:
+            dev.write(_frame(data))
+            packets: list[bytes] = []
+            timeout = first_timeout_ms
+            for _ in range(max_reports):
+                chunk = dev.read(64, timeout=timeout)
+                if not chunk:
+                    break
+                packets.append(bytes(chunk))
+                timeout = next_timeout_ms
+            return packets
+        finally:
+            dev.close()
+
+    def write_reports(self, reports: list[bytes]) -> None:
+        """Write several command reports on one handle without reading replies.
+
+        For fire-and-forget command bursts whose firmware replies are disabled —
+        the overlay/ROI upload commands (cmd 10/16/17/18/19) send no ACK. Doing
+        the burst on a single handle matches how PolyKybdHost streams overlays
+        (``send_multiple``); the follow-up liveness check is a separate GET_ID
+        via ``send()``.
+        """
+        path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
+        if path is None:
+            raise RuntimeError("QMK Raw HID interface not found")
+        dev = hid.Device(path=path)
+        try:
+            for data in reports:
+                dev.write(_frame(data))
+        finally:
+            dev.close()
+
+    def send_repeated(
+        self,
+        data: bytes,
+        count: int,
+        timeout_ms: int = 1000,
+        retries: int = 2,
+    ) -> tuple[list[bytes | None], list[float], int]:
+        """Send the same report ``count`` times on ONE persistent handle.
+
+        Returns ``(responses, latencies_ms, transient_errors)``. Reusing a single
+        open handle is how the real host talks to the device and avoids the
+        per-call open/close churn that trips a host-side USB "Protocol error"
+        (EPROTO) on the Pi under rapid repetition — a stack-level hiccup unrelated
+        to firmware health. On such a transient error (or an empty read) the
+        exchange is retried up to ``retries`` times, reopening the handle after an
+        exception; a genuine firmware freeze still surfaces as a ``None`` response
+        the caller can assert on. Used by the GET_ID stress test.
+        """
+        path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
+        if path is None:
+            raise RuntimeError("QMK Raw HID interface not found")
+        report = _frame(data)
+        dev = hid.Device(path=path)
+        responses: list[bytes | None] = []
+        latencies: list[float] = []
+        transient = 0
+        try:
+            for _ in range(count):
+                t0 = time.perf_counter()
+                resp: bytes | None = None
+                for attempt in range(retries + 1):
+                    try:
+                        dev.write(report)
+                        chunk = dev.read(64, timeout=timeout_ms)
+                        resp = bytes(chunk) if chunk else None
+                    except Exception:
+                        resp = None
+                        # Transient host-side USB error — reopen and retry.
+                        try:
+                            dev.close()
+                        except Exception:
+                            pass
+                        try:
+                            dev = hid.Device(path=path)
+                        except Exception:
+                            pass
+                    if resp is not None:
+                        break
+                    if attempt < retries:
+                        transient += 1
+                latencies.append((time.perf_counter() - t0) * 1000.0)
+                responses.append(resp)
+            return responses, latencies, transient
+        finally:
+            try:
+                dev.close()
+            except Exception:
+                pass

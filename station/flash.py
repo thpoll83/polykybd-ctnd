@@ -37,6 +37,11 @@ def _ensure_gpio():
     global _gpio_ready
     if _gpio_ready:
         return
+    # Quiet the "channel already in use" RuntimeWarning RPi.GPIO emits when the
+    # pins were configured by a previous run/instance. Besides being noise, the
+    # warning text includes this file's absolute path (leaking the rig's home
+    # directory) into stdout — which the CI captures into the HIL log.
+    GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
     # All pins idle at _RELEASE so boards run freely and BOOTSEL is up.
     for pin in [LEFT_RUN_PIN, RIGHT_RUN_PIN, LEFT_BOOTSEL_PIN, RIGHT_BOOTSEL_PIN]:
