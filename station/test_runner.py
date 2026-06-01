@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
+import os
 import sys
 import time
 from typing import Callable
@@ -103,4 +104,12 @@ if __name__ == "__main__":
     runner = TestRunner()
     result = runner.flash_and_test(args.left, args.right, tests=TESTS)
     runner.cleanup()
-    sys.exit(0 if result["passed"] else 1)
+    # Hard-exit after flushing. The native hid / RPi.GPIO libraries can double-
+    # free during interpreter shutdown ("free(): invalid pointer"), which aborts
+    # the process with SIGABRT — turning a passing run into a CI failure (exit
+    # 134) and dropping buffered stdout (the PASS/FAIL lines). os._exit() skips
+    # that teardown entirely; flush first so the logs and the tee into
+    # GITHUB_STEP_SUMMARY are complete.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0 if result["passed"] else 1)
