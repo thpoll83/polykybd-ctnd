@@ -71,17 +71,20 @@ COMPRESSED_TEST_KEYS = 8     # KC_A..KC_H — exercise the core1 path repeatedly
 def _rle_compress(byte_stream: bytes) -> bytes:
     """MSB-first bit run-length encoder.
 
-    Mirrors PolyKybdHost ``rle_util.rle_compress`` and the firmware's
-    ``rle_decompress``: a run is one byte whose high bit is the run's value and
-    whose low 7 bits are the length (1..127); longer runs repeat. Used to build
-    a valid compressed overlay for the core1 liveness guard without depending on
-    PolyKybdHost.
+    Produces a stream the firmware's ``rle_decompress`` accepts (same scheme as
+    PolyKybdHost ``rle_util.rle_compress``): a run is one byte whose high bit is
+    the run's value and whose low 7 bits are the length (1..127); longer runs
+    repeat. Zero-length runs are skipped, so every emitted byte is a real 1..127
+    run. Used to build a valid compressed overlay for the core1 liveness guard
+    without depending on PolyKybdHost.
     """
     out = bytearray()
     current = 0x00
     count = 0
 
     def flush(cnt: int, bit: int) -> None:
+        if cnt == 0:
+            return  # never emit a 0-length run (e.g. when the first bit is set)
         while cnt > 127:
             out.append(127 if bit == 0 else 255)
             cnt -= 127

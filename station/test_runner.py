@@ -24,6 +24,20 @@ class TestRunner:
         self._raw = RawHID()
 
     def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None) -> dict:
+        # HIL images are built per side (POLYKYBD_HIL=left/right). If either path
+        # looks like a HIL image, enforce the per-side contract before touching
+        # hardware — flashing one master image (or a swapped pair) to both halves
+        # makes both enumerate as master, the failure this build exists to prevent.
+        # Production deploys (non-_hil names, often the same image to both halves)
+        # are intentionally not constrained.
+        left_name, right_name = os.path.basename(left_uf2), os.path.basename(right_uf2)
+        if ("_hil" in left_name or "_hil" in right_name) and not (
+            left_name.endswith("_hil_left.uf2") and right_name.endswith("_hil_right.uf2")
+        ):
+            raise ValueError(
+                "HIL runs need per-side images: pass *_hil_left.uf2 to --left and "
+                f"*_hil_right.uf2 to --right (got left={left_name!r}, right={right_name!r})"
+            )
         results = []
         try:
             self.status = "flashing"

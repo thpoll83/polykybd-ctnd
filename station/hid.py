@@ -27,6 +27,17 @@ def _find_path(vendor_id: int, product_id: int, usage_page: int, usage: int) -> 
     return None
 
 
+def _frame(data: bytes) -> bytes:
+    """Wrap a command payload as the 65-byte numbered Raw HID report we write:
+    report id ``0x00`` + the 64-byte data block, zero-padded. Rejects an
+    oversized payload up front with a clear message instead of the cryptic
+    ``bytes: negative count`` that ``bytes(64 - len(data))`` would otherwise raise.
+    """
+    if len(data) > 64:
+        raise ValueError(f"raw HID payload too large: {len(data)} > 64 bytes")
+    return bytes([0x00]) + data + bytes(64 - len(data))
+
+
 def enumerate_raw_interfaces(
     vendor_id: int = QMK_VENDOR_ID, product_id: int = QMK_PRODUCT_ID
 ) -> list[dict]:
@@ -94,8 +105,7 @@ class RawHID:
             raise RuntimeError("QMK Raw HID interface not found")
         dev = hid.Device(path=path)
         try:
-            report = bytes([0x00]) + data + bytes(64 - len(data))
-            dev.write(report[:65])
+            dev.write(_frame(data))
             response = dev.read(64, timeout=timeout_ms)
             return bytes(response) if response else None
         finally:
@@ -124,8 +134,7 @@ class RawHID:
             raise RuntimeError("QMK Raw HID interface not found")
         dev = hid.Device(path=path)
         try:
-            report = bytes([0x00]) + data + bytes(64 - len(data))
-            dev.write(report[:65])
+            dev.write(_frame(data))
             packets: list[bytes] = []
             timeout = first_timeout_ms
             for _ in range(max_reports):
@@ -153,10 +162,7 @@ class RawHID:
         dev = hid.Device(path=path)
         try:
             for data in reports:
-                if len(data) > 64:
-                    raise ValueError(f"raw HID report too long: {len(data)} > 64 bytes")
-                report = bytes([0x00]) + data + bytes(64 - len(data))
-                dev.write(report[:65])
+                dev.write(_frame(data))
         finally:
             dev.close()
 
@@ -181,7 +187,7 @@ class RawHID:
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
-        report = bytes([0x00]) + data + bytes(64 - len(data))
+        report = _frame(data)
         dev = hid.Device(path=path)
         responses: list[bytes | None] = []
         latencies: list[float] = []
@@ -192,7 +198,7 @@ class RawHID:
                 resp: bytes | None = None
                 for attempt in range(retries + 1):
                     try:
-                        dev.write(report[:65])
+                        dev.write(report)
                         chunk = dev.read(64, timeout=timeout_ms)
                         resp = bytes(chunk) if chunk else None
                     except Exception:

@@ -63,11 +63,13 @@ unattended rig now has a test. Covered:
 
 ### Master / slave topology
 
-- [ ] **handedness is honoured** — after flashing with left/right EE_HANDS markers swapped,
-  confirm the *other* physical half becomes the sole master. Guards against the override
-  reading the wrong handedness source. Needs the rig to set EE_HANDS per half (flash-time
-  EEPROM write or the GPIO key-matrix item below), so it is a runner-level test, not a
-  `(raw, log)` one.
+- [ ] **per-side image reaches the correct half** — the HIL role is fixed at compile time
+  (`POLYKYBD_HIL=left` master / `=right` slave in `polykybd.c`), **not** by EE_HANDS, so the
+  only handedness risk is the rig flashing the images to the wrong sides. `single master
+  enumerates` already catches a same-image-to-both pair; a stronger guard would flash the
+  images *swapped* (left image → right half) and confirm the sole master moves to the other
+  half. Runner-level (needs `FlashController` control), not a `(raw, log)` test. (The old
+  EE_HANDS-swap idea does not apply — the HIL build ignores EE_HANDS.)
 - [ ] **slave really is gone from USB** — assert no second QMK *keyboard* interface enumerates
   besides the master's (extend enumeration to the keyboard usage page `0x0001`/`0x0006`),
   i.e. the slave didn't sneak back as an HID keyboard rather than `usb_disconnect()`-ing.
