@@ -74,7 +74,7 @@ SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="RPI-RP2", ENV{UDISKS_IGNORE}="1"
 SUBSYSTEM=="block", ENV{ID_VENDOR_ID}=="2e8a", ENV{ID_MODEL_ID}=="0003", ENV{UDISKS_IGNORE}="1"
 EOF
 sudo udevadm control --reload-rules
-sudo udevadm trigger
+sudo udevadm trigger --subsystem-match=block
 
 # Allow the station user to run uhubctl and picotool without a password.
 # Both need /dev/bus/usb/ access that isn't available to a normal user service.
