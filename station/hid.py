@@ -100,3 +100,62 @@ class RawHID:
             return bytes(response) if response else None
         finally:
             dev.close()
+
+    def send_and_read_all(
+        self,
+        data: bytes,
+        first_timeout_ms: int = 1000,
+        next_timeout_ms: int = 250,
+        max_reports: int = 8,
+    ) -> list[bytes]:
+        """Write one command, then read *every* input report it produces.
+
+        ``send()`` opens a fresh handle and reads exactly once, so it only ever
+        sees the first 64-byte packet. Some firmware commands answer with more
+        than one — e.g. GET_LANG_LIST splits the language codes across two
+        reports. This opens the handle once, writes, then keeps reading (with a
+        short per-read timeout) until a read returns nothing or ``max_reports``
+        is hit, returning the packets in order. Opening a single handle for the
+        whole exchange is what keeps the firmware's back-to-back replies from
+        being dropped by the per-open hidraw queue being torn down between reads.
+        """
+        path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
+        if path is None:
+            raise RuntimeError("QMK Raw HID interface not found")
+        dev = hid.Device(path=path)
+        try:
+            report = bytes([0x00]) + data + bytes(64 - len(data))
+            dev.write(report[:65])
+            packets: list[bytes] = []
+            timeout = first_timeout_ms
+            for _ in range(max_reports):
+                chunk = dev.read(64, timeout=timeout)
+                if not chunk:
+                    break
+                packets.append(bytes(chunk))
+                timeout = next_timeout_ms
+            return packets
+        finally:
+            dev.close()
+
+    def write_reports(self, reports: list[bytes]) -> None:
+        """Write several command reports on one handle without reading replies.
+
+        For fire-and-forget command bursts whose firmware replies are disabled —
+        the overlay/ROI upload commands (cmd 10/16/17/18/19) send no ACK. Doing
+        the burst on a single handle matches how PolyKybdHost streams overlays
+        (``send_multiple``); the follow-up liveness check is a separate GET_ID
+        via ``send()``.
+        """
+        path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
+        if path is None:
+            raise RuntimeError("QMK Raw HID interface not found")
+        dev = hid.Device(path=path)
+        try:
+            for data in reports:
+                if len(data) > 64:
+                    raise ValueError(f"raw HID report too long: {len(data)} > 64 bytes")
+                report = bytes([0x00]) + data + bytes(64 - len(data))
+                dev.write(report[:65])
+        finally:
+            dev.close()

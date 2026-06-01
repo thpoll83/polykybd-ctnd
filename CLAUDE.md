@@ -108,7 +108,7 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 - [ ] Verify `USB_HUB_LOCATION`, `LEFT_USB_PORT`, `RIGHT_USB_PORT` by running `uhubctl` on the RPi4 and update `config/config.yaml`
 - [ ] Set EE_HANDS EEPROM marker on each half once (QMK Toolbox → "Set EEPROM Hand", or a keymap combo) before the first HIL run
 - [ ] Register (or re-register) the GitHub Actions self-hosted runner — see `scripts/register-runner.sh` and "Runner troubleshooting" below
-- [x] Write concrete test cases — first two live in `station/hil_tests.py` (`single master enumerates`, `raw HID GET_ID`), wired into the `test_runner.py` CLI. Backlog of further tests is in `docs/FUTURE_TESTS.md`.
+- [x] Write concrete test cases — `station/hil_tests.py` now covers every Raw HID command testable without side effects on the unattended rig (15 tests: identity/fresh-boot, language get/list/round-trip, default layer, ACK/NACK error+bounds paths, overlay-flags round-trip, plain + core1-compressed overlay liveness, GET_ID stress), wired into the `test_runner.py` CLI. Remaining infra-dependent / camera-needing / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 
@@ -130,6 +130,16 @@ TESTS = [
 ```
 
 Pass `tests=TESTS` to `runner.flash_and_test(...)`.
+
+`RawHID` offers three send shapes: `send()` (one report, one reply — the common case),
+`send_and_read_all()` (one report, *all* replies — for multi-packet commands like
+GET_LANG_LIST), and `write_reports()` (a burst with no reply — for the overlay upload
+commands, which the firmware does not ACK; follow with a `send(GET_ID)` liveness check).
+
+The runner reports each test as its own line: a `[test] PASS/FAIL: <name>` log line, plus
+— under GitHub Actions — a ✅/❌ bullet per test in the job **Step Summary** and a
+`::error::` annotation for each failure, so it is obvious from the run page which test
+failed without scrolling the raw log.
 
 ## Runner troubleshooting
 
