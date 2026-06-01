@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=2">
 </head>
 <body data-status="idle">
   <header>
@@ -20,8 +20,13 @@
     <span class="clock" id="clock"></span>
   </header>
 
-  <main id="log-panel">
-    <div id="log-output"></div>
+  <main>
+    <div id="log-panel">
+      <div id="log-output"></div>
+    </div>
+    <div id="ci-jobs-panel" hidden>
+      <div id="ci-jobs-list"><p class="no-jobs">Loading CI jobs…</p></div>
+    </div>
   </main>
 
   <footer>
@@ -39,13 +44,19 @@
         <button class="btn btn-green" id="btn-run"         onclick="runTests()">Run Tests</button>
         <button class="btn btn-gray"  id="btn-copy"        onclick="copyLog()">Copy Log</button>
         <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>
+        <button class="btn btn-gray"                       onclick="openRunner()">Runner ···</button>
         <button class="btn btn-gray"                       onclick="openMore()">More ···</button>
       </div>
-      <div class="runner-row">
-        <label>Runner</label>
-        <button class="btn btn-blue"  id="btn-diagnose"   onclick="runDiagnostics()">&#x2695; Diagnose</button>
+    </div>
+
+    <div id="runner-panel" hidden>
+      <div class="button-row">
+        <button class="btn btn-blue"  id="btn-diagnose"   onclick="runDiagnostics()">⌕ Diagnose</button>
         <button class="btn btn-teal"  id="btn-restart"    onclick="restartRunner()">&#x27F3; Restart</button>
         <button class="btn btn-amber" id="btn-reregister" data-armed="false" onclick="reregisterRunner()">&#x21BB; Re-register</button>
+      </div>
+      <div class="button-row more-nav">
+        <button class="btn btn-gray" onclick="closeRunner()">&#8592; Back</button>
       </div>
     </div>
 
@@ -71,6 +82,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=2"></script>
 </body>
 </html>

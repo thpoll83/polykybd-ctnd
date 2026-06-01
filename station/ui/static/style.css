@@ -96,12 +96,19 @@ header {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Log panel ── */
+/* ── Main area (log or CI jobs) ── */
 main {
+  flex: 1;
+  background: #131313;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#log-panel {
   flex: 1;
   overflow-y: auto;
   padding: 10px 16px;
-  background: #131313;
   scroll-behavior: smooth;
 }
 
@@ -115,6 +122,72 @@ main {
   user-select: text;
   -webkit-user-select: text;
 }
+
+#ci-jobs-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 16px;
+}
+
+.no-jobs {
+  color: #555;
+  font-size: 13px;
+  text-align: center;
+  padding: 24px 0;
+}
+
+.ci-job {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  border: 1px solid transparent;
+}
+
+.ci-job-running { background: #1a2a1a; border-color: #2E7D32; }
+.ci-job-queued  { background: #1e1e00; border-color: #5a5000; }
+
+.ci-job-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+}
+
+.ci-job-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ci-job-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e0e0e0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ci-job-meta {
+  font-size: 11px;
+  color: #888;
+}
+
+.ci-job-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.ci-job-running .ci-job-label { color: #7ec87e; }
+.ci-job-queued  .ci-job-label { color: #FFD54F; }
 
 /* ── Footer ── */
 footer {
@@ -154,20 +227,6 @@ footer {
 .button-row {
   display: flex;
   gap: 10px;
-}
-
-.runner-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.runner-row label {
-  color: #777;
-  font-size: 13px;
-  white-space: nowrap;
-  min-width: 52px;
 }
 
 /* ── Buttons ── */
@@ -276,6 +335,9 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 }
 
 /* ── Scrollbar ── */
-main::-webkit-scrollbar { width: 4px; }
-main::-webkit-scrollbar-track { background: transparent; }
-main::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+#log-panel::-webkit-scrollbar,
+#ci-jobs-panel::-webkit-scrollbar { width: 4px; }
+#log-panel::-webkit-scrollbar-track,
+#ci-jobs-panel::-webkit-scrollbar-track { background: transparent; }
+#log-panel::-webkit-scrollbar-thumb,
+#ci-jobs-panel::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }

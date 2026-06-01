@@ -180,6 +180,80 @@ function toggleUsb(side) {
 }
 
 
+let _ciJobsTimer = null;
+
+function openRunner() {
+  document.getElementById('main-controls').hidden = true;
+  document.getElementById('runner-panel').hidden = false;
+  document.getElementById('log-panel').hidden = true;
+  document.getElementById('ci-jobs-panel').hidden = false;
+  if (_ciJobsTimer) clearInterval(_ciJobsTimer);
+  fetchCiJobs();
+  _ciJobsTimer = setInterval(fetchCiJobs, 30000);
+}
+
+function closeRunner() {
+  clearInterval(_ciJobsTimer);
+  _ciJobsTimer = null;
+  document.getElementById('runner-panel').hidden = true;
+  document.getElementById('main-controls').hidden = false;
+  document.getElementById('ci-jobs-panel').hidden = true;
+  document.getElementById('log-panel').hidden = false;
+}
+
+function fetchCiJobs() {
+  fetch('/ci-jobs')
+    .then(r => r.json())
+    .then(renderCiJobs)
+    .catch(() => {
+      document.getElementById('ci-jobs-list').innerHTML =
+        '<p class="no-jobs">Could not load CI jobs.</p>';
+    });
+}
+
+function renderCiJobs(jobs) {
+  const list = document.getElementById('ci-jobs-list');
+  list.replaceChildren();
+  if (!jobs.length) {
+    const msg = document.createElement('p');
+    msg.className = 'no-jobs';
+    msg.textContent = 'No scheduled or running CI jobs.';
+    list.appendChild(msg);
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  jobs.forEach(j => {
+    const running = j.status === 'in_progress';
+
+    const card = document.createElement('div');
+    card.className = `ci-job ${running ? 'ci-job-running' : 'ci-job-queued'}`;
+
+    const iconEl = document.createElement('span');
+    iconEl.className = 'ci-job-icon';
+    iconEl.textContent = running ? '▶' : '⏳';
+
+    const bodyEl = document.createElement('span');
+    bodyEl.className = 'ci-job-body';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'ci-job-name';
+    nameEl.textContent = `#${j.run_number} ${j.name ?? ''}`;
+
+    const metaEl = document.createElement('span');
+    metaEl.className = 'ci-job-meta';
+    metaEl.textContent = `${j.event ?? ''} · ${j.head_branch ?? ''}`;
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'ci-job-label';
+    labelEl.textContent = running ? 'Running' : 'Queued';
+
+    bodyEl.append(nameEl, metaEl);
+    card.append(iconEl, bodyEl, labelEl);
+    frag.appendChild(card);
+  });
+  list.appendChild(frag);
+}
+
 function openMore()  {
   document.getElementById('main-controls').hidden = true;
   document.getElementById('more-panel').hidden = false;
