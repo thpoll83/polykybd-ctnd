@@ -187,6 +187,7 @@ function openRunner() {
   document.getElementById('runner-panel').hidden = false;
   document.getElementById('log-panel').hidden = true;
   document.getElementById('ci-jobs-panel').hidden = false;
+  if (_ciJobsTimer) clearInterval(_ciJobsTimer);
   fetchCiJobs();
   _ciJobsTimer = setInterval(fetchCiJobs, 30000);
 }
@@ -212,24 +213,45 @@ function fetchCiJobs() {
 
 function renderCiJobs(jobs) {
   const list = document.getElementById('ci-jobs-list');
+  list.replaceChildren();
   if (!jobs.length) {
-    list.innerHTML = '<p class="no-jobs">No scheduled or running CI jobs.</p>';
+    const msg = document.createElement('p');
+    msg.className = 'no-jobs';
+    msg.textContent = 'No scheduled or running CI jobs.';
+    list.appendChild(msg);
     return;
   }
-  list.innerHTML = jobs.map(j => {
+  const frag = document.createDocumentFragment();
+  jobs.forEach(j => {
     const running = j.status === 'in_progress';
-    const icon    = running ? '▶' : '⏳';
-    const cls     = running ? 'ci-job-running' : 'ci-job-queued';
-    const label   = running ? 'Running' : 'Queued';
-    return `<div class="ci-job ${cls}">
-      <span class="ci-job-icon">${icon}</span>
-      <span class="ci-job-body">
-        <span class="ci-job-name">#${j.run_number} ${j.name}</span>
-        <span class="ci-job-meta">${j.event} · ${j.head_branch}</span>
-      </span>
-      <span class="ci-job-label">${label}</span>
-    </div>`;
-  }).join('');
+
+    const card = document.createElement('div');
+    card.className = `ci-job ${running ? 'ci-job-running' : 'ci-job-queued'}`;
+
+    const iconEl = document.createElement('span');
+    iconEl.className = 'ci-job-icon';
+    iconEl.textContent = running ? '▶' : '⏳';
+
+    const bodyEl = document.createElement('span');
+    bodyEl.className = 'ci-job-body';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'ci-job-name';
+    nameEl.textContent = `#${j.run_number} ${j.name ?? ''}`;
+
+    const metaEl = document.createElement('span');
+    metaEl.className = 'ci-job-meta';
+    metaEl.textContent = `${j.event ?? ''} · ${j.head_branch ?? ''}`;
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'ci-job-label';
+    labelEl.textContent = running ? 'Running' : 'Queued';
+
+    bodyEl.append(nameEl, metaEl);
+    card.append(iconEl, bodyEl, labelEl);
+    frag.appendChild(card);
+  });
+  list.appendChild(frag);
 }
 
 function openMore()  {
