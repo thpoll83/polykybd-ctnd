@@ -11,6 +11,14 @@ from .config import (
     HID_RAW_USAGE_PAGE, HID_RAW_USAGE,
 )
 
+# This module uses the `hid` package (apmorton/pyhidapi), which binds the
+# hidraw backend of libhidapi. That backend populates usage_page/usage in
+# hid.enumerate(), which is what lets us pick out the Raw HID interface by
+# usage. (The similarly named `hidapi` package exposes hid.device()/open_path()
+# but its libusb backend leaves usage_page/usage at 0, so enumeration-by-usage
+# silently finds nothing.) Devices are therefore opened via hid.Device(path=...),
+# not hid.device().open_path().
+
 
 def _find_path(vendor_id: int, product_id: int, usage_page: int, usage: int) -> bytes | None:
     for d in hid.enumerate(vendor_id, product_id):
@@ -50,8 +58,7 @@ class HIDConsole:
         path = _find_path(self._vid, self._pid, HID_CONSOLE_USAGE_PAGE, HID_CONSOLE_USAGE)
         if path is None:
             raise RuntimeError("QMK HID console not found — is the keyboard plugged in?")
-        self._dev = hid.device()
-        self._dev.open_path(path)
+        self._dev = hid.Device(path=path)
         self._running = True
         self._thread = threading.Thread(target=self._loop, args=(callback,), daemon=True)
         self._thread.start()
@@ -59,7 +66,7 @@ class HIDConsole:
     def _loop(self, callback: Callable[[str], None]) -> None:
         while self._running:
             try:
-                data = self._dev.read(64, timeout_ms=200)
+                data = self._dev.read(64, timeout=200)
                 if data:
                     msg = bytes(data).rstrip(b"\x00").decode("utf-8", errors="replace")
                     if msg.strip():
@@ -85,12 +92,11 @@ class RawHID:
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
-        dev = hid.device()
-        dev.open_path(path)
+        dev = hid.Device(path=path)
         try:
             report = bytes([0x00]) + data + bytes(64 - len(data))
             dev.write(report[:65])
-            response = dev.read(64, timeout_ms=timeout_ms)
+            response = dev.read(64, timeout=timeout_ms)
             return bytes(response) if response else None
         finally:
             dev.close()
