@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-import glob
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -10,7 +8,7 @@ import RPi.GPIO as GPIO
 from .config import (
     LEFT_BOOTSEL_PIN, LEFT_RUN_PIN, LEFT_USB_PORT,
     RIGHT_BOOTSEL_PIN, RIGHT_RUN_PIN, RIGHT_USB_PORT,
-    USB_HUB_LOCATION, MASS_STORAGE_LABEL, GPIO_INVERTED,
+    USB_HUB_LOCATION, GPIO_INVERTED,
 )
 
 # Signal levels for asserting / releasing active-low pins.
@@ -58,23 +56,17 @@ class FlashController:
             check=True, capture_output=True,
         )
 
-    def _await_mount(self, timeout: int = 10) -> str:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            matches = glob.glob(f"/media/**/{MASS_STORAGE_LABEL}", recursive=True)
-            if matches:
-                return matches[0]
-            time.sleep(0.3)
-        raise TimeoutError(f"Mass storage '{MASS_STORAGE_LABEL}' not found after {timeout}s")
-
-    def _flash_uf2(self, firmware_path: str, log) -> None:
-        mount = self._await_mount()
-        log(f"[flash] mounted at {mount} — writing {firmware_path}")
-        shutil.copy(firmware_path, mount)
-
-    def _flash_bin(self, firmware_path: str, log) -> None:
-        # picotool talks to the RP2040 over USB in BOOTSEL mode.
-        # It writes diagnostics to stdout, not stderr.
+    def _flash_with_picotool(self, firmware_path: str, log) -> None:
+        # picotool talks to the RP2040 bootrom over the PICOBOOT USB interface
+        # (VID:PID 2e8a:0003), which the bootrom exposes whenever the chip is in
+        # BOOTSEL mode. This is independent of whether valid firmware is already
+        # flashed (a blank board powers straight into BOOTSEL) and independent of
+        # any OS mass-storage auto-mount — so it works even when no firmware is
+        # present, and is not affected by the desktop "Removable Medium Found"
+        # prompt that prevents /media/**/RPI-RP2 from appearing.
+        #
+        # picotool accepts .uf2, .bin and .elf. It writes diagnostics to stdout,
+        # not stderr.
         log(f"[flash] loading with picotool: {firmware_path}")
         try:
             subprocess.run(
@@ -118,11 +110,12 @@ class FlashController:
         # 4. Restore BOOTSEL to whatever the user has set, not necessarily released.
         GPIO.output(bootsel_pin, _ASSERT if _bootsel_asserted[side] else _RELEASE)
 
-        if ext == ".uf2":
-            log(f"[flash:{side}] waiting for mass storage")
-            self._flash_uf2(firmware_path, log)
-        else:
-            self._flash_bin(firmware_path, log)  # 2 s hold above covers USB enumeration
+        # Both .uf2 and .bin are loaded via picotool over the PICOBOOT interface
+        # (the 2 s hold above covers USB enumeration). This avoids any dependency
+        # on the OS auto-mounting the RP2040 mass-storage volume, which on the
+        # kiosk desktop is intercepted by the file manager's "Removable Medium
+        # Found" prompt and never lands under /media.
+        self._flash_with_picotool(firmware_path, log)
 
         log(f"[flash:{side}] complete — waiting for reboot")
         time.sleep(2.5)
