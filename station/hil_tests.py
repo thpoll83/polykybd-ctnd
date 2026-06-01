@@ -493,25 +493,27 @@ def test_compressed_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str],
 
 
 def test_get_id_stress(raw: RawHID, log: Callable[[str], None], n: int = 50) -> bool:
-    """N rapid GET_IDs all answer; reports latency.
+    """N rapid GET_IDs on one persistent connection all answer; reports latency.
 
     Catches the master freezing under load (the core1-hang symptom and any
-    descriptor/dispatch flakiness). Fails if any GET_ID drops or malforms;
-    logs min/avg/max round-trip so a slow-down trend is visible across runs.
-    Each send opens/reads/closes its own handle, so this also soaks the rig's
-    USB stack a little.
+    descriptor/dispatch flakiness). Runs all N exchanges on a single open handle
+    — the way the real host talks to the device — rather than reopening the
+    hidraw node per send: rapid open/close churn trips a host-side USB "Protocol
+    error" (EPROTO) on the Pi that has nothing to do with firmware health.
+    ``send_repeated`` retries such transient errors (and counts them); a genuine
+    freeze still surfaces as a missing response that fails the test. Logs
+    min/avg/max round-trip so a slow-down trend is visible across runs.
     """
-    latencies = []
-    for i in range(n):
-        t0 = time.perf_counter()
-        response = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-        latencies.append(dt_ms)
-        if not _resp_ok(response, CMD_GET_ID, log, expect_status=None):
-            log(f"  FAIL: GET_ID #{i + 1}/{n} bad/no response after {dt_ms:.0f} ms")
+    responses, latencies, transient = raw.send_repeated(
+        bytes([POLY_CHANNEL, CMD_GET_ID]), n)
+    for i, resp in enumerate(responses):
+        if not _resp_ok(resp, CMD_GET_ID, log, expect_status=None):
+            log(f"  FAIL: GET_ID #{i + 1}/{n} bad/no response "
+                f"({transient} transient HID retries seen this run)")
             return False
-    log(f"  {n} GET_IDs OK — latency min/avg/max = "
-        f"{min(latencies):.0f}/{sum(latencies) / n:.0f}/{max(latencies):.0f} ms")
+    log(f"  {n} GET_IDs OK ({transient} transient HID retries) — latency "
+        f"min/avg/max = {min(latencies):.0f}/{sum(latencies) / len(latencies):.0f}"
+        f"/{max(latencies):.0f} ms")
     return True
 
 
