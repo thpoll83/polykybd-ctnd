@@ -695,6 +695,25 @@ def on_reset_board(data):
     threading.Thread(target=_do, daemon=True).start()
 
 
+@socketio.on("set_handedness")
+def on_set_handedness(data):
+    """Set the keyboard's EE_HANDS marker (cmd 25) so a half shows the correct
+    side. master_is_left=True ⇒ the USB/master half is the left half. Sent to
+    the master half, which syncs the opposite to the slave; both then reboot."""
+    master_is_left = data.get("master_is_left")
+    if not isinstance(master_is_left, bool):
+        return
+
+    def _do():
+        from station.set_handedness import set_handedness
+        try:
+            set_handedness(master_is_left, log=emit_log)
+        except Exception as exc:
+            emit_log(f"[ui] set-handedness error: {exc}")
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 @socketio.on("run_tests")
 def on_run_tests(data):
     left_uf2  = data.get("left_uf2")
