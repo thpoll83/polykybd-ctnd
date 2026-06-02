@@ -9,6 +9,7 @@ const actionBtns = [
   'btn-flash-left', 'btn-flash-right', 'btn-run', 'btn-reregister', 'btn-restart',
   'btn-usb-left',     'btn-bootsel-left',  'btn-reset-left',
   'btn-usb-right',    'btn-bootsel-right', 'btn-reset-right',
+  'btn-hand-left',    'btn-hand-right',
 ].map(id => document.getElementById(id));
 
 /* ── Clock ── */
@@ -177,6 +178,15 @@ function toggleUsb(side) {
   const btn = document.getElementById(`btn-usb-${side}`);
   const on = btn.dataset.state !== 'on';  // unknown → treat as off → turn on
   socket.emit('usb_power', { side, on });
+}
+
+/* Set the keyboard's handedness (EE_HANDS) so a half displays the correct side.
+   Targets the USB/master half; it syncs the opposite to the slave and both
+   reboot to apply (~10 s). On the rig the master is the left board, so
+   "Set USB = Left" fixes a left half that shows up as "right". */
+function setHandedness(masterIsLeft) {
+  appendLog(`[ui] setting handedness: USB/master half = ${masterIsLeft ? 'LEFT' : 'RIGHT'} — keyboard will reboot…`);
+  socket.emit('set_handedness', { master_is_left: masterIsLeft });
 }
 
 

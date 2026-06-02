@@ -69,6 +69,10 @@
         <button class="btn btn-sm btn-bootsel" id="btn-bootsel-right" data-state="released" onclick="toggleBootsel('right')">R: BOOTSEL</button>
         <button class="btn btn-sm btn-reset"   id="btn-reset-right"  data-state="released" onclick="toggleRun('right')">R: Reset</button>
       </div>
+      <div class="button-row">
+        <button class="btn btn-sm btn-gray" id="btn-hand-left"  onclick="setHandedness(true)"  title="Tell the USB/master half it is the LEFT half (slave = right); keyboard reboots">Hand: USB=Left</button>
+        <button class="btn btn-sm btn-gray" id="btn-hand-right" onclick="setHandedness(false)" title="Tell the USB/master half it is the RIGHT half (slave = left); keyboard reboots">Hand: USB=Right</button>
+      </div>
       <div class="button-row more-nav">
         <button class="btn btn-gray" onclick="closeMore()">&#8592; Back</button>
         <button class="btn btn-red"  onclick="quitApp()">Quit ✕</button>
