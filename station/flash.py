@@ -86,6 +86,43 @@ class FlashController:
             ) from exc
         subprocess.run(["sudo", "picotool", "reboot"], check=True, capture_output=True)
 
+    def _count_bootsel_devices(self) -> int:
+        """Number of RP-series chips currently in BOOTSEL — the PICOBOOT
+        interface enumerates as USB VID:PID 2e8a:0003 (the same probe the CI
+        failure diagnostics use). lsusb needs no root."""
+        try:
+            out = subprocess.run(
+                ["lsusb"], capture_output=True, text=True, timeout=5
+            ).stdout
+        except Exception:
+            return 0
+        return sum("2e8a:0003" in line for line in out.splitlines())
+
+    def _wait_for_bootsel(self, side: str, run_pin: int, bootsel_pin: int,
+                          log=print, timeout: float = 10.0, poll: float = 0.25) -> None:
+        """Block until an RP2040 appears in BOOTSEL, then return; raise a clear,
+        side-specific error if none shows within ``timeout``.
+
+        Replaces a blind ``sleep`` before picotool: a board enumerates ~0.5–2 s
+        after reset, but the second half flashed (the first reboots and churns the
+        shared USB) can take longer, and a disconnected / held-in-reset half never
+        shows at all. Polling tolerates the slow case and turns the latter into an
+        actionable message instead of picotool's generic 'no RP-series devices'.
+        The caller keeps BOOTSEL asserted throughout so the bootrom keeps
+        sampling it."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._count_bootsel_devices() > 0:
+                log(f"[flash:{side}] BOOTSEL device present")
+                return
+            time.sleep(poll)
+        raise RuntimeError(
+            f"{side} half never entered BOOTSEL within {timeout:.0f}s "
+            f"(no 2e8a:0003 on USB). Check that half's USB cable/power and its "
+            f"RUN/BOOTSEL wiring (BCM{run_pin}/BCM{bootsel_pin}); if the other "
+            f"half flashes OK the fault is specific to this half."
+        )
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def flash(self, side: str, firmware_path: str, log=print) -> None:
@@ -110,7 +147,10 @@ class FlashController:
         GPIO.output(run_pin, _RELEASE)     # 3. release reset → board boots into BOOTSEL mode
 
         log(f"[flash:{side}] waiting for BOOTSEL enumeration")
-        time.sleep(2.0)  # hold BOOTSEL until the board has fully enumerated
+        # Poll for the RP2 bootrom (PICOBOOT 2e8a:0003) instead of a blind sleep,
+        # holding BOOTSEL asserted while we wait so the bootrom keeps sampling it.
+        # Raises a clear, side-specific error if the half never shows up.
+        self._wait_for_bootsel(side, run_pin, bootsel_pin, log)
 
         # 4. Restore BOOTSEL to whatever the user has set, not necessarily released.
         GPIO.output(bootsel_pin, _ASSERT if _bootsel_asserted[side] else _RELEASE)
