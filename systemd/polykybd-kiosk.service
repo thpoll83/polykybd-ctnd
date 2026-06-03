@@ -8,23 +8,37 @@ User=pi
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/pi/.Xauthority
 ExecStartPre=/bin/sleep 4
-# Blank the display after 5 min idle and wake it on the next touch.
-# The 52Pi panel's backlight follows the HDMI signal, so DPMS "off" darkens
-# the screen; the USB touch panel stays powered and any tap is a pointer event
-# that resets the DPMS timer and wakes the display — no extra daemon needed.
-# "xset s off" disables the plain gray screensaver so DPMS is the only blanker.
-# "dpms 0 0 300" → standby=0 suspend=0 off=300s (only the off phase is armed).
-# Leading "-" makes these non-fatal: a transient xset hiccup must not stop the
-# kiosk from starting. (Wayland note: xset is X11-only; under labwc/wlroots use
-# swayidle + wlr-randr instead. This service runs X11 — DISPLAY=:0 above.)
-ExecStartPre=-/bin/sh -c 'xset s off; xset +dpms; xset dpms 0 0 300'
-ExecStart=/usr/bin/chromium-browser \
-  --kiosk \
-  --noerrdialogs \
-  --disable-infobars \
-  --disable-session-crashed-bubble \
-  --disable-restore-session-state \
-  --app=http://localhost:5000
+# Blank the display and cut the backlight after 5 min idle; wake on touch.
+#
+# Two-layer idle-off stack:
+#   1. DPMS ("dpms 0 0 300"): X11 tells the monitor to power down after 300 s.
+#      "xset s 300" arms the screensaver idle timer that xss-lock watches.
+#   2. xss-lock + backlight-locker.sh: when the screensaver activates, the
+#      locker calls "vcgencmd display_power 0" which cuts the HDMI output at
+#      the RPi VideoCore level — this physically kills the panel backlight,
+#      something DPMS alone cannot do on this display.
+#      xss-lock sends SIGTERM to the locker on the first touch/keypress;
+#      the locker's EXIT trap calls "vcgencmd display_power 1" to restore HDMI
+#      before exiting. The USB touch controller stays powered throughout, so
+#      touches reach X11 even while HDMI is off and trigger the wake.
+#
+# xss-lock runs in the same bash command as chromium; "exec" replaces the shell
+# with chromium so systemd tracks it as the main process and cgroup cleanup
+# kills xss-lock cleanly when the service stops.
+#
+# Leading "-" on ExecStartPre makes it non-fatal (transient xset hiccup must
+# not stop the kiosk). Wayland note: xset is X11-only; under labwc/wlroots
+# use swayidle + wlr-randr instead. This service runs X11 — DISPLAY=:0 above.
+ExecStartPre=-/bin/sh -c 'xset s 300; xset +dpms; xset dpms 0 0 300'
+ExecStart=/bin/bash -c '\
+  xss-lock -- /opt/polykybd-ctnd/scripts/backlight-locker.sh & \
+  exec chromium-browser \
+    --kiosk \
+    --noerrdialogs \
+    --disable-infobars \
+    --disable-session-crashed-bubble \
+    --disable-restore-session-state \
+    --app=http://localhost:5000'
 Restart=on-failure
 RestartSec=5
 
