@@ -52,10 +52,11 @@ sudo apt-get install -y --no-install-recommends \
   picotool \
   libhidapi-hidraw0 libhidapi-libusb0 \
   x11-xserver-utils \
+  xss-lock \
   "$CHROMIUM_PKG"
 
 # Allow the user to access GPIO and USB without root
-sudo usermod -aG gpio,plugdev "$CTND_USER"
+sudo usermod -aG gpio,plugdev,video "$CTND_USER"
 
 # udev rules: HID access for the running keyboard (VID 2021 = PolyFabriq, the
 # PolyKybd Split72/corne42), BOOTSEL access so picotool can talk to the RP2040
@@ -135,7 +136,7 @@ sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|
   systemd/polykybd-ctnd.service \
   | sudo tee /etc/systemd/system/polykybd-ctnd.service > /dev/null
 
-sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|chromium-browser|$CHROMIUM_BIN|g" \
+sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g; s|chromium-browser|$CHROMIUM_BIN|g" \
   systemd/polykybd-kiosk.service \
   | sudo tee /etc/systemd/system/polykybd-kiosk.service > /dev/null
 
