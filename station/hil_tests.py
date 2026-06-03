@@ -133,6 +133,22 @@ def _reply_text(response) -> str:
     return bytes(response[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
 
 
+def _master_alive(raw: RawHID, log: Callable[[str], None], attempts: int = 3) -> bool:
+    """GET_ID with a few retries. After an upload (or any EEPROM/refresh command)
+    the master finishes an EEPROM write + a full keycap display refresh on its
+    main loop and briefly stops servicing HID — long enough to miss a single
+    GET_ID. Retrying tolerates that transient busy window; a genuine hang (e.g. a
+    core1 wedge) still fails every attempt."""
+    for i in range(attempts):
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+        if _resp_ok(resp, CMD_GET_ID, log, expect_status=None):
+            if i:
+                log(f"  master answered GET_ID on attempt {i + 1}/{attempts}")
+            return True
+        log(f"  GET_ID attempt {i + 1}/{attempts}: no answer (master busy?) — retrying")
+    return False
+
+
 # --- structural / enumeration -------------------------------------------------
 
 def test_single_master_enumerates(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -339,8 +355,7 @@ def test_set_brightness(raw: RawHID, log: Callable[[str], None]) -> bool:
     log(f"set brightness {FULL_BRIGHT + 5} (out of range) -> {bad!r}")
     if not _resp_ok(bad, CMD_SET_BRIGHTNESS, log, expect_status=NACK):
         return False
-    alive = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
-    if not _resp_ok(alive, CMD_GET_ID, log, expect_status=None):
+    if not _master_alive(raw, log):
         log("  FAIL: master unresponsive after brightness change")
         return False
     return True
@@ -461,8 +476,7 @@ def test_plain_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str], None
     ]
     raw.write_reports(reports)
     log(f"uploaded blank plain overlay to KC_A ({NUM_SEGMENTS} segments)")
-    alive = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
-    if not _resp_ok(alive, CMD_GET_ID, log, expect_status=None):
+    if not _master_alive(raw, log):
         log("  FAIL: master unresponsive after plain overlay upload")
         return False
     log("  master still answering GET_ID after plain overlay upload")
@@ -486,8 +500,7 @@ def test_compressed_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str],
     raw.write_reports(reports)
     log(f"uploaded blank compressed overlay to {COMPRESSED_TEST_KEYS} keycodes "
         f"(RLE stream {len(_BLANK_OVERLAY_RLE)} bytes each, core1 decompress path)")
-    alive = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
-    if not _resp_ok(alive, CMD_GET_ID, log, expect_status=None):
+    if not _master_alive(raw, log):
         log("  FAIL: master unresponsive after compressed overlay upload — "
             "possible core1 hang regression (see multicore_exec.c cpsid i workaround)")
         return False

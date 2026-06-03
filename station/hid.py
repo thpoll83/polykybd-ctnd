@@ -99,7 +99,15 @@ class RawHID:
         self._vid = vendor_id
         self._pid = product_id
 
-    def send(self, data: bytes, timeout_ms: int = 1000) -> bytes | None:
+    def send(self, data: bytes, timeout_ms: int = 3000) -> bytes | None:
+        """Write one report and read one reply (or None on timeout).
+
+        The default read timeout is deliberately generous: after a brightness /
+        language / overlay command the firmware does an EEPROM write plus a full
+        keycap display refresh on its main loop and briefly stops servicing HID
+        (~1-2 s, longer as the glyph set grows). A short timeout there produced
+        intermittent, wandering 'unresponsive' failures across the suite. A
+        genuine hang still surfaces as a timeout (None)."""
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
