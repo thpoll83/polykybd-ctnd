@@ -11,6 +11,7 @@ from .hid import HIDConsole, RawHID
 # keyboards/handwired/polykybd/hid_com.c (case 24 / 0x18). A command report is
 # data[0]='P' (channel marker) then data[1]=command id; the firmware replies "P\x18.".
 POLY_CHANNEL    = 0x50  # 'P'
+CMD_GET_LANG    = 0x07  # read current language — readiness probe (no side effects)
 CMD_DISPLAY_OFF = 0x18
 ACK             = ord(".")
 
@@ -62,6 +63,11 @@ class TestRunner:
                 self.log(f"[runner] HID console unavailable (continuing without it): {exc}")
 
             self.status = "testing"
+            # Wait out the post-cold-flash window during which the master blocks
+            # its main loop on the initial 72-keycap render + split-sync and
+            # times out HID reads, so the marker-sensitive GET_ID tests don't run
+            # inside it (see _wait_for_master_ready).
+            self._wait_for_master_ready()
             for test in (tests or []):
                 name = test.get("name", "unnamed")
                 try:
@@ -89,6 +95,48 @@ class TestRunner:
             raise
         finally:
             self._flash.cleanup()
+
+    def _wait_for_master_ready(self, need: int = 3, timeout: float = 30.0,
+                               probe_timeout_ms: int = 800, spacing: float = 0.3) -> bool:
+        """Block until the master is *stably* servicing HID, before the suite runs.
+
+        After a cold flash the master answers an HID exchange or two, then blocks
+        its main loop for several seconds doing the initial 72-keycap OLED render
+        and split-sync to the just-booted slave (longer the larger the glyph
+        set), during which Raw HID reads time out — then it recovers and stays
+        responsive. The CI logs show the very first GET_ID succeeding (it catches
+        the brief gap *before* that render starts) and the next two timing out,
+        which fails the fresh-boot and GET_ID tests for a reason that has nothing
+        to do with the firmware under test. So a single successful probe is not
+        enough — require ``need`` consecutive replies to confirm the render is
+        actually over, not just a momentary pre-render gap.
+
+        Probes GET_LANG (cmd 7), which is read-only and — unlike GET_ID — does
+        NOT consume the one-shot fresh-boot '*' marker that test_fresh_boot_marker
+        asserts on, so this gate never disturbs that test. Best-effort: if the
+        master never stabilises within ``timeout`` we log and run anyway, so a
+        genuine hang still surfaces as the test failures it causes rather than
+        being hidden here."""
+        deadline = time.monotonic() + timeout
+        streak = 0
+        probes = 0
+        while time.monotonic() < deadline:
+            probes += 1
+            try:
+                resp = self._raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]),
+                                      timeout_ms=probe_timeout_ms)
+            except Exception:
+                resp = None
+            ok = bool(resp) and len(resp) >= 3 and resp[0] == POLY_CHANNEL and resp[1] == CMD_GET_LANG
+            streak = streak + 1 if ok else 0
+            if streak >= need:
+                self.log(f"[runner] master ready — {need} consecutive GET_LANG "
+                         f"replies after {probes} probe(s)")
+                return True
+            time.sleep(spacing)
+        self.log(f"[runner] WARNING: master not stably responsive after {timeout:.0f}s "
+                 f"({probes} probes) — running tests anyway")
+        return False
 
     def _turn_off_displays(self) -> None:
         """Blank both OLEDs (status + per-key) after a passing run so the panels
