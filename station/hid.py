@@ -87,8 +87,24 @@ class HIDConsole:
 
     def stop(self) -> None:
         self._running = False
-        if self._dev:
-            self._dev.close()
+        # Join the reader thread BEFORE closing the device. The loop calls
+        # self._dev.read() in a background thread; closing a hidapi handle while
+        # that read is in flight is a use-after-free in libhidapi's hidraw
+        # backend (the per-open input queue is torn down under the reader),
+        # which aborts the whole process with "free(): invalid pointer"
+        # (SIGABRT, exit 134). With CONSOLE_ENABLE on (the default firmware now
+        # streams [qmk] lines) the reader is almost always mid-read at stop()
+        # time, so this turned otherwise-green HIL runs into exit-134 CI
+        # failures. The loop's read timeout is 200 ms, so it observes the
+        # cleared _running and returns promptly; join with a margin above that.
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        if self._dev is not None:
+            try:
+                self._dev.close()
+            except Exception:
+                pass
             self._dev = None
 
 

@@ -49,9 +49,11 @@ class TestRunner:
             time.sleep(3)
 
             # The QMK HID console (debug log streaming) is diagnostic only — it
-            # requires CONSOLE_ENABLE in the firmware, which the PolyKybd build
-            # does not set. Its absence (or any transient open failure) must not
-            # fail the test run, so treat startup as best-effort.
+            # requires CONSOLE_ENABLE in the firmware. Current PolyKybd builds do
+            # stream [qmk] lines, but a build with it off, or any transient open
+            # failure, must not fail the test run — so treat startup as
+            # best-effort. (When it IS enabled the reader thread is live, which is
+            # why HIDConsole.stop() must join it before closing the handle.)
             console_started = False
             try:
                 self._console.start(lambda msg: self.log(f"[qmk] {msg}"))
