@@ -120,14 +120,28 @@ class TestRunner:
         deadline = time.monotonic() + timeout
         streak = 0
         probes = 0
+        last_err = None
         while time.monotonic() < deadline:
             probes += 1
             try:
                 resp = self._raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]),
                                       timeout_ms=probe_timeout_ms)
-            except Exception:
+            except Exception as exc:
                 resp = None
-            ok = bool(resp) and len(resp) >= 3 and resp[0] == POLY_CHANNEL and resp[1] == CMD_GET_LANG
+                # Treat any send error as "not ready yet" and keep polling, but
+                # surface it (deduped, so the normal window doesn't flood the
+                # log) so a *persistent* fault — e.g. the Raw HID interface never
+                # reappearing, or a wrong VID/PID — is visible rather than hiding
+                # behind a silent wait until the timeout.
+                msg = f"{type(exc).__name__}: {exc}"
+                if msg != last_err:
+                    self.log(f"[runner] readiness probe error (still waiting): {msg}")
+                    last_err = msg
+            # Require the ACK status byte too, not just a well-formed header, so
+            # a half-initialised reply during the boot window doesn't count as
+            # ready. GET_LANG answers 'P\x07.<llCC>' (ACK) for a valid language.
+            ok = (bool(resp) and len(resp) >= 3 and resp[0] == POLY_CHANNEL
+                  and resp[1] == CMD_GET_LANG and resp[2] == ACK)
             streak = streak + 1 if ok else 0
             if streak >= need:
                 self.log(f"[runner] master ready — {need} consecutive GET_LANG "

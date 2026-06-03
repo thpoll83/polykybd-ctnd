@@ -86,6 +86,7 @@ class HIDConsole:
                 time.sleep(0.1)
 
     def stop(self) -> None:
+        """Stop the reader thread and close the device, in that order."""
         self._running = False
         # Join the reader thread BEFORE closing the device. The loop calls
         # self._dev.read() in a background thread; closing a hidapi handle while
