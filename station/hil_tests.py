@@ -31,6 +31,7 @@ import time
 from typing import Callable
 
 from .hid import RawHID, enumerate_raw_interfaces
+from .iso_lang_country import decode_packed
 
 # --- Raw HID protocol constants (mirror keyboards/handwired/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -42,7 +43,8 @@ POLY_CHANNEL = ord("P")  # 0x50
 
 CMD_GET_ID                  = 6   # device identity string
 CMD_GET_LANG                = 7   # current language code ("llCC")
-CMD_GET_LANG_LIST           = 8   # all language codes (split across packets)
+CMD_GET_LANG_LIST           = 8   # all language codes as ASCII (split across packets)
+CMD_GET_LANG_LIST_PACKED    = 27  # language codes as 2-byte ISO index pairs (protocol v2+)
 CMD_CHANGE_LANG             = 9   # set language by 4-char code
 CMD_SEND_OVERLAY            = 10  # uncompressed overlay segment (no ACK)
 CMD_OVERLAY_FLAGS_ON        = 11  # set overlay flag bits
@@ -152,6 +154,26 @@ def _master_alive(raw: RawHID, log: Callable[[str], None], attempts: int = 3) ->
             return True
         log(f"  GET_ID attempt {i + 1}/{attempts}: no answer (master busy?) — retrying")
     return False
+
+
+def _send_with_retry(raw: RawHID, request: bytes, cmd: int,
+                     log: Callable[[str], None], attempts: int = 3,
+                     expect_status=None):
+    """Send a 'P<cmd>' query up to `attempts` times, returning the first reply
+    that passes _resp_ok. An EEPROM-writing command (CHANGE_LANG -> save_user_latin
+    + slave lang sync) can leave the master briefly unable to answer; retrying
+    tolerates that window the way _master_alive() does for uploads. A genuine hang
+    still fails every attempt. Returns the last reply (caller logs the failure)."""
+    resp = None
+    for i in range(attempts):
+        resp = raw.send(request)
+        if _resp_ok(resp, cmd, lambda *_a: None, expect_status=expect_status):
+            if i:
+                log(f"  cmd {cmd:#04x} answered on attempt {i + 1}/{attempts}")
+            return resp
+        log(f"  cmd {cmd:#04x} attempt {i + 1}/{attempts}: no answer (master busy?) — retrying")
+        time.sleep(0.05)
+    return resp
 
 
 # --- structural / enumeration -------------------------------------------------
@@ -290,6 +312,75 @@ def test_enumerate_languages(raw: RawHID, log: Callable[[str], None]) -> bool:
         if required not in codes:
             log(f"  FAIL: expected language {required!r} missing from list")
             return False
+    return True
+
+
+def test_enumerate_languages_packed(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """GET_LANG_LIST_PACKED (cmd 27, protocol v2+) returns the language list as
+    2-byte ISO 639-1 / ISO 3166-1 index pairs instead of 4 ASCII chars.
+
+    Cross-checks the compact list against the ASCII GET_LANG_LIST: it must decode
+    (via the shared frozen station/iso_lang_country.py table) to the *exact* same
+    codes in the same order. That guards against index drift between the firmware
+    table and the host/rig copies — the whole point of the frozen single source.
+    Also asserts it is genuinely more compact (fewer reports). The payload is
+    binary, so reports are reassembled by raw byte slices, not text decoding; the
+    leading count byte makes the total length deterministic.
+
+    On protocol v1 firmware cmd 27 is unknown and NACKs (or is absent); such a
+    board should run the ASCII suite instead, so a NACK here is reported as a
+    skip-worthy failure rather than silently passing.
+    """
+    # Ground truth: the ASCII list. Fail fast on any bad packet so the failure
+    # points at the protocol issue, not a downstream "empty list" symptom.
+    ascii_packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST]))
+    ascii_text_parts = []
+    for i, p in enumerate(ascii_packets):
+        if not _resp_ok(p, CMD_GET_LANG_LIST, log):
+            log(f"  FAIL: bad ASCII GET_LANG_LIST response in packet {i}")
+            return False
+        ascii_text_parts.append(_reply_text(p))
+    ascii_codes = "".join(ascii_text_parts)
+    ascii_codes = [ascii_codes[i:i + 4] for i in range(0, len(ascii_codes), 4)]
+    if not ascii_codes:
+        log("  FAIL: could not read ASCII language list to compare against")
+        return False
+
+    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST_PACKED]))
+    log(f"GET_LANG_LIST_PACKED returned {len(packets)} packet(s) "
+        f"(ASCII used {len(ascii_packets)})")
+    if not packets:
+        log("  FAIL: no packed-list packets received")
+        return False
+
+    payload = bytearray()
+    for i, p in enumerate(packets):
+        if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED, log):
+            return False
+        payload += bytes(p[3:])  # strip "P\x1b." header; keep raw bytes (binary!)
+    if not payload:
+        log("  FAIL: packed reply had only headers, no payload (count byte missing)")
+        return False
+    count = payload[0]
+    total = 1 + 2 * count
+    if len(payload) < total:
+        log(f"  FAIL: truncated payload ({len(payload)} bytes, need {total})")
+        return False
+    try:
+        codes = decode_packed(payload[:total])
+    except (KeyError, IndexError) as e:
+        log(f"  FAIL: could not decode packed list: {e}")
+        return False
+    log(f"  {count} languages decoded from {len(payload[:total])} payload bytes")
+
+    if codes != ascii_codes:
+        log(f"  FAIL: packed list != ASCII list\n"
+            f"    ascii: {ascii_codes}\n    packed: {codes}")
+        return False
+    if len(packets) >= len(ascii_packets):
+        log(f"  FAIL: packed used {len(packets)} reports, not fewer than "
+            f"ASCII's {len(ascii_packets)} — no compaction")
+        return False
     return True
 
 
@@ -455,7 +546,12 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     EEPROM path and the slave language sync called out as a remaining risk in
     the firmware notes, while leaving the rig's language unchanged.
     """
-    cur = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
+    # All reads/writes here are retried: a preceding test (overlay upload) or the
+    # CHANGE_LANG below (save_user_latin EEPROM write + slave lang sync) can leave
+    # the master in a brief busy window that drops a single HID reply — the same
+    # transient _master_alive() tolerates for uploads. A genuine hang still fails
+    # every attempt (and would also wedge the next test's GET_ID).
+    cur = _send_with_retry(raw, bytes([POLY_CHANNEL, CMD_GET_LANG]), CMD_GET_LANG, log)
     if not _resp_ok(cur, CMD_GET_LANG, log):
         log("  FAIL: could not read current language to begin round-trip")
         return False
@@ -474,12 +570,13 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         return False
     log(f"  switching {original!r} -> {target!r}")
 
+    target_req = bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + target.encode("ascii")
     try:
-        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + target.encode("ascii"))
+        set_resp = _send_with_retry(raw, target_req, CMD_CHANGE_LANG, log, expect_status=ACK)
         log(f"  CHANGE_LANG {target!r} -> {set_resp!r}")
         if not _resp_ok(set_resp, CMD_CHANGE_LANG, log, expect_status=ACK):
             return False
-        check = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
+        check = _send_with_retry(raw, bytes([POLY_CHANNEL, CMD_GET_LANG]), CMD_GET_LANG, log)
         now = _reply_text(check) if _resp_ok(check, CMD_GET_LANG, log, expect_status=None) else ""
         log(f"  read-back after switch: {now!r}")
         if now != target:
@@ -487,7 +584,8 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             return False
         return True
     finally:
-        restore = raw.send(bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + original.encode("ascii"))
+        restore_req = bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + original.encode("ascii")
+        restore = _send_with_retry(raw, restore_req, CMD_CHANGE_LANG, log, expect_status=ACK)
         restored = _resp_ok(restore, CMD_CHANGE_LANG, log, expect_status=ACK)
         log(f"  restored language to {original!r}: {'ok' if restored else 'FAILED — left changed!'}")
 
@@ -581,6 +679,7 @@ TESTS = [
     {"name": "raw HID GET_ID",                  "fn": test_get_id},
     {"name": "get current language",            "fn": test_get_lang},
     {"name": "enumerate language list",         "fn": test_enumerate_languages},
+    {"name": "enumerate language list (packed, v2)", "fn": test_enumerate_languages_packed},
     {"name": "get default layer",               "fn": test_get_default_layer},
     {"name": "reset dynamic keymap (echo + live)", "fn": test_reset_keymap},
     {"name": "unknown command NACKs",           "fn": test_unknown_command_nacks},
