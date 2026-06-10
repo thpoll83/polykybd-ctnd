@@ -61,6 +61,10 @@ class _FwLink:
         self._vid = vid
         self._pid = pid
         self._dev = None
+        self.last_error = None   # last hid.Device() failure, surfaced on hard failure
+
+    def is_open(self) -> bool:
+        return self._dev is not None
 
     def open(self, timeout_s: float = 30.0) -> bool:
         deadline = time.monotonic() + timeout_s
@@ -70,8 +74,12 @@ class _FwLink:
                 try:
                     self._dev = hid.Device(path=path)
                     return True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # During fw-update the device is legitimately absent for
+                    # stretches (USB torn down across the erase), so logging every
+                    # attempt would spam. Keep the last error so a *hard* failure
+                    # (open() returns False) can report why, not just "timed out".
+                    self.last_error = f"{type(exc).__name__}: {exc}"
             time.sleep(0.2)
         return False
 
@@ -134,7 +142,8 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
 
     link = _FwLink(vid, pid)
     if not link.open():
-        log("  FAIL: Raw HID interface not found")
+        why = f" (last error: {link.last_error})" if link.last_error else ""
+        log(f"  FAIL: Raw HID interface not found{why}")
         return False
     try:
         running = _get_version(link, log)
@@ -158,10 +167,11 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
                 # No reply: either the master tore USB down during its synchronous
                 # staging erase (handle now dead -> reopen by path), or it's simply
                 # still busy (handle alive -> just re-poll).
-                if link._dev is None:
+                if not link.is_open():
                     log("  BEGIN: USB dropped during master erase; reopening…")
                     if not link.open():
-                        log("  FAIL: keyboard did not re-enumerate after BEGIN erase")
+                        why = f" (last error: {link.last_error})" if link.last_error else ""
+                        log(f"  FAIL: keyboard did not re-enumerate after BEGIN erase{why}")
                         return False
                 else:
                     log("  BEGIN: no reply yet (still erasing); re-polling…")
@@ -216,8 +226,9 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
                 why = "rejected" if reply is not None else "no reply"
                 log(f"  FAIL: chunk at offset {offset} {why} after {CHUNK_ATTEMPTS} attempts")
                 return False
-            if link._dev is None and not link.open():
-                log("  FAIL: lost the keyboard mid-stream and it did not re-enumerate")
+            if not link.is_open() and not link.open():
+                why = f" (last error: {link.last_error})" if link.last_error else ""
+                log(f"  FAIL: lost the keyboard mid-stream and it did not re-enumerate{why}")
                 return False
             time.sleep(min(0.05 * (2 ** (attempts - 1)), 1.0))
 
