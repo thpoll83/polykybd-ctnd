@@ -156,6 +156,26 @@ def _master_alive(raw: RawHID, log: Callable[[str], None], attempts: int = 3) ->
     return False
 
 
+def _send_with_retry(raw: RawHID, request: bytes, cmd: int,
+                     log: Callable[[str], None], attempts: int = 3,
+                     expect_status=None):
+    """Send a 'P<cmd>' query up to `attempts` times, returning the first reply
+    that passes _resp_ok. An EEPROM-writing command (CHANGE_LANG -> save_user_latin
+    + slave lang sync) can leave the master briefly unable to answer; retrying
+    tolerates that window the way _master_alive() does for uploads. A genuine hang
+    still fails every attempt. Returns the last reply (caller logs the failure)."""
+    resp = None
+    for i in range(attempts):
+        resp = raw.send(request)
+        if _resp_ok(resp, cmd, lambda *_a: None, expect_status=expect_status):
+            if i:
+                log(f"  cmd {cmd:#04x} answered on attempt {i + 1}/{attempts}")
+            return resp
+        log(f"  cmd {cmd:#04x} attempt {i + 1}/{attempts}: no answer (master busy?) — retrying")
+        time.sleep(0.05)
+    return resp
+
+
 # --- structural / enumeration -------------------------------------------------
 
 def test_single_master_enumerates(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -526,16 +546,12 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     EEPROM path and the slave language sync called out as a remaining risk in
     the firmware notes, while leaving the rig's language unchanged.
     """
-    # Retry the initial read: a preceding test (e.g. an overlay upload) can leave
-    # the master in a brief EEPROM-write/display-refresh window that drops a single
-    # HID reply — the same transient _master_alive() tolerates. A genuine fault
-    # still fails every attempt.
-    cur = None
-    for attempt in range(3):
-        cur = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
-        if _resp_ok(cur, CMD_GET_LANG, log, expect_status=None):
-            break
-        log(f"  GET_LANG attempt {attempt + 1}/3: no answer (master busy?) — retrying")
+    # All reads/writes here are retried: a preceding test (overlay upload) or the
+    # CHANGE_LANG below (save_user_latin EEPROM write + slave lang sync) can leave
+    # the master in a brief busy window that drops a single HID reply — the same
+    # transient _master_alive() tolerates for uploads. A genuine hang still fails
+    # every attempt (and would also wedge the next test's GET_ID).
+    cur = _send_with_retry(raw, bytes([POLY_CHANNEL, CMD_GET_LANG]), CMD_GET_LANG, log)
     if not _resp_ok(cur, CMD_GET_LANG, log):
         log("  FAIL: could not read current language to begin round-trip")
         return False
@@ -554,12 +570,13 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         return False
     log(f"  switching {original!r} -> {target!r}")
 
+    target_req = bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + target.encode("ascii")
     try:
-        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + target.encode("ascii"))
+        set_resp = _send_with_retry(raw, target_req, CMD_CHANGE_LANG, log, expect_status=ACK)
         log(f"  CHANGE_LANG {target!r} -> {set_resp!r}")
         if not _resp_ok(set_resp, CMD_CHANGE_LANG, log, expect_status=ACK):
             return False
-        check = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
+        check = _send_with_retry(raw, bytes([POLY_CHANNEL, CMD_GET_LANG]), CMD_GET_LANG, log)
         now = _reply_text(check) if _resp_ok(check, CMD_GET_LANG, log, expect_status=None) else ""
         log(f"  read-back after switch: {now!r}")
         if now != target:
@@ -567,7 +584,8 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             return False
         return True
     finally:
-        restore = raw.send(bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + original.encode("ascii"))
+        restore_req = bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + original.encode("ascii")
+        restore = _send_with_retry(raw, restore_req, CMD_CHANGE_LANG, log, expect_status=ACK)
         restored = _resp_ok(restore, CMD_CHANGE_LANG, log, expect_status=ACK)
         log(f"  restored language to {original!r}: {'ok' if restored else 'FAILED — left changed!'}")
 
