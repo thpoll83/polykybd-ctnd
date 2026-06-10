@@ -31,6 +31,7 @@ import time
 from typing import Callable
 
 from .hid import RawHID, enumerate_raw_interfaces
+from .iso_lang_country import decode_packed
 
 # --- Raw HID protocol constants (mirror keyboards/handwired/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -42,7 +43,8 @@ POLY_CHANNEL = ord("P")  # 0x50
 
 CMD_GET_ID                  = 6   # device identity string
 CMD_GET_LANG                = 7   # current language code ("llCC")
-CMD_GET_LANG_LIST           = 8   # all language codes (split across packets)
+CMD_GET_LANG_LIST           = 8   # all language codes as ASCII (split across packets)
+CMD_GET_LANG_LIST_PACKED    = 27  # language codes as 2-byte ISO index pairs (protocol v2+)
 CMD_CHANGE_LANG             = 9   # set language by 4-char code
 CMD_SEND_OVERLAY            = 10  # uncompressed overlay segment (no ACK)
 CMD_OVERLAY_FLAGS_ON        = 11  # set overlay flag bits
@@ -290,6 +292,66 @@ def test_enumerate_languages(raw: RawHID, log: Callable[[str], None]) -> bool:
         if required not in codes:
             log(f"  FAIL: expected language {required!r} missing from list")
             return False
+    return True
+
+
+def test_enumerate_languages_packed(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """GET_LANG_LIST_PACKED (cmd 27, protocol v2+) returns the language list as
+    2-byte ISO 639-1 / ISO 3166-1 index pairs instead of 4 ASCII chars.
+
+    Cross-checks the compact list against the ASCII GET_LANG_LIST: it must decode
+    (via the shared frozen station/iso_lang_country.py table) to the *exact* same
+    codes in the same order. That guards against index drift between the firmware
+    table and the host/rig copies — the whole point of the frozen single source.
+    Also asserts it is genuinely more compact (fewer reports). The payload is
+    binary, so reports are reassembled by raw byte slices, not text decoding; the
+    leading count byte makes the total length deterministic.
+
+    On protocol v1 firmware cmd 27 is unknown and NACKs (or is absent); such a
+    board should run the ASCII suite instead, so a NACK here is reported as a
+    skip-worthy failure rather than silently passing.
+    """
+    # Ground truth: the ASCII list.
+    ascii_packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST]))
+    ascii_text = "".join(_reply_text(p) for p in ascii_packets
+                         if _resp_ok(p, CMD_GET_LANG_LIST, log))
+    ascii_codes = [ascii_text[i:i + 4] for i in range(0, len(ascii_text), 4)]
+    if not ascii_codes:
+        log("  FAIL: could not read ASCII language list to compare against")
+        return False
+
+    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST_PACKED]))
+    log(f"GET_LANG_LIST_PACKED returned {len(packets)} packet(s) "
+        f"(ASCII used {len(ascii_packets)})")
+    if not packets:
+        log("  FAIL: no packed-list packets received")
+        return False
+
+    payload = bytearray()
+    for i, p in enumerate(packets):
+        if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED, log):
+            return False
+        payload += bytes(p[3:])  # strip "P\x1b." header; keep raw bytes (binary!)
+    count = payload[0]
+    total = 1 + 2 * count
+    if len(payload) < total:
+        log(f"  FAIL: truncated payload ({len(payload)} bytes, need {total})")
+        return False
+    try:
+        codes = decode_packed(payload[:total])
+    except (KeyError, IndexError) as e:
+        log(f"  FAIL: could not decode packed list: {e}")
+        return False
+    log(f"  {count} languages decoded from {len(payload[:total])} payload bytes")
+
+    if codes != ascii_codes:
+        log(f"  FAIL: packed list != ASCII list\n"
+            f"    ascii: {ascii_codes}\n    packed: {codes}")
+        return False
+    if len(packets) >= len(ascii_packets):
+        log(f"  FAIL: packed used {len(packets)} reports, not fewer than "
+            f"ASCII's {len(ascii_packets)} — no compaction")
+        return False
     return True
 
 
@@ -581,6 +643,7 @@ TESTS = [
     {"name": "raw HID GET_ID",                  "fn": test_get_id},
     {"name": "get current language",            "fn": test_get_lang},
     {"name": "enumerate language list",         "fn": test_enumerate_languages},
+    {"name": "enumerate language list (packed, v2)", "fn": test_enumerate_languages_packed},
     {"name": "get default layer",               "fn": test_get_default_layer},
     {"name": "reset dynamic keymap (echo + live)", "fn": test_reset_keymap},
     {"name": "unknown command NACKs",           "fn": test_unknown_command_nacks},
