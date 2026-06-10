@@ -311,11 +311,17 @@ def test_enumerate_languages_packed(raw: RawHID, log: Callable[[str], None]) -> 
     board should run the ASCII suite instead, so a NACK here is reported as a
     skip-worthy failure rather than silently passing.
     """
-    # Ground truth: the ASCII list.
+    # Ground truth: the ASCII list. Fail fast on any bad packet so the failure
+    # points at the protocol issue, not a downstream "empty list" symptom.
     ascii_packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST]))
-    ascii_text = "".join(_reply_text(p) for p in ascii_packets
-                         if _resp_ok(p, CMD_GET_LANG_LIST, log))
-    ascii_codes = [ascii_text[i:i + 4] for i in range(0, len(ascii_text), 4)]
+    ascii_text_parts = []
+    for i, p in enumerate(ascii_packets):
+        if not _resp_ok(p, CMD_GET_LANG_LIST, log):
+            log(f"  FAIL: bad ASCII GET_LANG_LIST response in packet {i}")
+            return False
+        ascii_text_parts.append(_reply_text(p))
+    ascii_codes = "".join(ascii_text_parts)
+    ascii_codes = [ascii_codes[i:i + 4] for i in range(0, len(ascii_codes), 4)]
     if not ascii_codes:
         log("  FAIL: could not read ASCII language list to compare against")
         return False
@@ -332,6 +338,9 @@ def test_enumerate_languages_packed(raw: RawHID, log: Callable[[str], None]) -> 
         if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED, log):
             return False
         payload += bytes(p[3:])  # strip "P\x1b." header; keep raw bytes (binary!)
+    if not payload:
+        log("  FAIL: packed reply had only headers, no payload (count byte missing)")
+        return False
     count = payload[0]
     total = 1 + 2 * count
     if len(payload) < total:
