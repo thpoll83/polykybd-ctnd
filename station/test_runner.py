@@ -85,6 +85,11 @@ class TestRunner:
             # from the compiled defaults. Best-effort — a failure here is logged
             # but does not abort the run.
             self._reset_keymap()
+            # The keymap reset triggers a master->slave sync; wait for that (and
+            # the post-cold-flash split-sync settling in general) to clear before
+            # the graded suite, so no test runs while the master's loop is briefly
+            # stalled in split retries. Best-effort.
+            self._settle_master()
             for test in (tests or []):
                 name = test.get("name", "unnamed")
                 try:
@@ -167,6 +172,54 @@ class TestRunner:
             time.sleep(spacing)
         self.log(f"[runner] WARNING: master not stably responsive after {timeout:.0f}s "
                  f"({probes} probes) — running tests anyway")
+        return False
+
+    def _settle_master(self, need: int = 3, timeout: float = 15.0,
+                       fast_ms: int = 250, probe_timeout_ms: int = 2500,
+                       spacing: float = 0.2) -> bool:
+        """Wait until the master answers *quickly* and consistently, so the graded
+        suite never starts inside the post-cold-flash split-sync settling window.
+
+        The read-only readiness gate (GET_LANG) can pass while the slave is still
+        unreachable: with no state change there's no master->slave sync, so the
+        main loop isn't stalled and probes return fast. But once a state-changing
+        command lands (the keymap reset's slave sync, or the first test that
+        toggles state), the master can block its loop in split-sync retries —
+        delaying HID long enough to time out whatever command is in flight. The
+        firmware change (1-attempt periodic syncs) bounds that stall; this gate is
+        the belt-and-suspenders complement: it requires ``need`` consecutive
+        GET_LANG replies that each come back within ``fast_ms`` (a stalled loop
+        blows past that), confirming the settling window has cleared. GET_LANG is
+        used (not GET_ID) so the one-shot fresh-boot '*' marker is left intact for
+        test_fresh_boot_marker. Best-effort: logs and proceeds on timeout."""
+        deadline = time.monotonic() + timeout
+        streak = 0
+        probes = 0
+        worst_ms = 0.0
+        while time.monotonic() < deadline:
+            probes += 1
+            t0 = time.monotonic()
+            try:
+                resp = self._raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]),
+                                      timeout_ms=probe_timeout_ms)
+            except Exception:
+                resp = None
+            latency_ms = (time.monotonic() - t0) * 1000.0
+            ok = (bool(resp) and len(resp) >= 3 and resp[0] == POLY_CHANNEL
+                  and resp[1] == CMD_GET_LANG and resp[2] == ACK
+                  and latency_ms <= fast_ms)
+            if ok:
+                streak += 1
+            else:
+                worst_ms = max(worst_ms, latency_ms)
+                streak = 0
+            if streak >= need:
+                self.log(f"[runner] master settled — {need} consecutive GET_LANG "
+                         f"replies <= {fast_ms} ms after {probes} probe(s)")
+                return True
+            time.sleep(spacing)
+        self.log(f"[runner] WARNING: master not settled after {timeout:.0f}s "
+                 f"({probes} probes, worst {worst_ms:.0f} ms) — running anyway")
         return False
 
     def _turn_off_displays(self) -> None:
