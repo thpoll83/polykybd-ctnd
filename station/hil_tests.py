@@ -9,9 +9,10 @@ failure, so a test may also simply assert.
 The suite exercises every Raw HID command that can be checked in a meaningful,
 side-effect-free way on the unattended rig (no human at the keys, no camera, no
 GPIO key-matrix injection, HID console off): the read-only identity/state
-queries (GET_ID/GET_LANG/GET_LANG_LIST/GET_DEFAULT_LAYER), the ACK/NACK error
-and bounds paths (unknown command, out-of-range brightness, invalid unicode
-mode), the state commands with a clean round-trip + restore (language, overlay
+queries (GET_ID/GET_LANG/GET_LANG_LIST_PACKED/GET_DEFAULT_LAYER), the ACK/NACK
+error and bounds paths (unknown command, the retired ASCII GET_LANG_LIST which
+must now NACK, out-of-range brightness, invalid unicode mode), the state commands
+with a clean round-trip + restore (language, overlay
 flags), and the upload + soak paths that guard documented firmware regressions
 (overlay upload — plain and core1 RLE — keeping the master alive; rapid GET_ID
 stress). Commands that can't be asserted without side effects or extra
@@ -43,8 +44,8 @@ POLY_CHANNEL = ord("P")  # 0x50
 
 CMD_GET_ID                  = 6   # device identity string
 CMD_GET_LANG                = 7   # current language code ("llCC")
-CMD_GET_LANG_LIST           = 8   # all language codes as ASCII (split across packets)
-CMD_GET_LANG_LIST_PACKED    = 27  # language codes as 2-byte ISO index pairs (protocol v2+)
+CMD_GET_LANG_LIST           = 8   # legacy ASCII list — RETIRED in protocol v2; firmware NACKs it
+CMD_GET_LANG_LIST_PACKED    = 27  # language codes as 2-byte ISO index pairs (protocol v2+; the only list cmd)
 CMD_CHANGE_LANG             = 9   # set language by 4-char code
 CMD_SEND_OVERLAY            = 10  # uncompressed overlay segment (no ACK)
 CMD_OVERLAY_FLAGS_ON        = 11  # set overlay flag bits
@@ -282,105 +283,98 @@ def test_get_lang(raw: RawHID, log: Callable[[str], None]) -> bool:
     return True
 
 
-def test_enumerate_languages(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """GET_LANG_LIST (cmd 8) returns the full language table across packets.
+def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None]):
+    """Read GET_LANG_LIST_PACKED (cmd 27) and decode it to a list of 'llCC' codes.
 
-    Read-only, and the one command that answers with more than one report
-    (two on the current firmware), so it uses ``send_and_read_all``. Asserts
-    every packet is a well-formed ``P\\x08.`` reply, the concatenated codes
-    are a whole number of 4-char entries, and the staple locales are present.
-    Doubles as a check that multi-report HID reads work on the rig.
+    The list is a count byte + two ISO index bytes per language, possibly split
+    across several reports; the leading count makes the total length deterministic
+    (no reliance on a read timeout). Decodes via the shared frozen
+    station/iso_lang_country.py table. The payload is binary, so reports are
+    reassembled by raw byte slices, not text decoding. Returns the list of codes
+    (empty if the firmware reports zero languages), or None on any protocol /
+    decoding failure (already logged).
     """
-    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST]))
-    log(f"GET_LANG_LIST returned {len(packets)} packet(s)")
-    if not packets:
-        log("  FAIL: no language-list packets received")
-        return False
-    langs = ""
-    for i, p in enumerate(packets):
-        if not _resp_ok(p, CMD_GET_LANG_LIST, log):
-            return False
-        chunk = _reply_text(p)
-        log(f"  packet {i}: {chunk!r}")
-        langs += chunk
-    if len(langs) == 0 or len(langs) % 4 != 0:
-        log(f"  FAIL: concatenated list length {len(langs)} is not a positive multiple of 4")
-        return False
-    codes = [langs[i:i + 4] for i in range(0, len(langs), 4)]
-    log(f"  {len(codes)} languages: {codes}")
-    for required in ("enUS", "deDE", "frFR"):
-        if required not in codes:
-            log(f"  FAIL: expected language {required!r} missing from list")
-            return False
-    return True
-
-
-def test_enumerate_languages_packed(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """GET_LANG_LIST_PACKED (cmd 27, protocol v2+) returns the language list as
-    2-byte ISO 639-1 / ISO 3166-1 index pairs instead of 4 ASCII chars.
-
-    Cross-checks the compact list against the ASCII GET_LANG_LIST: it must decode
-    (via the shared frozen station/iso_lang_country.py table) to the *exact* same
-    codes in the same order. That guards against index drift between the firmware
-    table and the host/rig copies — the whole point of the frozen single source.
-    Also asserts it is genuinely more compact (fewer reports). The payload is
-    binary, so reports are reassembled by raw byte slices, not text decoding; the
-    leading count byte makes the total length deterministic.
-
-    On protocol v1 firmware cmd 27 is unknown and NACKs (or is absent); such a
-    board should run the ASCII suite instead, so a NACK here is reported as a
-    skip-worthy failure rather than silently passing.
-    """
-    # Ground truth: the ASCII list. Fail fast on any bad packet so the failure
-    # points at the protocol issue, not a downstream "empty list" symptom.
-    ascii_packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST]))
-    ascii_text_parts = []
-    for i, p in enumerate(ascii_packets):
-        if not _resp_ok(p, CMD_GET_LANG_LIST, log):
-            log(f"  FAIL: bad ASCII GET_LANG_LIST response in packet {i}")
-            return False
-        ascii_text_parts.append(_reply_text(p))
-    ascii_codes = "".join(ascii_text_parts)
-    ascii_codes = [ascii_codes[i:i + 4] for i in range(0, len(ascii_codes), 4)]
-    if not ascii_codes:
-        log("  FAIL: could not read ASCII language list to compare against")
-        return False
-
     packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST_PACKED]))
-    log(f"GET_LANG_LIST_PACKED returned {len(packets)} packet(s) "
-        f"(ASCII used {len(ascii_packets)})")
     if not packets:
         log("  FAIL: no packed-list packets received")
-        return False
-
+        return None
     payload = bytearray()
-    for i, p in enumerate(packets):
+    for p in packets:
         if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED, log):
-            return False
+            return None
         payload += bytes(p[3:])  # strip "P\x1b." header; keep raw bytes (binary!)
     if not payload:
         log("  FAIL: packed reply had only headers, no payload (count byte missing)")
-        return False
+        return None
     count = payload[0]
     total = 1 + 2 * count
     if len(payload) < total:
         log(f"  FAIL: truncated payload ({len(payload)} bytes, need {total})")
-        return False
+        return None
     try:
         codes = decode_packed(payload[:total])
     except (KeyError, IndexError) as e:
         log(f"  FAIL: could not decode packed list: {e}")
-        return False
-    log(f"  {count} languages decoded from {len(payload[:total])} payload bytes")
+        return None
+    if len(codes) != count:
+        log(f"  FAIL: decoded {len(codes)} codes but count byte says {count}")
+        return None
+    return codes
 
-    if codes != ascii_codes:
-        log(f"  FAIL: packed list != ASCII list\n"
-            f"    ascii: {ascii_codes}\n    packed: {codes}")
+
+def test_legacy_lang_list_nacked(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """GET_LANG_LIST (cmd 8, the legacy ASCII list) was RETIRED in protocol v2.
+
+    The firmware now answers a single ``P\\x08!`` NACK; hosts must use the packed
+    GET_LANG_LIST_PACKED (cmd 27) instead. This is the regression guard against the
+    old multi-packet ASCII table coming back: an ACK ('.') here means the board is
+    running pre-v2 firmware (or cmd 8 was un-retired), which is a failure on a v2
+    rig. Exactly one report is expected — the NACK.
+    """
+    resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST]))
+    log(f"GET_LANG_LIST (legacy ASCII) response: {resp!r}")
+    if not _resp_ok(resp, CMD_GET_LANG_LIST, log, expect_status=NACK):
+        log("  FAIL: legacy ASCII GET_LANG_LIST must NACK "
+            "(retired in protocol v2 — hosts use cmd 27)")
         return False
-    if len(packets) >= len(ascii_packets):
-        log(f"  FAIL: packed used {len(packets)} reports, not fewer than "
-            f"ASCII's {len(ascii_packets)} — no compaction")
+    return True
+
+
+def test_enumerate_languages_packed(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """GET_LANG_LIST_PACKED (cmd 27) — the ONLY language-list command in protocol v2.
+
+    Reads the compact list (count byte + 2 ISO index bytes per language across
+    reports) and decodes it via the shared frozen station/iso_lang_country.py table,
+    then validates it stands on its own — the ASCII GET_LANG_LIST it used to be
+    cross-checked against is retired (see test_legacy_lang_list_nacked). Asserts a
+    positive count that matches the decoded length (done in the helper), every code
+    in canonical 'llCC' form, the staple locales present, and the board's current
+    language (cmd 7) appearing in the list. Guards against index drift between the
+    firmware table and the rig's frozen copy.
+    """
+    codes = _read_packed_lang_codes(raw, log)
+    if not codes:
+        log("  FAIL: packed language list is empty or could not be read")
         return False
+    log(f"  {len(codes)} languages decoded: {codes}")
+
+    malformed = [c for c in codes if not re.fullmatch(r"[a-z]{2}[A-Z]{2}", c)]
+    if malformed:
+        log(f"  FAIL: malformed language code(s): {malformed}")
+        return False
+    for required in ("enUS", "deDE", "frFR"):
+        if required not in codes:
+            log(f"  FAIL: expected language {required!r} missing from list")
+            return False
+
+    # Consistency: the board's current language must be one of the listed codes.
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
+    if _resp_ok(cur, CMD_GET_LANG, log, expect_status=None):
+        current = _reply_text(cur)
+        if current and current not in codes:
+            log(f"  FAIL: current language {current!r} not present in packed list")
+            return False
+        log(f"  current language {current!r} present in list")
     return True
 
 
@@ -540,9 +534,9 @@ def test_overlay_flags_round_trip(raw: RawHID, log: Callable[[str], None]) -> bo
 def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     """CHANGE_LANG (cmd 9) switches language, reads it back, then restores it.
 
-    Reads the current language (cmd 7), picks a different one from the list
-    (cmd 8), switches to it, confirms GET_LANG reflects the change, then always
-    restores the original in a ``finally``. Exercises the ``save_user_latin``
+    Reads the current language (cmd 7), picks a different one from the packed
+    list (cmd 27), switches to it, confirms GET_LANG reflects the change, then
+    always restores the original in a ``finally``. Exercises the ``save_user_latin``
     EEPROM path and the slave language sync called out as a remaining risk in
     the firmware notes, while leaving the rig's language unchanged.
     """
@@ -558,12 +552,10 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     original = _reply_text(cur)
     log(f"  original language: {original!r}")
 
-    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST]))
-    langs = ""
-    for p in packets:
-        if _resp_ok(p, CMD_GET_LANG_LIST, log, expect_status=None):
-            langs += _reply_text(p)
-    codes = [langs[i:i + 4] for i in range(0, len(langs), 4) if len(langs[i:i + 4]) == 4]
+    codes = _read_packed_lang_codes(raw, log)
+    if not codes:
+        log("  FAIL: could not read packed language list to pick a target")
+        return False
     target = next((c for c in codes if c != original), None)
     if target is None:
         log("  FAIL: could not find a second language to switch to")
@@ -678,7 +670,7 @@ TESTS = [
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
     {"name": "raw HID GET_ID",                  "fn": test_get_id},
     {"name": "get current language",            "fn": test_get_lang},
-    {"name": "enumerate language list",         "fn": test_enumerate_languages},
+    {"name": "legacy ASCII lang list NACKs (retired)", "fn": test_legacy_lang_list_nacked},
     {"name": "enumerate language list (packed, v2)", "fn": test_enumerate_languages_packed},
     {"name": "get default layer",               "fn": test_get_default_layer},
     {"name": "reset dynamic keymap (echo + live)", "fn": test_reset_keymap},
