@@ -6,6 +6,7 @@ from typing import Callable
 
 from .flash import FlashController
 from .hid import HIDConsole, RawHID
+from .fw_update import stage_and_verify
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
 # keyboards/handwired/polykybd/hid_com.c (case 24 / 0x18). A command report is
@@ -32,7 +33,8 @@ class TestRunner:
         self._console = HIDConsole()
         self._raw = RawHID()
 
-    def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None) -> dict:
+    def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
+                       bin_path: str = None) -> dict:
         # HIL images are built per side (POLYKYBD_HIL=left/right). If either path
         # looks like a HIL image, enforce the per-side contract before touching
         # hardware — flashing one master image (or a swapped pair) to both halves
@@ -102,6 +104,27 @@ class TestRunner:
 
             if console_started:
                 self._console.stop()
+
+            # Firmware-update coverage: drive the keyboard's own HID update path
+            # (BEGIN -> CHUNK -> COMMIT) with the built .bin. This is the one
+            # path the UF2/BOOTSEL flash never exercises, and the most split-link-
+            # sensitive code in the firmware. Stage + verify only (no APPLY), so
+            # it's non-destructive — the keyboard keeps running its current image.
+            # Run after the console is stopped (BEGIN tears USB down during the
+            # master's staging erase) and regardless of the suite outcome.
+            if bin_path:
+                self.log("[runner] firmware update (HID stage+verify) — driving "
+                         "BEGIN/CHUNK/COMMIT…")
+                try:
+                    fw_ok = stage_and_verify(bin_path, self.log)
+                except Exception as exc:
+                    fw_ok = False
+                    self.log(f"[runner] firmware update ERROR: {exc}")
+                results.append({"name": "firmware update (stage+verify .bin)",
+                                "passed": fw_ok})
+                self.log(f"[test] {'PASS' if fw_ok else 'FAIL'}: "
+                         f"firmware update (stage+verify .bin)")
+
             passed = all(r["passed"] for r in results)
             if passed:
                 # Successful HIL test/deploy — park the OLEDs so they don't sit
@@ -326,10 +349,15 @@ if __name__ == "__main__":
     parser.add_argument("--right", required=True, help="Path to right half UF2")
     parser.add_argument("--label", default=None,
                         help="Board name for the run summary title (default: inferred from --left)")
+    parser.add_argument("--bin", dest="bin_path", default=None,
+                        help="Optional raw .bin image; after the suite, drives the "
+                             "keyboard's HID firmware-update path (BEGIN/CHUNK/COMMIT, "
+                             "stage+verify only — non-destructive, no apply/reboot)")
     args = parser.parse_args()
     runner = TestRunner()
     try:
-        result = runner.flash_and_test(args.left, args.right, tests=TESTS)
+        result = runner.flash_and_test(args.left, args.right, tests=TESTS,
+                                       bin_path=args.bin_path)
     except Exception as exc:
         # A fatal flash/enumerate error still gets a summary line so the run page
         # shows *why* there are no per-test results, not just a red X.
