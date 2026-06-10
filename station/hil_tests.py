@@ -526,7 +526,16 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     EEPROM path and the slave language sync called out as a remaining risk in
     the firmware notes, while leaving the rig's language unchanged.
     """
-    cur = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
+    # Retry the initial read: a preceding test (e.g. an overlay upload) can leave
+    # the master in a brief EEPROM-write/display-refresh window that drops a single
+    # HID reply — the same transient _master_alive() tolerates. A genuine fault
+    # still fails every attempt.
+    cur = None
+    for attempt in range(3):
+        cur = raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
+        if _resp_ok(cur, CMD_GET_LANG, log, expect_status=None):
+            break
+        log(f"  GET_LANG attempt {attempt + 1}/3: no answer (master busy?) — retrying")
     if not _resp_ok(cur, CMD_GET_LANG, log):
         log("  FAIL: could not read current language to begin round-trip")
         return False
