@@ -53,6 +53,11 @@ CMD_START_COMPRESSED_OVERLAY = 16 # first RLE-compressed overlay packet (core1)
 CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 
+# VIA "reset dynamic keymap" report (bare command id, NOT a 'P' command — see
+# test_runner.VIA_DYNAMIC_KEYMAP_RESET). data[0]==0x06 -> legacy_command_kb ->
+# dynamic_keymap_reset(); the firmware echoes the request back (no "P<cmd>." ACK).
+VIA_DYNAMIC_KEYMAP_RESET    = 0x06
+
 ACK        = ord(".")
 NACK       = ord("!")
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
@@ -310,12 +315,42 @@ def test_get_default_layer(raw: RawHID, log: Callable[[str], None]) -> bool:
     return True
 
 
+def test_reset_keymap(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """The VIA reset-dynamic-keymap report (0x06) resets the keymap, master live.
+
+    A UF2/HID flash does not erase the keyboard's wear-leveled EEPROM, so a
+    dynamic keymap stored under an older firmware whose layer layout differs
+    survives the update. The VIA reset report clears it back to the compiled
+    defaults on both halves (the firmware routes data[0]==0x06 to
+    legacy_command_kb -> dynamic_keymap_reset(), bridges the reset to the slave,
+    and echoes the request — there is no "P<cmd>." ACK). The reset triggers a
+    display refresh + a split-sync to the slave, so this also guards that the
+    master keeps servicing HID afterwards (the same busy-window class as the
+    brightness/overlay paths). Resetting to firmware defaults is the desired
+    clean state on a freshly-flashed board, so running it in the suite leaves the
+    rig in a good state rather than a dirty one — and is exactly what the runner
+    does before the suite (see TestRunner._reset_keymap).
+    """
+    response = raw.send(bytes([VIA_DYNAMIC_KEYMAP_RESET]))
+    log(f"VIA keymap-reset response: {response!r}")
+    if response is None or len(response) < 1:
+        log("  FAIL: no/short response to the VIA keymap-reset report")
+        return False
+    if response[0] != VIA_DYNAMIC_KEYMAP_RESET:
+        log(f"  FAIL: echo byte {response[0]:#04x} != request {VIA_DYNAMIC_KEYMAP_RESET:#04x}")
+        return False
+    if not _master_alive(raw, log):
+        log("  FAIL: master not answering GET_ID after keymap reset")
+        return False
+    return True
+
+
 # --- error / bounds paths (no persistent state change) ------------------------
 
 def test_unknown_command_nacks(raw: RawHID, log: Callable[[str], None]) -> bool:
     """An unrecognised PolyKybd command id is NACKed, not silently dropped.
 
-    Sends ``P\\x7e`` (0x7E — outside the defined cmd range 6..24 and the
+    Sends ``P\\x7e`` (0x7E — outside the defined cmd range 6..26 and the
     firmware-update range 0x40..0x44). The dispatcher's default case sets the
     status byte to '!' and echoes the report back unchanged otherwise. Confirms
     the error path and that the master keeps servicing HID for unknown input.
@@ -547,6 +582,7 @@ TESTS = [
     {"name": "get current language",            "fn": test_get_lang},
     {"name": "enumerate language list",         "fn": test_enumerate_languages},
     {"name": "get default layer",               "fn": test_get_default_layer},
+    {"name": "reset dynamic keymap (echo + live)", "fn": test_reset_keymap},
     {"name": "unknown command NACKs",           "fn": test_unknown_command_nacks},
     {"name": "set brightness (ACK + range NACK)", "fn": test_set_brightness},
     {"name": "set unicode mode (ACK + NACK)",   "fn": test_set_unicode_mode},

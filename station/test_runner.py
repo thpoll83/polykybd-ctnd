@@ -10,10 +10,18 @@ from .hid import HIDConsole, RawHID
 # Raw HID display-off control command — mirrors the firmware dispatcher in
 # keyboards/handwired/polykybd/hid_com.c (case 24 / 0x18). A command report is
 # data[0]='P' (channel marker) then data[1]=command id; the firmware replies "P\x18.".
-POLY_CHANNEL    = 0x50  # 'P'
-CMD_GET_LANG    = 0x07  # read current language — readiness probe (no side effects)
-CMD_DISPLAY_OFF = 0x18
-ACK             = ord(".")
+POLY_CHANNEL     = 0x50  # 'P'
+CMD_GET_LANG     = 0x07  # read current language — readiness probe (no side effects)
+CMD_DISPLAY_OFF  = 0x18
+ACK              = ord(".")
+
+# VIA-style "reset dynamic keymap" report. Unlike the 'P'-channel commands above,
+# this is a bare report whose first byte is the VIA command id (no 'P' marker):
+# the firmware routes data[0]==0x06 to legacy_command_kb(), which calls
+# dynamic_keymap_reset(), bridges the reset to the slave over the split link, and
+# echoes the request back unchanged (no "P<cmd>." ACK). Same id PolyKybdHost uses
+# in PolyKybd.reset_dynamic_keymap(). See keyboards/handwired/polykybd/hid_com.c.
+VIA_DYNAMIC_KEYMAP_RESET = 0x06
 
 
 class TestRunner:
@@ -68,6 +76,15 @@ class TestRunner:
             # times out HID reads, so the marker-sensitive GET_ID tests don't run
             # inside it (see _wait_for_master_ready).
             self._wait_for_master_ready()
+            # Clear any dynamic keymap left in the keyboard's EEPROM by a previous
+            # firmware whose layer layout differs from the freshly-flashed build.
+            # A UF2/HID flash does not erase the wear-leveled EEPROM, and the
+            # firmware has no build-date magic that auto-resets it, so a stale
+            # keymap survives the flash and can make the rig behave as if it were
+            # running the old layout. Reset it before the suite so every run starts
+            # from the compiled defaults. Best-effort — a failure here is logged
+            # but does not abort the run.
+            self._reset_keymap()
             for test in (tests or []):
                 name = test.get("name", "unnamed")
                 try:
@@ -166,6 +183,23 @@ class TestRunner:
             self.log("[runner] displays off — OLEDs blanked to prevent wear")
         else:
             self.log(f"[runner] display-off sent; unexpected/no ACK: {resp!r}")
+
+    def _reset_keymap(self) -> None:
+        """Reset the dynamic keymap (host-remappable layers 0..8) to the compiled
+        firmware defaults so a stale keymap stored in EEPROM by an earlier build
+        can't taint the run. Uses the existing VIA reset report (0x06) — the same
+        path PolyKybdHost uses; the master resets its own copy, bridges the reset
+        to the slave, and echoes the request back. Best-effort: a failure here is
+        logged but must not fail the run."""
+        try:
+            resp = self._raw.send(bytes([VIA_DYNAMIC_KEYMAP_RESET]))
+        except Exception as exc:
+            self.log(f"[runner] could not reset dynamic keymap (non-fatal): {exc}")
+            return
+        if resp and len(resp) >= 1 and resp[0] == VIA_DYNAMIC_KEYMAP_RESET:
+            self.log("[runner] dynamic keymap reset to firmware defaults")
+        else:
+            self.log(f"[runner] keymap-reset sent; unexpected/no echo: {resp!r}")
 
     def cleanup(self) -> None:
         self._flash.cleanup()
