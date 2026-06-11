@@ -141,18 +141,26 @@ class RawHID:
         data: bytes,
         first_timeout_ms: int = 1000,
         next_timeout_ms: int = 250,
-        max_reports: int = 8,
+        max_reports: int = 32,
     ) -> list[bytes]:
         """Write one command, then read *every* input report it produces.
 
         ``send()`` opens a fresh handle and reads exactly once, so it only ever
         sees the first 64-byte packet. Some firmware commands answer with more
-        than one — e.g. GET_LANG_LIST splits the language codes across two
-        reports. This opens the handle once, writes, then keeps reading (with a
-        short per-read timeout) until a read returns nothing or ``max_reports``
-        is hit, returning the packets in order. Opening a single handle for the
-        whole exchange is what keeps the firmware's back-to-back replies from
-        being dropped by the per-open hidraw queue being torn down between reads.
+        than one — e.g. GET_LANG_LIST splits the language codes across many
+        reports (15 codes per packet, so 143 languages = 10 reports). This opens
+        the handle once, writes, then keeps reading (with a short per-read
+        timeout) until a read returns nothing or ``max_reports`` is hit,
+        returning the packets in order. Opening a single handle for the whole
+        exchange is what keeps the firmware's back-to-back replies from being
+        dropped by the per-open hidraw queue being torn down between reads.
+
+        ``max_reports`` is only a safety stop against a runaway firmware; the
+        normal terminator is the empty read after the last real packet. Keep it
+        comfortably above the largest real reply (GET_LANG_LIST: ceil(NUM_LANG /
+        15) packets) so a growing language list never silently truncates the
+        read — a too-low cap was why a 143-language list (10 packets) decoded as
+        only 120 codes and mismatched the packed list.
         """
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
