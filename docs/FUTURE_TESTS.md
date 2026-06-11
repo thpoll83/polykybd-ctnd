@@ -37,8 +37,13 @@ unattended rig now has a test. Covered:
   accepts a plain ACK.
 - [x] **raw HID GET_ID** (cmd 6) — master answers with a well-formed `Split72` identity string.
 - [x] **get current language** (cmd 7) — `P\x07.<llCC>`, well-formed language code.
-- [x] **enumerate language list** (cmd 8) — multi-packet list (uses `send_and_read_all`);
-  staple locales present, whole number of 4-char codes.
+- [x] **legacy ASCII lang list NACKs (retired)** (cmd 8) — the old multi-packet ASCII list was
+  retired in protocol v2; the firmware now answers a single `P\x08!` NACK (hosts use cmd 27).
+  Regression guard against the ASCII table coming back.
+- [x] **enumerate language list (packed, v2)** (cmd 27) — the compact 2-byte ISO-index list,
+  reassembled by raw byte slices and decoded via the frozen `iso_lang_country.py`. Self-validating
+  (no ASCII ground truth): staple locales present, every code well-formed `llCC`, decoded count
+  matches the count byte, current language present. The only language-list command now.
 - [x] **get default layer** (cmd 22) — plausible default-layer index (`< DYNAMIC_KEYMAP_LAYER_COUNT`).
 - [x] **unknown command NACKs** — an undefined command id (0x7E) gets status `!`, dispatcher
   error path exercised.
