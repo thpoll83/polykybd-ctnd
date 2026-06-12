@@ -371,7 +371,20 @@ _STATUS_WORD = [
 
 
 def _status_of(r: dict) -> str:
-    """Status of a result record, tolerating older bool-``passed`` records."""
+    """Status of a result record, tolerating older bool-``passed`` records.
+
+    The compatibility layer between legacy ``{"passed": bool}`` records and the
+    newer ``{"status": str}`` ones; ``status`` wins when both are present.
+
+    >>> _status_of({"status": "skip"})
+    'skip'
+    >>> _status_of({"passed": True})
+    'pass'
+    >>> _status_of({"passed": False})
+    'fail'
+    >>> _status_of({"status": "xfail", "passed": False})
+    'xfail'
+    """
     return r.get("status") or ("pass" if r.get("passed") else "fail")
 
 

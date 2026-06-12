@@ -160,7 +160,7 @@ gate decision is `skip_reason()` (both pure + unit-testable in `hil_tests.py`);
 the runner reads the caps **lazily** — only when a gated test is reached, which
 is after the fresh-boot test has consumed the one-shot `*` marker, so the gate's
 `GET_ID` never disturbs `test_fresh_boot_marker`. If `GET_ID` can't be read or
-parsed the gate **runs** the test rather than skipping, so a real fault still
+parsed, the gate **runs** the test rather than skipping, so a real fault still
 surfaces. The job Step Summary marks each line ✅ pass · ❌ fail · ⏭️ skip · 🟡
 xfail · ❗ xpass, with a count line and an `::error::`/`::warning::` annotation
 per fail/xpass. The protocol-v2-only tests (legacy-NACK, packed list, language
