@@ -6,6 +6,26 @@ Each test is a dict ``{"name": str, "fn": callable}``. ``fn`` receives
 pass, False for fail. Exceptions are caught by the runner and reported as a
 failure, so a test may also simply assert.
 
+Tolerating expected changes
+---------------------------
+A test dict may carry optional **gate** keys so a check that is *known* to need a
+firmware change which isn't deployed yet does not hard-fail the run:
+
+* ``"min_protocol": N`` — the test is SKIPPED (not failed) unless the flashed
+  firmware advertises ``PROTOCOL_VERSION`` >= N in its GET_ID string. It un-skips
+  automatically the moment a firmware reporting >= N is flashed.
+* ``"min_fw": "0.8.22"`` — same idea, gated on ``FW_VERSION`` (for changes not
+  tied to a protocol bump).
+* ``"xfail": "reason"`` — run the test but treat a failure as XFAIL (tolerated)
+  and an unexpected pass as XPASS (surfaced loudly so the marker gets removed).
+  For "details" not visible in GET_ID.
+
+SKIP / XFAIL / XPASS never fail the overall run — only a genuine FAIL does. The
+device's advertised protocol/fw version is parsed from GET_ID via
+``parse_device_caps`` and the gate decision is in ``skip_reason`` (both pure and
+unit-testable); the runner reads the caps lazily, after the fresh-boot test has
+consumed the one-shot ``*`` marker.
+
 The suite exercises every Raw HID command that can be checked in a meaningful,
 side-effect-free way on the unattended rig (no human at the keys, no camera, no
 GPIO key-matrix injection, HID console off): the read-only identity/state
@@ -74,6 +94,61 @@ NUM_SEGMENTS         = 6     # NUM_SEGMENTS_PER_OVERLAY
 PLAIN_SEG_BYTES      = 59    # data bytes per plain overlay report (64 - 5 header)
 OVERLAY_BYTES        = 360   # NUM_SEGMENTS_PER_OVERLAY * BYTES_PER_SEGMENT
 COMPRESSED_TEST_KEYS = 8     # KC_A..KC_H — exercise the core1 path repeatedly
+
+
+# --- device capability gate ---------------------------------------------------
+# The firmware's GET_ID reply (cmd 6) names the board, firmware version and
+# protocol version, e.g. the text after the "P\x06." header reads
+#   "Split72 0.8.21 P2 HW1 "
+# (see keyboards/handwired/polykybd/hid_com.c: name = "P\x06.Split72 " FW_VERSION
+#  " P" STR(PROTOCOL_VERSION) " HW" STR(DEVICE_VER) " "). That advertised version
+# is the "has the update landed yet?" signal the per-test gate keys read.
+_CAPS_RE = re.compile(r"Split72\s+(?P<fw>\S+)\s+P(?P<proto>\d+)")
+
+
+def parse_device_caps(identity: str) -> dict:
+    """Extract ``{'fw': '0.8.21', 'protocol': 2}`` from a GET_ID identity string
+    (the text *after* the ``P\\x06.`` header). Returns ``{}`` if it doesn't match
+    — e.g. an older firmware that didn't advertise a ``P<n>`` token — so the gate
+    can fall back to running the test rather than skipping on an unparsable line.
+    """
+    m = _CAPS_RE.search(identity or "")
+    if not m:
+        return {}
+    return {"fw": m.group("fw"), "protocol": int(m.group("proto"))}
+
+
+def _ver_tuple(v: str) -> tuple:
+    """Leading dotted-numeric prefix of a version string as an int tuple, for
+    comparison (``"0.8.21"`` -> ``(0, 8, 21)``). Stops at the first non-numeric
+    component so a suffix like ``"0.8.21-rc1"`` compares on ``(0, 8, 21)``."""
+    parts = []
+    for p in re.split(r"[.\-]", (v or "").strip()):
+        if p.isdigit():
+            parts.append(int(p))
+        else:
+            break
+    return tuple(parts)
+
+
+def skip_reason(test: dict, caps: dict):
+    """Return a human-readable reason to SKIP ``test`` given the device ``caps``
+    (from ``parse_device_caps``), or ``None`` to run it.
+
+    A gate only skips when the device *positively* reports a version below the
+    requirement. If ``caps`` is empty (GET_ID unreadable/unparsable) the gate
+    declines to skip — better to run the test and surface a real failure than to
+    hide it behind an unverifiable gate.
+    """
+    min_proto = test.get("min_protocol")
+    dev_proto = caps.get("protocol")
+    if min_proto is not None and dev_proto is not None and dev_proto < min_proto:
+        return f"needs protocol >= {min_proto}, device reports P{dev_proto}"
+    min_fw = test.get("min_fw")
+    dev_fw = caps.get("fw")
+    if min_fw and dev_fw and _ver_tuple(dev_fw) < _ver_tuple(min_fw):
+        return f"needs firmware >= {min_fw}, device reports {dev_fw}"
+    return None
 
 
 def _rle_compress(byte_stream: bytes) -> bytes:
@@ -670,8 +745,10 @@ TESTS = [
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
     {"name": "raw HID GET_ID",                  "fn": test_get_id},
     {"name": "get current language",            "fn": test_get_lang},
-    {"name": "legacy ASCII lang list NACKs (retired)", "fn": test_legacy_lang_list_nacked},
-    {"name": "enumerate language list (packed, v2)", "fn": test_enumerate_languages_packed},
+    # cmd 8 retiring + the packed list (cmd 27) only exist on protocol v2+; on a
+    # pre-v2 board these SKIP instead of failing the run (see skip_reason).
+    {"name": "legacy ASCII lang list NACKs (retired)", "fn": test_legacy_lang_list_nacked, "min_protocol": 2},
+    {"name": "enumerate language list (packed, v2)", "fn": test_enumerate_languages_packed, "min_protocol": 2},
     {"name": "get default layer",               "fn": test_get_default_layer},
     {"name": "reset dynamic keymap (echo + live)", "fn": test_reset_keymap},
     {"name": "unknown command NACKs",           "fn": test_unknown_command_nacks},
@@ -679,7 +756,8 @@ TESTS = [
     {"name": "set unicode mode (ACK + NACK)",   "fn": test_set_unicode_mode},
     {"name": "idle wake ACK",                   "fn": test_idle_wake},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
-    {"name": "language round-trip",             "fn": test_language_round_trip},
+    # picks a second language from the packed list (cmd 27) — protocol v2+ only.
+    {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
     {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive},
     {"name": "compressed overlay keeps master alive (core1)", "fn": test_compressed_overlay_keeps_master_alive},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},

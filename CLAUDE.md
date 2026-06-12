@@ -109,7 +109,7 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 - [ ] Set EE_HANDS EEPROM marker on each half once (QMK Toolbox → "Set EEPROM Hand", or a keymap combo) before the first HIL run
 - [ ] Register (or re-register) the GitHub Actions self-hosted runner — see `scripts/register-runner.sh` and "Runner troubleshooting" below
 - [x] Write concrete test cases — `station/hil_tests.py` now covers every Raw HID command testable without side effects on the unattended rig (16 tests: identity/fresh-boot, language get/list/list-packed/round-trip, default layer, ACK/NACK error+bounds paths, overlay-flags round-trip, plain + core1-compressed overlay liveness, GET_ID stress), wired into the `test_runner.py` CLI. Remaining infra-dependent / camera-needing / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
-  - The **packed language-list** test (cmd 27, protocol v2+) decodes the 2-byte ISO index pairs via `station/iso_lang_country.py` and validates the list **standalone** — staple locales present, every code well-formed `llCC`, decoded count matches the count byte, current language present. (It no longer cross-checks against the ASCII `GET_LANG_LIST`: that command is **retired** — a separate test asserts cmd 8 now NACKs.) ⚠️ `station/iso_lang_country.py` is the **frozen index table**, byte-identical to the copies in `qmk_firmware` (`keyboards/handwired/polykybd/lang/`) and `PolyKybdHost` (`polyhost/services/`); keep all three in sync (`cmp`) or the rig decodes wrong languages. cmd 27 is the only language-list command on v2+ firmware; on a pre-v2 board it NACKs and this test fails — run only against v2+ images.
+  - The **packed language-list** test (cmd 27, protocol v2+) decodes the 2-byte ISO index pairs via `station/iso_lang_country.py` and validates the list **standalone** — staple locales present, every code well-formed `llCC`, decoded count matches the count byte, current language present. (It no longer cross-checks against the ASCII `GET_LANG_LIST`: that command is **retired** — a separate test asserts cmd 8 now NACKs.) ⚠️ `station/iso_lang_country.py` is the **frozen index table**, byte-identical to the copies in `qmk_firmware` (`keyboards/handwired/polykybd/lang/`) and `PolyKybdHost` (`polyhost/services/`); keep all three in sync (`cmp`) or the rig decodes wrong languages. cmd 27 is the only language-list command on v2+ firmware; on a pre-v2 board it NACKs — but the packed/legacy/round-trip tests now carry `"min_protocol": 2`, so a pre-v2 board **skips** them rather than failing (see "Tolerating not-yet-deployed changes" below).
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 
@@ -131,6 +131,41 @@ TESTS = [
 ```
 
 Pass `tests=TESTS` to `runner.flash_and_test(...)`.
+
+### Tolerating not-yet-deployed changes (skip / xfail markers)
+
+Every time the protocol (or some other firmware detail) changes, the rig used to
+go red on the *old* firmware until the new image was built and flashed — even
+though we already knew the new check can only pass after the update. A test dict
+may now carry optional **gate markers** so such a check is *skipped* (or
+*tolerated*) rather than hard-failing, and **un-skips itself automatically** once
+the firmware that satisfies it is flashed:
+
+| Key | Effect |
+|---|---|
+| `"min_protocol": N` | **SKIP** (not fail) unless the flashed firmware advertises `PROTOCOL_VERSION` ≥ N. Reads the `P<n>` token from `GET_ID` — un-skips the moment a firmware ≥ N is flashed. |
+| `"min_fw": "0.8.22"` | Same, gated on `FW_VERSION` (dotted-numeric compare). For changes not tied to a protocol bump. |
+| `"xfail": "reason"` | Run the test, but downgrade a FAIL to **XFAIL** (tolerated) and an unexpected PASS to **XPASS** (surfaced loudly so the marker gets removed). For "details" not visible in `GET_ID`. |
+
+```python
+TESTS = [
+    {"name": "new cmd 28 round-trip", "fn": test_cmd28, "min_protocol": 3},
+    {"name": "host-side fold landed", "fn": test_fold,  "xfail": "needs PolyKybdHost release"},
+]
+```
+
+Only a genuine **FAIL** fails the run; SKIP / XFAIL / XPASS do not. The device's
+advertised versions are parsed from `GET_ID` by `parse_device_caps()` and the
+gate decision is `skip_reason()` (both pure + unit-testable in `hil_tests.py`);
+the runner reads the caps **lazily** — only when a gated test is reached, which
+is after the fresh-boot test has consumed the one-shot `*` marker, so the gate's
+`GET_ID` never disturbs `test_fresh_boot_marker`. If `GET_ID` can't be read or
+parsed the gate **runs** the test rather than skipping, so a real fault still
+surfaces. The job Step Summary marks each line ✅ pass · ❌ fail · ⏭️ skip · 🟡
+xfail · ❗ xpass, with a count line and an `::error::`/`::warning::` annotation
+per fail/xpass. The protocol-v2-only tests (legacy-NACK, packed list, language
+round-trip) already carry `"min_protocol": 2`, so a pre-v2 board skips them
+instead of going red.
 
 `RawHID` offers three send shapes: `send()` (one report, one reply — the common case),
 `send_and_read_all()` (one report, *all* replies — for multi-packet commands like

@@ -7,11 +7,13 @@ from typing import Callable
 from .flash import FlashController
 from .hid import HIDConsole, RawHID
 from .fw_update import stage_and_verify
+from .hil_tests import parse_device_caps, skip_reason
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
 # keyboards/handwired/polykybd/hid_com.c (case 24 / 0x18). A command report is
 # data[0]='P' (channel marker) then data[1]=command id; the firmware replies "P\x18.".
 POLY_CHANNEL     = 0x50  # 'P'
+CMD_GET_ID       = 0x06  # device identity string — advertises fw + protocol version
 CMD_GET_LANG     = 0x07  # read current language — readiness probe (no side effects)
 CMD_DISPLAY_OFF  = 0x18
 ACK              = ord(".")
@@ -32,6 +34,7 @@ class TestRunner:
         self._flash = FlashController()
         self._console = HIDConsole()
         self._raw = RawHID()
+        self._caps = None  # device caps (fw/protocol), read lazily for the gate
 
     def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
                        bin_path: str = None) -> dict:
@@ -94,13 +97,43 @@ class TestRunner:
             self._settle_master()
             for test in (tests or []):
                 name = test.get("name", "unnamed")
+                # Capability gate: skip (do NOT fail) a test the flashed firmware
+                # can't yet satisfy — e.g. a protocol-v3 command checked before
+                # the v3 firmware is deployed. The device advertises its
+                # fw/protocol version in GET_ID, so a gated test un-skips itself
+                # automatically once a firmware meeting the requirement is
+                # flashed. Caps are read lazily (only when a gated test is first
+                # reached) which is after test_fresh_boot_marker has consumed the
+                # one-shot '*' marker, so the gate's GET_ID doesn't disturb it.
+                if test.get("min_protocol") is not None or test.get("min_fw"):
+                    reason = skip_reason(test, self._device_caps())
+                    if reason:
+                        results.append({"name": name, "status": "skip", "reason": reason})
+                        self.log(f"[test] SKIP: {name} ({reason})")
+                        continue
+                # An xfail test is known to fail until some change lands that
+                # isn't visible in GET_ID: a FAIL is tolerated (XFAIL), an
+                # unexpected PASS is flagged (XPASS) so the marker gets removed.
+                xfail = test.get("xfail")
                 try:
                     passed = bool(test["fn"](self._raw, self.log))
-                    results.append({"name": name, "passed": passed})
-                    self.log(f"[test] {'PASS' if passed else 'FAIL'}: {name}")
+                    status = ("xpass" if passed else "xfail") if xfail else (
+                        "pass" if passed else "fail")
+                    rec = {"name": name, "status": status}
+                    if xfail:
+                        rec["reason"] = xfail
+                    results.append(rec)
+                    self.log(f"[test] {status.upper()}: {name}"
+                             + (f" (expected to fail: {xfail})" if xfail else ""))
                 except Exception as exc:
-                    results.append({"name": name, "passed": False, "error": str(exc)})
-                    self.log(f"[test] ERROR: {name}: {exc}")
+                    # An exception is a failure; under xfail it's still tolerated.
+                    status = "xfail" if xfail else "fail"
+                    rec = {"name": name, "status": status, "error": str(exc)}
+                    if xfail:
+                        rec["reason"] = xfail
+                    results.append(rec)
+                    self.log(f"[test] {status.upper()}: {name}: {exc}"
+                             + (f" (expected to fail: {xfail})" if xfail else ""))
 
             if console_started:
                 self._console.stop()
@@ -121,11 +154,12 @@ class TestRunner:
                     fw_ok = False
                     self.log(f"[runner] firmware update ERROR: {exc}")
                 results.append({"name": "firmware update (stage+verify .bin)",
-                                "passed": fw_ok})
+                                "status": "pass" if fw_ok else "fail"})
                 self.log(f"[test] {'PASS' if fw_ok else 'FAIL'}: "
                          f"firmware update (stage+verify .bin)")
 
-            passed = all(r["passed"] for r in results)
+            # Only a genuine FAIL fails the run; SKIP / XFAIL / XPASS do not.
+            passed = not any(r.get("status") == "fail" for r in results)
             if passed:
                 # Successful HIL test/deploy — park the OLEDs so they don't sit
                 # lit between runs and age. (With no tests defined this is a bare
@@ -245,6 +279,39 @@ class TestRunner:
                  f"({probes} probes, worst {worst_ms:.0f} ms) — running anyway")
         return False
 
+    def _device_caps(self) -> dict:
+        """Read & cache the device's advertised capabilities (fw + protocol
+        version) from GET_ID, for the per-test capability gate.
+
+        Lazy and cached: only invoked when a gated test is first reached, which
+        is after test_fresh_boot_marker has consumed the one-shot '*' marker, so
+        this GET_ID doesn't disturb that test. Returns ``{}`` if the identity
+        can't be read or parsed — ``skip_reason`` then runs the gated test rather
+        than skipping it, so a read failure surfaces as a real result instead of
+        being silently hidden. The empty dict is still cached to avoid re-probing.
+        """
+        if self._caps is not None:
+            return self._caps
+        caps = {}
+        try:
+            resp = self._raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+        except Exception as exc:
+            self.log(f"[runner] could not read device caps "
+                     f"(gated tests will run anyway): {exc}")
+            resp = None
+        if (resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL
+                and resp[1] == CMD_GET_ID):
+            identity = bytes(resp[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
+            caps = parse_device_caps(identity)
+            if caps:
+                self.log(f"[runner] device caps: protocol P{caps.get('protocol')}, "
+                         f"fw {caps.get('fw')}")
+            else:
+                self.log(f"[runner] could not parse device caps from {identity!r} "
+                         "(gated tests will run anyway)")
+        self._caps = caps
+        return caps
+
     def _turn_off_displays(self) -> None:
         """Blank both OLEDs (status + per-key) after a passing run so the panels
         don't sit lit and age/burn in. The firmware turns them off without
@@ -291,26 +358,52 @@ def _derive_label(left_uf2: str) -> str:
     return ""
 
 
+# Per-status presentation. SKIP/XFAIL/XPASS are non-failing outcomes (see the
+# capability gate / xfail markers in hil_tests.py); only ❌ FAIL fails the run.
+_STATUS_MARK = {
+    "pass": "✅", "fail": "❌", "skip": "⏭️", "xfail": "🟡", "xpass": "❗",
+}
+# Order + plural label for the summary count line.
+_STATUS_WORD = [
+    ("pass", "passed"), ("fail", "failed"), ("skip", "skipped"),
+    ("xfail", "xfail"), ("xpass", "xpass"),
+]
+
+
+def _status_of(r: dict) -> str:
+    """Status of a result record, tolerating older bool-``passed`` records."""
+    return r.get("status") or ("pass" if r.get("passed") else "fail")
+
+
 def write_github_summary(result: dict, label: str = "") -> None:
     """Surface each test as its own line in the GitHub Actions run.
 
-    Writes a ✅/❌ markdown bullet per test to ``$GITHUB_STEP_SUMMARY`` (rendered
-    on the job summary page) and emits one ``::error::`` workflow annotation per
-    failure (shown at the top of the run and inline), so it is obvious which
-    test failed without scrolling the raw log. No-ops when not under Actions /
-    when the env vars are absent, so local runs are unaffected.
+    Writes a per-test markdown bullet to ``$GITHUB_STEP_SUMMARY`` (rendered on the
+    job summary page) marked by status — ✅ pass, ❌ fail, ⏭️ skip (gated off on
+    this firmware), 🟡 xfail (expected fail), ❗ xpass (xfail that unexpectedly
+    passed) — and emits one ``::error::`` workflow annotation per real failure
+    (plus a ``::warning::`` per xpass so a stale marker gets noticed), so it is
+    obvious what happened without scrolling the raw log. No-ops when not under
+    Actions / when the env vars are absent, so local runs are unaffected.
     """
     results = result.get("results", [])
     fatal = result.get("fatal")
     n_total = len(results)
-    n_pass = sum(1 for r in results if r.get("passed"))
+    counts = {}
+    for r in results:
+        st = _status_of(r)
+        counts[st] = counts.get(st, 0) + 1
 
     # Workflow-command annotations (parsed from stdout by the Actions runner).
     if os.environ.get("GITHUB_ACTIONS") == "true":
         for r in results:
-            if not r.get("passed"):
+            st = _status_of(r)
+            if st == "fail":
                 detail = f" — {r['error']}" if r.get("error") else ""
                 print(f"::error title=HIL test failed::{r['name']}{detail}")
+            elif st == "xpass":
+                print(f"::warning title=HIL xfail unexpectedly passed::{r['name']}"
+                      " — the firmware now satisfies this; remove its xfail marker")
         if fatal:
             print(f"::error title=HIL run aborted::{fatal}")
 
@@ -323,11 +416,21 @@ def write_github_summary(result: dict, label: str = "") -> None:
     if fatal:
         lines += [f"> ⚠️ **Run aborted before tests completed:** `{fatal}`", ""]
     if n_total:
-        lines += [f"**{n_pass}/{n_total} passed**", ""]
+        summary = ", ".join(f"{counts[st]} {word}"
+                            for st, word in _STATUS_WORD if counts.get(st))
+        lines += [f"**{summary}**", ""]
         for r in results:
-            mark = "✅" if r.get("passed") else "❌"
+            st = _status_of(r)
+            mark = _STATUS_MARK.get(st, "❓")
             line = f"- {mark} {r['name']}"
-            if not r.get("passed") and r.get("error"):
+            if st == "skip" and r.get("reason"):
+                line += f" — _skipped: {r['reason']}_"
+            elif st == "xfail" and r.get("reason"):
+                line += f" — _expected fail: {r['reason']}_"
+            elif st == "xpass":
+                why = f" ({r['reason']})" if r.get("reason") else ""
+                line += f" — **xfail marker can be removed**{why}"
+            elif st == "fail" and r.get("error"):
                 line += f" — `{r['error']}`"
             lines.append(line)
     elif not fatal:
