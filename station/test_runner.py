@@ -285,7 +285,7 @@ class TestRunner:
 def _derive_label(left_uf2: str) -> str:
     """Best-effort board name for the summary title, from the UF2 filename."""
     base = os.path.basename(left_uf2 or "")
-    for board in ("split72", "corne42"):
+    for board in ("split72", "split42"):
         if board in base:
             return board
     return ""
