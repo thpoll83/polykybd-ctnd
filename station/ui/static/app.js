@@ -56,12 +56,21 @@ socket.on('runner_status', ({ status }) => {
   badge.title       = title;
 });
 
+// Per-test status marks — a plain-text simplification of the backend's GitHub
+// summary emoji (test_runner.py _STATUS_MARK): same five statuses, terminal-
+// friendly glyphs (✓/✗ here vs ✅/❌ there). Records carry a `status`
+// (pass/fail/skip/xfail/xpass); fall back to the legacy `passed` bool for
+// records produced before the status field existed.
+const TEST_MARK = { pass: '✓', fail: '✗', skip: '⏭', xfail: '🟡', xpass: '❗' };
+
 socket.on('test_result', result => {
   const icon = result.passed ? '✓ PASS' : '✗ FAIL';
   appendLog(`\n── ${icon} ──`);
   (result.results || []).forEach(r => {
-    const mark = r.passed ? '✓' : '✗';
-    appendLog(`  ${mark} ${r.name}${r.error ? '  (' + r.error + ')' : ''}`);
+    const status = r.status || (r.passed ? 'pass' : 'fail');
+    const mark = TEST_MARK[status] || '?';
+    const note = r.reason ? '  (' + r.reason + ')' : (r.error ? '  (' + r.error + ')' : '');
+    appendLog(`  ${mark} ${r.name}${note}`);
   });
   appendLog('');
 });
