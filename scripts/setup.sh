@@ -100,6 +100,15 @@ if [[ -n "$SYSTEMCTL_BIN" ]]; then
     "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
     | sudo tee /etc/sudoers.d/polykybd-runner > /dev/null
   sudo chmod 0440 /etc/sudoers.d/polykybd-runner
+
+  # Self-update grants (see scripts/self-update.sh):
+  #  - the updater (running as $CTND_USER) restarts the station after a pull
+  #  - the "Update" UI button kicks the oneshot updater unit
+  # Both scoped to the two specific units only.
+  printf '%s ALL=(root) NOPASSWD: %s restart polykybd-ctnd.service, %s start --no-block polykybd-update.service, %s start polykybd-update.service\n' \
+    "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
+    | sudo tee /etc/sudoers.d/polykybd-update > /dev/null
+  sudo chmod 0440 /etc/sudoers.d/polykybd-update
 fi
 
 # Install application
@@ -140,8 +149,17 @@ sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|
   systemd/polykybd-kiosk.service \
   | sudo tee /etc/systemd/system/polykybd-kiosk.service > /dev/null
 
+# Self-update timer + oneshot (pulls the tracked branch and restarts the station
+# when it gains commits and the rig is idle — see scripts/self-update.sh).
+for unit in polykybd-update.service polykybd-update.timer; do
+  sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
+    "systemd/$unit" \
+    | sudo tee "/etc/systemd/system/$unit" > /dev/null
+done
+
 sudo systemctl daemon-reload
 sudo systemctl enable polykybd-ctnd.service polykybd-kiosk.service
+sudo systemctl enable --now polykybd-update.timer
 
 echo ""
 echo "=== GitHub Actions Runner ==="

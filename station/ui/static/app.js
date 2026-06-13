@@ -56,6 +56,25 @@ socket.on('runner_status', ({ status }) => {
   badge.title       = title;
 });
 
+socket.on('update_status', ({ state, behind, branch }) => {
+  const badge = document.getElementById('up-badge');
+  const br = branch || 'main';
+  badge.dataset.up = state;
+  if (state === 'current') {
+    badge.textContent = 'UP ✓';
+    badge.title = `Up to date with origin/${br} — tap to re-check / update`;
+  } else if (state === 'behind') {
+    badge.textContent = `UP ↓${behind}`;
+    badge.title = `${behind} commit(s) behind origin/${br} — tap to update`;
+  } else if (state === 'updating') {
+    badge.textContent = 'UP …';
+    badge.title = 'Updating — the station will restart and reconnect';
+  } else {
+    badge.textContent = 'UPDATE';
+    badge.title = 'Update status unknown — tap to check / update';
+  }
+});
+
 // Per-test status marks — a plain-text simplification of the backend's GitHub
 // summary emoji (test_runner.py _STATUS_MARK): same five statuses, terminal-
 // friendly glyphs (✓/✗ here vs ✅/❌ there). Records carry a `status`
@@ -121,6 +140,31 @@ function reregisterRunner() {
   btn.textContent = btn.dataset.label;
   appendLog('[ui] re-registering runner (stops, reconfigures, restarts it)…');
   socket.emit('reregister_runner');
+}
+
+/* Update the station from the tracked branch. Disruptive when behind (it
+   restarts the service, dropping this socket), so require a two-tap confirm —
+   same pattern as Re-register. A re-check when already up to date is harmless,
+   but one confirm flow keeps it predictable. */
+let _updateTimer = null;
+function updateStation() {
+  const badge = document.getElementById('up-badge');
+  if (badge.dataset.armed !== 'true') {
+    badge.dataset.label = badge.textContent;
+    badge.dataset.armed = 'true';
+    badge.textContent = '⚠ tap';
+    badge.title = 'Tap again to pull the tracked branch and restart the station';
+    _updateTimer = setTimeout(() => {
+      badge.dataset.armed = 'false';
+      badge.textContent = badge.dataset.label;
+    }, 3000);
+    return;
+  }
+  clearTimeout(_updateTimer);
+  badge.dataset.armed = 'false';
+  badge.textContent = badge.dataset.label;
+  appendLog('[ui] updating station from tracked branch…');
+  socket.emit('update_now');
 }
 
 function clearLog() { logEl.textContent = ''; }

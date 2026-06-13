@@ -42,8 +42,9 @@ station/test_runner.py  TestRunner class + __main__ CLI entry point
 station/ui/app.py       Flask + Flask-SocketIO server; emits log/status events via WebSocket
 station/ui/templates/   index.html — 1024×600 dark touch UI
 station/ui/static/      style.css, app.js
-systemd/                Service units for the Flask daemon and Chromium kiosk
+systemd/                Service units: Flask daemon, Chromium kiosk, self-update timer+oneshot
 scripts/setup.sh        One-shot RPi4 setup (apt, udev, venv, systemd)
+scripts/self-update.sh  Pull the tracked branch + restart the station (idle-gated; timer/UI driven)
 scripts/kiosk.sh        Manual kiosk launch fallback
 .github/workflows/      Example CI workflow to copy into qmk_firmware repo
 firmware/               Drop UF2 files here; the UI picks them up automatically
@@ -194,7 +195,38 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
 
 1. Edit files here (cloud session)
 2. Commit + push to `main`
-3. On the RPi4: `git -C /opt/polykybd-ctnd pull && sudo systemctl restart polykybd-ctnd`
+3. The rig **deploys itself** — `polykybd-update.timer` fetches `main` every ~5 min
+   and, when it gains commits *and the rig is idle*, fast-forwards, reinstalls deps
+   if `requirements.txt` changed, and restarts the station. No SSH needed. To apply
+   immediately, tap the **UPDATE** badge in the touch UI (or `sudo systemctl start
+   polykybd-update.service`). The old manual path still works:
+   `git -C /opt/polykybd-ctnd pull && sudo systemctl restart polykybd-ctnd`.
+
+### Self-update mechanism
+
+- **`scripts/self-update.sh`** is the single actuator, run by both the timer
+  (unattended) and the UI button. It fetches the tracked branch (`update.branch`
+  in `config.yaml`, default `main`), and if behind: **defers while busy** (polls
+  `GET /status`; any status other than `idle`/`error` ⇒ skip this tick, retry
+  next — never aborts a flash/HIL run), else fast-forwards (`--ff-only`, so it
+  never clobbers the gitignored `config.yaml` or rewrites history), pip-installs
+  only if `requirements.txt` changed, and `sudo systemctl restart
+  polykybd-ctnd`. The whole body is in a `{ … }` group with an explicit `exit` so
+  bash parses the entire file before running — a pull that rewrites the script
+  mid-run can't desync the interpreter. `--check` reports behind/ahead without
+  applying (exit 10 = behind); `--no-restart` pulls without bouncing the service.
+- **`polykybd-update.service`** (oneshot) runs the script in its **own cgroup**,
+  so the `restart polykybd-ctnd` it issues at the end does not kill the updater.
+  **`polykybd-update.timer`** fires it `OnBootSec=2min` then every 5 min.
+- **UI**: the `UPDATE` header badge (`app.py` `_update_poll_once`, 120 s) shows
+  `UP ✓` (current) / `UP ↓N` (behind) / `UP …` (updating); tap = two-tap-confirm
+  `update_now`, which fetches, logs the incoming commits, and kicks the oneshot
+  via `sudo -n systemctl start --no-block polykybd-update.service`. The badge
+  re-polls to `current` after the service restarts and the browser reconnects.
+- **`setup.sh`** installs both units (enables the timer) and a scoped
+  `/etc/sudoers.d/polykybd-update` granting the station user NOPASSWD on exactly
+  `systemctl restart polykybd-ctnd.service` and `systemctl start
+  polykybd-update.service`.
 
 For rapid UI iteration the Flask dev server can be run directly:
 ```bash
