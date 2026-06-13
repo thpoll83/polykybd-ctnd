@@ -59,7 +59,7 @@ sudo apt-get install -y --no-install-recommends \
 sudo usermod -aG gpio,plugdev,video "$CTND_USER"
 
 # udev rules: HID access for the running keyboard (VID 2021 = PolyFabriq, the
-# PolyKybd Split72/corne42), BOOTSEL access so picotool can talk to the RP2040
+# PolyKybd Split72/split42), BOOTSEL access so picotool can talk to the RP2040
 # without root, and a rule telling UDisks2 / the desktop volume monitor to
 # ignore the RP2040 mass-storage volume.
 sudo tee /etc/udev/rules.d/99-polykybd.rules > /dev/null <<'EOF'
