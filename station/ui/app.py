@@ -847,12 +847,17 @@ def on_run_tests(data):
     left_path  = str(Path(FIRMWARE_DIR) / left_uf2)
     right_path = str(Path(FIRMWARE_DIR) / right_uf2)
 
+    # Mark busy so /status reports non-idle for the whole flash+test run — the
+    # self-update timer reads it to defer a pull+restart until the rig is idle.
+    set_status("testing")
+
     def _do():
         from station.test_runner import TestRunner
         runner = TestRunner(log=emit_log)
         try:
             result = runner.flash_and_test(left_path, right_path)
             socketio.emit("test_result", result)
+            set_status("idle")
         except Exception as exc:
             emit_log(f"[ui] test error: {exc}")
             set_status("error")

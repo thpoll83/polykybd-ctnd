@@ -151,18 +151,21 @@ function updateStation() {
   const badge = document.getElementById('up-badge');
   if (badge.dataset.armed !== 'true') {
     badge.dataset.label = badge.textContent;
+    badge.dataset.prevTitle = badge.title;
     badge.dataset.armed = 'true';
     badge.textContent = '⚠ tap';
     badge.title = 'Tap again to pull the tracked branch and restart the station';
     _updateTimer = setTimeout(() => {
       badge.dataset.armed = 'false';
       badge.textContent = badge.dataset.label;
+      badge.title = badge.dataset.prevTitle || badge.title;
     }, 3000);
     return;
   }
   clearTimeout(_updateTimer);
   badge.dataset.armed = 'false';
   badge.textContent = badge.dataset.label;
+  badge.title = badge.dataset.prevTitle || badge.title;
   appendLog('[ui] updating station from tracked branch…');
   socket.emit('update_now');
 }

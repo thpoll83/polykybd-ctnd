@@ -79,6 +79,12 @@ if [[ "$LOCAL" == "$REMOTE" ]]; then
 fi
 
 BEHIND=$(git rev-list --count "HEAD..$REMOTE" 2>/dev/null || echo "?")
+if [[ "$BEHIND" == "0" ]]; then
+    # LOCAL != REMOTE but nothing to pull ⇒ the checkout is ahead of (or has
+    # diverged from) origin/$BRANCH. Don't fast-forward/restart in that case.
+    log "local checkout is at or ahead of origin/$BRANCH; nothing to apply"
+    exit 0
+fi
 log "behind origin/$BRANCH by $BEHIND commit(s):"
 git --no-pager log --oneline --no-decorate "HEAD..$REMOTE" 2>/dev/null | sed 's/^/[self-update]   /' || true
 
