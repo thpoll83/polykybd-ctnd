@@ -15,6 +15,7 @@ from flask_socketio import SocketIO
 
 from station.config import (
     FIRMWARE_DIR, UI_HOST, UI_PORT, GITHUB_REPO, GITHUB_TOKEN, RUNNER_LABELS,
+    UPDATE_BRANCH,
 )
 
 # Background pollers run unattended; log their failures (to journald via systemd)
@@ -34,10 +35,12 @@ REQUIRED_LABELS = {label.lower() for label in RUNNER_LABELS}
 # it from __file__ rather than hardcoding /opt/polykybd-ctnd in user-facing hints.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTER_SCRIPT = REPO_ROOT / "scripts" / "register-runner.sh"
+UPDATE_SERVICE  = "polykybd-update.service"   # oneshot unit that runs self-update.sh
 
 _status         = {"value": "idle"}
 _ci_state       = {"running": False, "url": None}
 _runner_state   = {"status": "unknown"}            # unknown|online|busy|offline|missing|noauth
+_update_state   = {"state": "unknown", "behind": None, "branch": UPDATE_BRANCH}  # unknown|current|behind|updating
 _usb_state      = {"left": None,  "right": None}   # None = unknown
 _bootsel_state  = {"left": False, "right": False}   # False = released (HIGH)
 _run_state      = {"left": False, "right": False}   # False = released (HIGH)
@@ -146,6 +149,64 @@ def _runner_poll_loop():
 if GITHUB_REPO:
     threading.Thread(target=_ci_poll_loop, daemon=True).start()
     threading.Thread(target=_runner_poll_loop, daemon=True).start()
+
+
+# ── Self-update status poller ───────────────────────────────────────────────
+# Shows an UPDATE header badge: current / N-behind / updating. The badge is
+# informational + a manual trigger; the *automatic* apply is done out-of-process
+# by polykybd-update.timer → self-update.sh (so it survives the app restart and
+# defers while the rig is busy). This poller just fetches the tracked branch and
+# counts how far behind the checkout is.
+
+def _git(*args, timeout=20):
+    """Run git in the repo root. Returns stdout (stripped) or None on any error."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return out.stdout.strip() if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _update_status() -> dict:
+    """Fetch the tracked branch and report how far HEAD is behind it.
+
+    Returns {state, behind, branch}: 'current' (0 behind), 'behind' (N>0),
+    or 'unknown' (not a git checkout / fetch failed / detached) — mirroring the
+    other badges' graceful-degradation style.
+    """
+    # Fetch is best-effort; if it fails we still report against the last-known ref.
+    _git("fetch", "--quiet", "origin", UPDATE_BRANCH)
+    behind = _git("rev-list", "--count", f"HEAD..origin/{UPDATE_BRANCH}")
+    if behind is None or not behind.isdigit():
+        return {"state": "unknown", "behind": None, "branch": UPDATE_BRANCH}
+    n = int(behind)
+    return {"state": "current" if n == 0 else "behind", "behind": n, "branch": UPDATE_BRANCH}
+
+
+def _update_poll_once():
+    # Don't clobber a transient 'updating' state we set when the button is pressed.
+    if _update_state.get("state") == "updating":
+        return
+    _update_state.update(_update_status())
+    socketio.emit("update_status", dict(_update_state))
+
+
+def _update_poll_loop():
+    import time
+    while True:
+        try:
+            _update_poll_once()
+        except Exception:
+            _log.warning("update poll failed", exc_info=True)
+        time.sleep(120)
+
+
+# Only run the poller on a real git checkout (skip e.g. a tarball install).
+if (REPO_ROOT / ".git").exists():
+    threading.Thread(target=_update_poll_loop, daemon=True).start()
 
 
 # ── On-demand runner diagnostics ──────────────────────────────────────────────
@@ -497,6 +558,14 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/status")
+def status():
+    """Current station status as JSON. Polled by scripts/self-update.sh so the
+    updater can defer a pull+restart while the rig is mid flash/test (any value
+    other than 'idle'/'error' means busy)."""
+    return jsonify({"status": _status["value"]})
+
+
 @app.route("/ci-jobs")
 def list_ci_jobs():
     if not GITHUB_REPO:
@@ -538,6 +607,7 @@ def on_connect(_auth=None):
     socketio.emit("bootsel_state", dict(_bootsel_state))
     socketio.emit("run_state",     dict(_run_state))
     socketio.emit("runner_status", dict(_runner_state))
+    socketio.emit("update_status", dict(_update_state))
     if GITHUB_REPO:
         socketio.emit("ci_status", dict(_ci_state))
 
@@ -598,6 +668,59 @@ def on_reregister_runner(_data=None):
 def on_restart_runner(_data=None):
     _run_runner_script("--restart-only", "RESTART RUNNER",
                        "runner restarted ✓", "restart failed")
+
+
+@socketio.on("update_now")
+def on_update_now(_data=None):
+    """Manual "Update" button: check the tracked branch and, if behind, kick the
+    out-of-process updater (polykybd-update.service → self-update.sh). The updater
+    runs in its own cgroup, so it survives the service restart it performs at the
+    end; this handler returns immediately. Progress lands in journald; the browser
+    reconnects after the restart and the UPDATE badge re-polls to 'current'."""
+
+    def _do():
+        emit_log("")
+        emit_log("════════ UPDATE STATION ════════")
+        emit_log(f"[ui] checking origin/{UPDATE_BRANCH}…")
+        st = _update_status()
+        _update_state.update(st)
+        behind = st.get("behind")
+        if st["state"] == "unknown":
+            emit_log("[ui] could not determine update status (not a git checkout, or fetch failed).")
+            socketio.emit("update_status", dict(_update_state))
+            emit_log("════════════════════════════════════")
+            return
+        if not behind:
+            emit_log(f"[ui] already up to date with origin/{UPDATE_BRANCH}.")
+            socketio.emit("update_status", dict(_update_state))
+            emit_log("════════════════════════════════════")
+            return
+
+        for line in (_git("--no-pager", "log", "--oneline", "--no-decorate",
+                          f"HEAD..origin/{UPDATE_BRANCH}") or "").splitlines():
+            emit_log(f"    {line}")
+        emit_log(f"[ui] {behind} commit(s) behind — pulling and restarting the station.")
+        emit_log("[ui] the UI will drop and reconnect automatically.")
+        _update_state["state"] = "updating"
+        socketio.emit("update_status", dict(_update_state))
+
+        # Fire the oneshot updater in its own unit/cgroup (--no-block: don't wait;
+        # it will restart this very service). Needs the NOPASSWD sudoers grant that
+        # setup.sh installs for `systemctl start polykybd-update.service`.
+        try:
+            rc = subprocess.run(
+                ["sudo", "-n", "systemctl", "start", "--no-block", UPDATE_SERVICE],
+                capture_output=True, text=True, timeout=15,
+            )
+            if rc.returncode != 0:
+                emit_log(f"[ui] could not start {UPDATE_SERVICE}: {rc.stderr.strip() or rc.returncode}")
+                emit_log("[ui] check the sudoers grant (setup.sh installs /etc/sudoers.d/polykybd-update).")
+                _update_poll_once()  # revert the badge from 'updating'
+        except Exception as exc:
+            emit_log(f"[ui] update trigger failed: {exc}")
+            _update_poll_once()
+
+    threading.Thread(target=_do, daemon=True).start()
 
 
 @socketio.on("flash")
@@ -724,12 +847,17 @@ def on_run_tests(data):
     left_path  = str(Path(FIRMWARE_DIR) / left_uf2)
     right_path = str(Path(FIRMWARE_DIR) / right_uf2)
 
+    # Mark busy so /status reports non-idle for the whole flash+test run — the
+    # self-update timer reads it to defer a pull+restart until the rig is idle.
+    set_status("testing")
+
     def _do():
         from station.test_runner import TestRunner
         runner = TestRunner(log=emit_log)
         try:
             result = runner.flash_and_test(left_path, right_path)
             socketio.emit("test_result", result)
+            set_status("idle")
         except Exception as exc:
             emit_log(f"[ui] test error: {exc}")
             set_status("error")

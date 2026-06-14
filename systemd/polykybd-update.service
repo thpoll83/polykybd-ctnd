@@ -1,0 +1,13 @@
+[Unit]
+Description=PolyKybd CTND self-update (pull tracked branch + restart station)
+# Need DNS/routing up for the git fetch.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/opt/polykybd-ctnd
+ExecStart=/opt/polykybd-ctnd/scripts/self-update.sh
+# Runs in its own cgroup, so the `systemctl restart polykybd-ctnd` the script
+# issues at the end does not tear down this updater mid-run.

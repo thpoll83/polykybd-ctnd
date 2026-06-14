@@ -45,3 +45,8 @@ RUNNER_LABELS = _c.get("github", {}).get("runner_labels") or ["self-hosted", "po
 
 # Firmware directory (relative to repo root)
 FIRMWARE_DIR = str(_root / "firmware")
+
+# Self-update: the git branch the deployed station tracks. The polykybd-update
+# timer fetches this branch and fast-forwards + restarts when it gains commits
+# (see scripts/self-update.sh); the UI "Update" badge/button reflect the same.
+UPDATE_BRANCH = _c.get("update", {}).get("branch") or "main"

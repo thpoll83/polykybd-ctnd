@@ -88,6 +88,24 @@ header {
 .rn-badge[data-rn="missing"] { background: #4a1212; color: #ef9a9a; border-color: #c62828; }
 .rn-badge[data-rn="noauth"]  { background: #3a2e00; color: #FFD54F; border-color: #9e7700; }
 
+.up-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 4px 11px;
+  border-radius: 20px;
+  border: 1px solid #333;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.4s, color 0.4s;
+}
+
+.up-badge[data-up="unknown"]  { background: #222;    color: #777;    border-color: #333; }
+.up-badge[data-up="current"]  { background: #1a3320; color: #7ec87e; border-color: #2E7D32; }
+.up-badge[data-up="behind"]   { background: #3a2e00; color: #FFD54F; border-color: #9e7700; }
+.up-badge[data-up="updating"] { background: #4a2800; color: #FFB74D; border-color: #E65100;
+                                animation: pulse 1s infinite; }
+
 .clock {
   font-size: 13px;
   color: #666;

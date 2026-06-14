@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodic PolyKybd CTND self-update check (pull tracked branch)
+
+[Timer]
+# First check shortly after boot, then every 5 minutes. The update only applies
+# (and only restarts the station) when the rig is idle and origin actually has
+# new commits — an idle, up-to-date tick is a cheap `git fetch` no-op.
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=polykybd-update.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

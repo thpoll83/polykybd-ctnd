@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=2">
+  <link rel="stylesheet" href="/static/style.css?v=3">
 </head>
 <body data-status="idle">
   <header>
@@ -17,6 +17,9 @@
     <span class="rn-badge" id="rn-badge" data-rn="unknown"
           title="Self-hosted runner status — tap to run diagnostics"
           onclick="runDiagnostics()">RUNNER</span>
+    <span class="up-badge" id="up-badge" data-up="unknown"
+          title="Station self-update status — tap to update from the tracked branch"
+          onclick="updateStation()">UPDATE</span>
     <span class="clock" id="clock"></span>
   </header>
 
@@ -86,6 +89,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>
