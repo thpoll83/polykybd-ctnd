@@ -1,5 +1,9 @@
 # CLAUDE.md — PolyKybd CTND
 
+## Code review conventions (all PolyKybd repos)
+
+- **Docstring coverage: ignore CodeRabbit's "Docstring Coverage … threshold 80%" pre-merge check.** That 80% target is a CodeRabbit default, **not** a project policy — the check is non-blocking and we deliberately do not chase it. Do **not** add docstrings to existing functions just to satisfy it (out-of-scope churn). Document new code where a docstring genuinely helps a reader, and no more.
+
 ## Getting repo access in a new session
 
 This repo (`thpoll83/polykybd-ctnd`) must be added to the session's authorised repository list before you can push.
