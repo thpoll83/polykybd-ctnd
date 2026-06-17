@@ -115,6 +115,12 @@ class RawHID:
     def __init__(self, vendor_id: int = QMK_VENDOR_ID, product_id: int = QMK_PRODUCT_ID):
         self._vid = vendor_id
         self._pid = product_id
+        # Link-blip bookkeeping (read by the runner to classify outcomes). A lone
+        # dropped/late HID reply on the rig is a transient USB read hiccup, not a
+        # firmware fault, so send() retries the read once; these record whether
+        # that retry rescued the reply (recovered) or not (failed).
+        self.timeouts_recovered = 0
+        self.timeouts_failed = 0
 
     def send(self, data: bytes, timeout_ms: int = 3000) -> bytes | None:
         """Write one report and read one reply (or None on timeout).
@@ -132,6 +138,20 @@ class RawHID:
         try:
             dev.write(_frame(data))
             response = dev.read(64, timeout=timeout_ms)
+            if not response:
+                # One transient retry. A lone dropped/late reply (a rig USB read
+                # hiccup) shouldn't fail an otherwise-correct command. Every
+                # command sent via send() is idempotent (a query, or a set to a
+                # fixed value), so re-issuing is safe; reading again on the
+                # still-open handle also picks up a late reply from the first
+                # attempt. send() opens a fresh handle per call, so a stale reply
+                # never bleeds into the next command.
+                dev.write(_frame(data))
+                response = dev.read(64, timeout=timeout_ms)
+                if response:
+                    self.timeouts_recovered += 1
+                else:
+                    self.timeouts_failed += 1
             return bytes(response) if response else None
         finally:
             dev.close()

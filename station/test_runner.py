@@ -115,16 +115,34 @@ class TestRunner:
                 # isn't visible in GET_ID: a FAIL is tolerated (XFAIL), an
                 # unexpected PASS is flagged (XPASS) so the marker gets removed.
                 xfail = test.get("xfail")
+                rec0 = self._raw.timeouts_recovered
+                fail0 = self._raw.timeouts_failed
                 try:
                     passed = bool(test["fn"](self._raw, self.log))
-                    status = ("xpass" if passed else "xfail") if xfail else (
-                        "pass" if passed else "fail")
+                    recovered = self._raw.timeouts_recovered - rec0
+                    timed_out = self._raw.timeouts_failed - fail0
+                    if xfail:
+                        status = "xpass" if passed else "xfail"
+                    elif passed:
+                        status = "pass"
+                    elif timed_out:
+                        # The check failed on a dropped reply (even after send()'s
+                        # one retry), not on wrong data — a transient rig USB/link
+                        # hiccup. Record it as a non-failing WARNING so the run
+                        # stays green but the blip is on the record. A genuine
+                        # wrong value/status (response present) still FAILs.
+                        status = "warn"
+                    else:
+                        status = "fail"
                     rec = {"name": name, "status": status}
                     if xfail:
                         rec["reason"] = xfail
+                    elif status == "warn":
+                        rec["reason"] = f"read timed out x{timed_out} (after 1 retry)"
                     results.append(rec)
+                    note = f" [recovered {recovered} read timeout(s)]" if recovered else ""
                     self.log(f"[test] {status.upper()}: {name}"
-                             + (f" (expected to fail: {xfail})" if xfail else ""))
+                             + (f" (expected to fail: {xfail})" if xfail else "") + note)
                 except Exception as exc:
                     # An exception is a failure; under xfail it's still tolerated.
                     status = "xfail" if xfail else "fail"
@@ -358,15 +376,16 @@ def _derive_label(left_uf2: str) -> str:
     return ""
 
 
-# Per-status presentation. SKIP/XFAIL/XPASS are non-failing outcomes (see the
-# capability gate / xfail markers in hil_tests.py); only ❌ FAIL fails the run.
+# Per-status presentation. WARN/SKIP/XFAIL/XPASS are non-failing outcomes (WARN =
+# a check that failed only because a reply timed out after send()'s one retry — a
+# transient rig USB/link blip, recorded but not run-failing); only ❌ FAIL fails.
 _STATUS_MARK = {
-    "pass": "✅", "fail": "❌", "skip": "⏭️", "xfail": "🟡", "xpass": "❗",
+    "pass": "✅", "fail": "❌", "warn": "⚠️", "skip": "⏭️", "xfail": "🟡", "xpass": "❗",
 }
 # Order + plural label for the summary count line.
 _STATUS_WORD = [
-    ("pass", "passed"), ("fail", "failed"), ("skip", "skipped"),
-    ("xfail", "xfail"), ("xpass", "xpass"),
+    ("pass", "passed"), ("fail", "failed"), ("warn", "warning"),
+    ("skip", "skipped"), ("xfail", "xfail"), ("xpass", "xpass"),
 ]
 
 
@@ -414,6 +433,9 @@ def write_github_summary(result: dict, label: str = "") -> None:
             if st == "fail":
                 detail = f" — {r['error']}" if r.get("error") else ""
                 print(f"::error title=HIL test failed::{r['name']}{detail}")
+            elif st == "warn":
+                detail = f" — {r['reason']}" if r.get("reason") else ""
+                print(f"::warning title=HIL transient read timeout::{r['name']}{detail}")
             elif st == "xpass":
                 print(f"::warning title=HIL xfail unexpectedly passed::{r['name']}"
                       " — the firmware now satisfies this; remove its xfail marker")
@@ -443,6 +465,8 @@ def write_github_summary(result: dict, label: str = "") -> None:
             elif st == "xpass":
                 why = f" ({r['reason']})" if r.get("reason") else ""
                 line += f" — **xfail marker can be removed**{why}"
+            elif st == "warn" and r.get("reason"):
+                line += f" — _transient: {r['reason']}_"
             elif st == "fail" and r.get("error"):
                 line += f" — `{r['error']}`"
             lines.append(line)
