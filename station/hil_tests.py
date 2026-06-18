@@ -721,14 +721,16 @@ def test_compressed_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str],
 STRESS_FREEZE_RUN = 3   # >= this many consecutive no-answers ⇒ treat as a freeze
 
 
-def classify_get_id_stress(oks: list[bool], n: int) -> tuple[bool, int, int]:
+def classify_get_id_stress(oks: list[bool]) -> tuple[bool, int, int]:
     """Pure pass/fail decision for a GET_ID stress burst from per-send OK flags.
 
-    Returns ``(passed, misses, longest_miss_run)``. Fails only on a freeze
-    signature — more than ``max(2, n // 10)`` total no-answers, or a run of
+    The burst size is ``len(oks)`` — classify what was actually received, so the
+    flags list and the nominal count can't drift apart. Returns
+    ``(passed, misses, longest_miss_run)``. Fails only on a freeze signature —
+    more than ``max(2, len(oks) // 10)`` total no-answers, or a run of
     ``>= STRESS_FREEZE_RUN`` consecutive no-answers (a permanent core1 hang
     answers nothing from the hang point on). Isolated transient misses pass."""
-    max_misses = max(2, n // 10)
+    max_misses = max(2, len(oks) // 10)
     misses = run = longest = 0
     for ok in oks:
         if ok:
@@ -766,7 +768,7 @@ def test_get_id_stress(raw: RawHID, log: Callable[[str], None], n: int = 50) -> 
         bytes([POLY_CHANNEL, CMD_GET_ID]), n)
     oks = [_resp_ok(r, CMD_GET_ID, lambda *_a: None, expect_status=None)
            for r in responses]
-    passed, misses, longest = classify_get_id_stress(oks, n)
+    passed, misses, longest = classify_get_id_stress(oks)
     if not passed:
         first_bad = next((i for i, ok in enumerate(oks) if not ok), -1)
         log(f"  FAIL: GET_ID stress freeze signature — {misses}/{n} no-answer, "
