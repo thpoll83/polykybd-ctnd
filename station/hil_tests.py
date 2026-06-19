@@ -75,6 +75,7 @@ CMD_IDLE_STATE              = 15  # start (1) / stop (0) display idle
 CMD_START_COMPRESSED_OVERLAY = 16 # first RLE-compressed overlay packet (core1)
 CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
+CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
 
 # VIA "reset dynamic keymap" report (bare command id, NOT a 'P' command — see
 # test_runner.VIA_DYNAMIC_KEYMAP_RESET). data[0]==0x06 -> legacy_command_kb ->
@@ -587,6 +588,47 @@ def test_idle_wake(raw: RawHID, log: Callable[[str], None]) -> bool:
 
 # --- mutate + restore ---------------------------------------------------------
 
+def test_idle_style_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """IDLE_STYLE (cmd 28, protocol v4+) get/set round-trip + invalid NACK.
+
+    Reads the current style (query byte 0xFF), sets JITTER (1) and reads it
+    back, then restores the original value. An out-of-range style (0xFE, not the
+    0xFF query sentinel) must NACK. The style write is deferred to the EEPROM
+    flush, so the live state is what we read back here.
+    """
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, 0xFF]))
+    log(f"idle-style query -> {cur!r}")
+    if not _resp_ok(cur, CMD_IDLE_STYLE, log, expect_status=ACK):
+        return False
+    if len(cur) < 4:
+        log("  FAIL: idle-style query reply has no value byte")
+        return False
+    original = cur[3]
+    log(f"  current idle style = {original}")
+
+    target = 1 if original != 1 else 0   # flip to the other valid style
+    set_resp = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, target]))
+    log(f"idle-style set {target} -> {set_resp!r}")
+    if not _resp_ok(set_resp, CMD_IDLE_STYLE, log, expect_status=ACK):
+        return False
+
+    back = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, 0xFF]))
+    if not _resp_ok(back, CMD_IDLE_STYLE, log, expect_status=ACK) or len(back) < 4:
+        return False
+    if back[3] != target:
+        log(f"  FAIL: read back {back[3]} != set {target}")
+        return False
+
+    bad = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, 0xFE]))
+    log(f"idle-style set 0xFE (invalid) -> {bad!r}")
+    if not _resp_ok(bad, CMD_IDLE_STYLE, log, expect_status=NACK):
+        return False
+
+    # Restore the original style so the rig is left as it was found.
+    restore = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, original]))
+    return _resp_ok(restore, CMD_IDLE_STYLE, log, expect_status=ACK)
+
+
 def test_overlay_flags_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     """OVERLAY_FLAGS on/off (cmd 11/12) round-trips a flag and restores default.
 
@@ -806,6 +848,7 @@ TESTS = [
     {"name": "set brightness (ACK + range NACK)", "fn": test_set_brightness},
     {"name": "set unicode mode (ACK + NACK)",   "fn": test_set_unicode_mode},
     {"name": "idle wake ACK",                   "fn": test_idle_wake},
+    {"name": "idle style round-trip (v4)",      "fn": test_idle_style_round_trip, "min_protocol": 4},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
