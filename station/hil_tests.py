@@ -87,6 +87,12 @@ FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
 # Firmware facts (keyboards/handwired/polykybd/{config.h,base/com.h}).
 FULL_BRIGHT          = 50    # max OLED contrast; > this is rejected (NACK)
+# SET_BRIGHTNESS flags byte (protocol v5+, data[2]; mirror base/com.h). 0 = the
+# legacy persisted set. VOLATILE = a daylight/auto value (applied only while auto
+# mode is engaged, never persisted); AUTO_ON / AUTO_OFF engage/leave host-auto.
+BR_FLAG_VOLATILE     = 1 << 0
+BR_FLAG_AUTO_ON      = 1 << 1
+BR_FLAG_AUTO_OFF     = 1 << 2
 MAX_LAYERS           = 14    # DYNAMIC_KEYMAP_LAYER_COUNT (split72/config.h)
 DISPLAY_OVERLAYS_BIT = 0x01  # overlay_flag DISPLAY_OVERLAYS (base/com.h)
 KC_A                 = 0x04  # QMK keycode for 'A'; A..Z = 0x04..0x1D
@@ -573,6 +579,44 @@ def test_set_unicode_mode(raw: RawHID, log: Callable[[str], None]) -> bool:
     return True
 
 
+def test_set_brightness_flags(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """SET_BRIGHTNESS flags byte (protocol v5): VOLATILE / AUTO_ON / AUTO_OFF.
+
+    There is no brightness or auto-mode read-back command, so this validates the
+    command class rather than a state round-trip: the firmware must ACK each flag
+    combination, still bounds-check the level even with flags present, and keep
+    the master responsive afterwards (cmd 13 is the path behind the "brightness
+    key wedges the slave" bug). Engages host-auto with a volatile value, then
+    leaves auto mode, and finishes with a plain full-bright set so the rig is
+    left at full brightness with auto mode OFF — the same read-back-free clean
+    state test_set_brightness targets.
+    """
+    # Engage auto mode + push a volatile (daylight) value — expect ACK.
+    on = raw.send(bytes([POLY_CHANNEL, CMD_SET_BRIGHTNESS, 30, BR_FLAG_VOLATILE | BR_FLAG_AUTO_ON]))
+    log(f"set brightness 30 VOLATILE|AUTO_ON -> {on!r}")
+    if not _resp_ok(on, CMD_SET_BRIGHTNESS, log, expect_status=ACK):
+        return False
+    # Leave auto mode (level ignored on AUTO_OFF) — expect ACK.
+    off = raw.send(bytes([POLY_CHANNEL, CMD_SET_BRIGHTNESS, 0, BR_FLAG_AUTO_OFF]))
+    log(f"set brightness AUTO_OFF -> {off!r}")
+    if not _resp_ok(off, CMD_SET_BRIGHTNESS, log, expect_status=ACK):
+        return False
+    # An out-of-range level must still NACK even when a flags byte is present.
+    bad = raw.send(bytes([POLY_CHANNEL, CMD_SET_BRIGHTNESS, FULL_BRIGHT + 5, BR_FLAG_VOLATILE]))
+    log(f"set brightness {FULL_BRIGHT + 5} VOLATILE (out of range) -> {bad!r}")
+    if not _resp_ok(bad, CMD_SET_BRIGHTNESS, log, expect_status=NACK):
+        return False
+    # Restore: explicit full-bright set (flags=0) -> persists + leaves auto off.
+    restore = raw.send(bytes([POLY_CHANNEL, CMD_SET_BRIGHTNESS, FULL_BRIGHT]))
+    log(f"restore full bright -> {restore!r}")
+    if not _resp_ok(restore, CMD_SET_BRIGHTNESS, log, expect_status=ACK):
+        return False
+    if not _master_alive(raw, log):
+        log("  FAIL: master unresponsive after brightness flag writes")
+        return False
+    return True
+
+
 def test_idle_wake(raw: RawHID, log: Callable[[str], None]) -> bool:
     """IDLE_STATE (cmd 15) "stop idle" wakes/refreshes the display and ACKs.
 
@@ -753,6 +797,9 @@ TESTS = [
     {"name": "reset dynamic keymap (echo + live)", "fn": test_reset_keymap},
     {"name": "unknown command NACKs",           "fn": test_unknown_command_nacks},
     {"name": "set brightness (ACK + range NACK)", "fn": test_set_brightness},
+    # SET_BRIGHTNESS flags (VOLATILE / AUTO_ON / AUTO_OFF) only exist on protocol
+    # v5+; on an older board this SKIPs instead of failing (see skip_reason).
+    {"name": "set brightness flags (v5: volatile/auto)", "fn": test_set_brightness_flags, "min_protocol": 5},
     {"name": "set unicode mode (ACK + NACK)",   "fn": test_set_unicode_mode},
     {"name": "idle wake ACK",                   "fn": test_idle_wake},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
