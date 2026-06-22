@@ -223,6 +223,26 @@ def _reply_text(response) -> str:
     return bytes(response[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
 
 
+def parse_fontpack_versions(response):
+    """Decode the per-bundle font-pack version block a GET_ID reply carries on
+    PROTOCOL_VERSION >= 6: AFTER the NUL-terminated id string,
+    ``['V'][count][u16 little-endian content_version x count]`` in bundle-slot
+    order. Returns ``{slot: content_version}`` or ``None`` if absent/malformed
+    (pre-v6 firmware has no block). Pure — unit-testable without hardware."""
+    raw = bytes(response)
+    nul = raw.find(b"\x00", 3)               # id string starts after the 3-byte header
+    if nul < 0:
+        return None
+    p = nul + 1
+    if p + 2 > len(raw) or raw[p] != ord("V"):
+        return None
+    count = raw[p + 1]
+    p += 2
+    if count == 0 or p + count * 2 > len(raw):
+        return None
+    return {i: int.from_bytes(raw[p + 2 * i:p + 2 * i + 2], "little") for i in range(count)}
+
+
 def _master_alive(raw: RawHID, log: Callable[[str], None], attempts: int = 3) -> bool:
     """GET_ID with a few retries. After an upload (or any EEPROM/refresh command)
     the master finishes an EEPROM write + a full keycap display refresh on its
@@ -340,6 +360,33 @@ def test_get_id(raw: RawHID, log: Callable[[str], None]) -> bool:
     log(f"  identity: {identity!r}")
     if "Split72" not in identity:
         log("  FAIL: identity string does not contain 'Split72'")
+        return False
+    return True
+
+
+def test_fontpack_version_block(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """GET_ID (v6+) appends a per-bundle font-pack version block after the id string.
+
+    Validates the ``['V'][count][u16 x count]`` block is present and well-formed:
+    a plausible bundle count with contiguous slot ids 0..count-1. The host reads
+    these per-bundle ``content_version``s and flashes only the bundles the
+    keyboard is missing or behind on, so a malformed/absent block on v6 firmware
+    would silently disable per-bundle font flashing. Read-only.
+    """
+    response = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    log(f"GET_ID response: {response!r}")
+    if not _resp_ok(response, CMD_GET_ID, log, expect_status=None):
+        return False
+    versions = parse_fontpack_versions(response)
+    if versions is None:
+        log("  FAIL: no font-pack version block after the id string (expected on v6+)")
+        return False
+    log(f"  font-pack bundle versions: {versions}")
+    if not 1 <= len(versions) <= 16:
+        log(f"  FAIL: implausible bundle count {len(versions)}")
+        return False
+    if sorted(versions.keys()) != list(range(len(versions))):
+        log(f"  FAIL: bundle slots not contiguous 0..{len(versions) - 1}: {sorted(versions)}")
         return False
     return True
 
@@ -881,6 +928,7 @@ TESTS = [
     {"name": "single master enumerates",        "fn": test_single_master_enumerates},
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
     {"name": "raw HID GET_ID",                  "fn": test_get_id},
+    {"name": "font-pack version block (v6)",     "fn": test_fontpack_version_block, "min_protocol": 6},
     {"name": "get current language",            "fn": test_get_lang},
     # cmd 8 retiring + the packed list (cmd 27) only exist on protocol v2+; on a
     # pre-v2 board these SKIP instead of failing the run (see skip_reason).
