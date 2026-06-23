@@ -76,6 +76,12 @@ CMD_START_COMPRESSED_OVERLAY = 16 # first RLE-compressed overlay packet (core1)
 CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
+# Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
+# firmware update, reused per-bundle). Reply status byte is reply[2] ('.'/'!'/'~').
+CMD_FONTPACK_BEGIN          = 0x50  # data[2..5]=pack_size, [6..9]=pack_crc32, [10]=bundle_id
+CMD_FONTPACK_CHUNK          = 0x51  # data[2..5]=offset, [6..]=56 bytes
+CMD_FONTPACK_COMMIT         = 0x52  # verify staged CRC + reload (no reboot); reply[3..4]=content_version
+FONTPACK_CHUNK_SIZE         = 56    # payload bytes/chunk (matches firmware FW_UP_CHUNK_SIZE)
 
 # VIA "reset dynamic keymap" report (bare command id, NOT a 'P' command — see
 # test_runner.VIA_DYNAMIC_KEYMAP_RESET). data[0]==0x06 -> legacy_command_kb ->
@@ -917,6 +923,100 @@ def test_get_id_stress(raw: RawHID, log: Callable[[str], None], n: int = 50) -> 
     return True
 
 
+def _build_empty_fontpack() -> bytes:
+    """A minimal valid 32-byte 'empty' PlyF pack (font_count 0) — the wipe sentinel.
+    Mirrors PolyKybdHost hid_fontpack.build_empty_pack(): header only, body CRC of an
+    empty body. Flashing it to a slot empties that bundle (font_count 0 is a valid
+    pack the firmware accepts → the slot contributes no fonts)."""
+    import binascii, struct
+    body_crc = binascii.crc32(b"") & 0xFFFFFFFF
+    # <4sHHIIIIII: magic, abi, flags, content_version, font_count, font_table_off,
+    #              total_size, crc32, reserved
+    return struct.pack("<4sHHIIIIII", b"PlyF", 1, 0, 0, 0, 32, 32, body_crc, 0)
+
+
+def _fontpack_abort(raw: RawHID) -> None:
+    """Best-effort abort: a COMMIT clears fw_up mode on both halves regardless of
+    outcome, so a partial transfer can't leave the keyboard stuck mid-flash."""
+    try:
+        raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=5000)
+    except Exception:   # noqa: BLE001 — cleanup must never mask the original failure
+        pass
+
+
+def test_fontpack_wipe_roundtrip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Flash the 32-byte empty-pack sentinel to bundle slot 0 over the REAL HID
+    transport (BEGIN/CHUNK/COMMIT, cmds 0x50-0x52) and assert COMMIT succeeds.
+
+    This is the only HIL test that exercises the actual per-bundle font-pack flash
+    path: the deferred-erase staging, the master-slave bridge, and — the key
+    assertion — the COMMIT success gate (`fontpack_slot_present`), which a field bug
+    once made falsely NACK on a wipe (it gated on the whole-pack `fontpack_present()`,
+    false once every slot is empty). A NACK here is exactly that regression. Then
+    re-reads GET_ID and confirms slot 0 now advertises content_version 0.
+
+    Side effect: empties the 'symbol' bundle (slot 0) on the rig. That is harmless on
+    the unattended rig (no host attached) and a real PolyKybdHost re-flashes it on the
+    next connect. The empty-pack flash erases only ~2 sectors, so it is fast. v6+ only
+    (gated in TESTS)."""
+    import binascii, struct
+    SLOT = 0
+    pack = _build_empty_fontpack()
+    pack_crc = binascii.crc32(pack) & 0xFFFFFFFF
+
+    # -- FONTPACK_BEGIN: erases the slot's first sectors; answers '.' ready, '~' while
+    #    erasing (retry), '!' on failure. Generous timeout so the single read catches
+    #    the reply rather than triggering send()'s internal re-write.
+    begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(pack), pack_crc, SLOT)
+    ready = False
+    for attempt in range(20):
+        reply = raw.send(begin, timeout_ms=15000)
+        if reply and len(reply) >= 3 and reply[2] == ord('.'):
+            ready = True
+            break
+        if reply and len(reply) >= 3 and reply[2] == ord('~'):
+            log(f"  BEGIN: erasing slot {SLOT}... (attempt {attempt + 1})")
+            time.sleep(0.3)
+            continue
+        if reply and len(reply) >= 3 and reply[2] == ord('!'):
+            log("  FAIL: FONTPACK_BEGIN NACK — slave half could not be prepared")
+            return False
+        log(f"  BEGIN: no/short reply {reply!r} (attempt {attempt + 1}) — retrying")
+        time.sleep(0.3)
+    if not ready:
+        log("  FAIL: FONTPACK_BEGIN never became ready")
+        return False
+
+    # -- one FONTPACK_CHUNK at offset 0 (32 real bytes, padded to 56 with 0xff).
+    padded = pack + b"\xff" * (FONTPACK_CHUNK_SIZE - len(pack))
+    chunk = bytes([POLY_CHANNEL, CMD_FONTPACK_CHUNK]) + struct.pack("<I", 0) + padded
+    reply = raw.send(chunk, timeout_ms=8000)
+    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+        _fontpack_abort(raw)
+        log(f"  FAIL: FONTPACK_CHUNK not ACKed: {reply!r}")
+        return False
+
+    # -- FONTPACK_COMMIT: verifies the staged CRC and loads the slot. The '.' here is
+    #    the wipe-success gate that the field bug broke; '!' would be that regression.
+    reply = raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
+    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+        log(f"  FAIL: FONTPACK_COMMIT rejected (the wipe-CRC success gate): {reply!r}")
+        return False
+    cver = struct.unpack_from("<H", reply, 3)[0] if len(reply) >= 5 else None
+    log(f"  COMMIT ok — slot {SLOT} wiped (content_version={cver})")
+
+    # -- verify GET_ID's v6 version block now reports content_version 0 for the slot.
+    versions = parse_fontpack_versions(raw.send(bytes([POLY_CHANNEL, CMD_GET_ID])))
+    if versions is None:
+        log("  FAIL: no font-pack version block in GET_ID after the wipe")
+        return False
+    if versions.get(SLOT, -1) != 0:
+        log(f"  FAIL: slot {SLOT} reports version {versions.get(SLOT)} != 0 after wipe")
+        return False
+    log(f"  GET_ID confirms slot {SLOT} content_version 0 after wipe — flash transport OK")
+    return True
+
+
 # Ordered cheap → expensive and dependency-aware:
 #   * the structural enumerate check first (no HID traffic);
 #   * fresh-boot BEFORE any other GET_ID — it must see and consume the one-shot
@@ -950,4 +1050,9 @@ TESTS = [
     {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive},
     {"name": "compressed overlay keeps master alive (core1)", "fn": test_compressed_overlay_keeps_master_alive},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
+    # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
+    # to slot 0 — exercises the flash transport + the COMMIT slot-present success gate.
+    # LAST: it empties the 'symbol' bundle (a host re-flashes it on the next connect).
+    # v6+ only; a pre-v6 board SKIPs it (no font-pack flash transport).
+    {"name": "font-pack wipe round-trip (v6 flash)", "fn": test_fontpack_wipe_roundtrip, "min_protocol": 6},
 ]
