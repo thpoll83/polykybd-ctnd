@@ -24,7 +24,7 @@ from typing import Callable
 from .hid import RawHID
 
 POLY_CHANNEL       = ord("P")   # 0x50
-CMD_SET_HANDEDNESS = 0x19       # case 25 in keyboards/handwired/polykybd/hid_com.c
+CMD_SET_HANDEDNESS = 0x19       # case 25 in keyboards/polykybd/hid_com.c
 ACK                = ord(".")
 
 

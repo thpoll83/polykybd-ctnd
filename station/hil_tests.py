@@ -54,7 +54,7 @@ from typing import Callable
 from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
 
-# --- Raw HID protocol constants (mirror keyboards/handwired/polykybd/hid_com.c
+# --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
 # A command report is: data[0] = 'P' (channel marker), data[1] = command id,
 # data[2..] = payload. Responses echo "P<id><status>...", where status is
@@ -92,7 +92,7 @@ ACK        = ord(".")
 NACK       = ord("!")
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
-# Firmware facts (keyboards/handwired/polykybd/{config.h,base/com.h}).
+# Firmware facts (keyboards/polykybd/{config.h,base/com.h}).
 FULL_BRIGHT          = 50    # max OLED contrast; > this is rejected (NACK)
 # SET_BRIGHTNESS flags byte (protocol v5+, data[2]; mirror base/com.h). 0 = the
 # legacy persisted set. VOLATILE = a daylight/auto value (applied only while auto
@@ -113,7 +113,7 @@ COMPRESSED_TEST_KEYS = 8     # KC_A..KC_H — exercise the core1 path repeatedly
 # The firmware's GET_ID reply (cmd 6) names the board, firmware version and
 # protocol version, e.g. the text after the "P\x06." header reads
 #   "Split72 0.8.21 P2 HW1 "
-# (see keyboards/handwired/polykybd/hid_com.c: name = "P\x06.Split72 " FW_VERSION
+# (see keyboards/polykybd/hid_com.c: name = "P\x06.Split72 " FW_VERSION
 #  " P" STR(PROTOCOL_VERSION) " HW" STR(DEVICE_VER) " "). That advertised version
 # is the "has the update landed yet?" signal the per-test gate keys read.
 _CAPS_RE = re.compile(r"Split72\s+(?P<fw>\S+)\s+P(?P<proto>\d+)")
