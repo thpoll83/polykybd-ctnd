@@ -48,6 +48,17 @@ def _is_loopback(h):
         return False
 
 
+def _as_bool(v):
+    """Strict boolean parse for the LAN opt-in: a real bool, or an explicit
+    truthy string. Plain bool() would treat any non-empty string ('false',
+    'no', '0') as True, which must never silently expose the rig on the LAN."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
 # SECURITY (HIL-1): the control UI is unauthenticated and exposes flashing,
 # USB-power, GPIO and runner-control. The kiosk only ever loads
 # http://localhost:5000, so default to loopback and require an explicit
@@ -55,7 +66,7 @@ def _is_loopback(h):
 # already-deployed rigs whose gitignored config.yaml still says "0.0.0.0":
 # without allow_lan we override the bind to loopback (and warn) rather than
 # silently exposing the box on the LAN.
-ALLOW_LAN = bool(_ui.get("allow_lan", False))
+ALLOW_LAN = _as_bool(_ui.get("allow_lan", False))
 _requested_host = _ui.get("host", "127.0.0.1")
 if ALLOW_LAN:
     UI_HOST = _requested_host
@@ -73,6 +84,7 @@ else:
 UI_CORS_ORIGINS = "*" if ALLOW_LAN else [
     f"http://localhost:{UI_PORT}",
     f"http://127.0.0.1:{UI_PORT}",
+    f"http://[::1]:{UI_PORT}",
 ]
 
 # GitHub Actions CI status (optional)
