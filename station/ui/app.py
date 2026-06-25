@@ -14,8 +14,8 @@ from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO
 
 from station.config import (
-    FIRMWARE_DIR, UI_HOST, UI_PORT, GITHUB_REPO, GITHUB_TOKEN, RUNNER_LABELS,
-    UPDATE_BRANCH,
+    FIRMWARE_DIR, UI_HOST, UI_PORT, UI_CORS_ORIGINS, GITHUB_REPO, GITHUB_TOKEN,
+    RUNNER_LABELS, UPDATE_BRANCH,
 )
 
 # Background pollers run unattended; log their failures (to journald via systemd)
@@ -25,7 +25,7 @@ _log = logging.getLogger("polykybd-ctnd")
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "polykybd-ctnd"
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins=UI_CORS_ORIGINS, async_mode="threading")
 
 # Labels the HIL job requires (case-insensitive). GitHub adds `self-hosted`,
 # `Linux`, `ARM64` automatically; `polykybd-ctnd` comes from the runner config.

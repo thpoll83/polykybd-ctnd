@@ -33,7 +33,12 @@ qmk:
 
 # Web UI
 ui:
-  host: "0.0.0.0"
+  # The control UI is UNAUTHENTICATED and can flash firmware, cut USB power, drive
+  # GPIO and re-register the runner. The Chromium kiosk loads http://localhost:5000,
+  # so keep this on loopback. Only set a network bind (e.g. "0.0.0.0") together with
+  # allow_lan: true, and only on a trusted network — see HIL-1 in the security notes.
+  host: "127.0.0.1"
+  # allow_lan: true   # opt-in to bind `host` on a network interface (loopback enforced otherwise)
   port: 5000
 
 # Self-update (optional)
