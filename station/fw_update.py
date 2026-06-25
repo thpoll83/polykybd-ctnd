@@ -23,7 +23,7 @@ halves enumerate as master until the next UF2 flash — recoverable but messy, a
 not worth the risk on an unattended rig.
 
 Protocol mirrors PolyKybdHost ``polyhost/device/hid_fw_up.py`` and the firmware
-``keyboards/handwired/polykybd/hid_fw_up.c``.
+``keyboards/polykybd/hid_fw_up.c``.
 """
 import binascii
 import struct

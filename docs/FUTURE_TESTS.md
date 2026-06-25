@@ -17,7 +17,7 @@ When you implement one of these, move it out of this file, add it to `hil_tests.
   `test_language_round_trip` for the `try/finally` pattern).
 - Log generously via the `log` callback — the rig has no other console.
 - Reference the firmware command IDs in
-  [`keyboards/handwired/polykybd/hid_com.c`](https://github.com/thpoll83/qmk_firmware/blob/PolyKybd/keyboards/handwired/polykybd/hid_com.c)
+  [`keyboards/polykybd/hid_com.c`](https://github.com/thpoll83/qmk_firmware/blob/PolyKybd/keyboards/polykybd/hid_com.c)
   (`raw_hid_receive()` dispatcher); responses are `"P<id><status>…"` where status is
   `.` (ACK), `!` (NACK), or `*` (GET_ID fresh-boot marker). The command IDs also have
   names in PolyKybdHost's `polyhost/device/command_ids.py` (the shared protocol).
