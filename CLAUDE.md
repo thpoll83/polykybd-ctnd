@@ -66,7 +66,7 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 
 ## Hardware facts (verified)
 
-- **VID/PID**: `0x2021:0x2007` (PolyFabriq PolyKybd Split72) — in `config/config.yaml`
+- **VID/PID**: `0x2021:0x2007` (PolyTasten PolyKybd Split72) — in `config/config.yaml`
 - **Raw HID usage**: `RAW_USAGE_PAGE 0xFF61`, `RAW_USAGE_ID 0x62` — from `split72/config.h`
 - **RUN and BOOTSEL circuits**: identical 2N2222 NPN BJT low-side switch (see schematic below). `gpio.inverted: true` in config (the default).
 - **GPIO logic**: GPIO HIGH → BJT saturated → pin pulled to ~0.1 V (asserted). GPIO LOW → BJT off → pin held HIGH by RP2040 internal pull-up (~50 kΩ) → running/released. Idle state is GPIO LOW.

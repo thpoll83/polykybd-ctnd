@@ -22,7 +22,7 @@ usb:
 # QMK HID identifiers
 # Find these in keyboards/polykbd/config.h in qmk_firmware
 qmk:
-  vendor_id:  0x2021  # PolyFabriq PolyKybd Split72
+  vendor_id:  0x2021  # PolyTasten PolyKybd Split72
   product_id: 0x2007
   # HID usage pages (QMK standard defaults — only change if your firmware differs)
   console_usage_page: 0xFF31
