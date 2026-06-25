@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 from pathlib import Path
+import ipaddress
+import logging
 import yaml
 
 _root    = Path(__file__).parent.parent
@@ -33,8 +35,57 @@ HID_RAW_USAGE          = _c["qmk"]["raw_usage"]
 MASS_STORAGE_LABEL = _c["qmk"]["mass_storage_label"]
 
 # Web UI
-UI_HOST = _c["ui"]["host"]
-UI_PORT = _c["ui"]["port"]
+_ui = _c.get("ui", {})
+UI_PORT = _ui.get("port", 5000)
+
+
+def _is_loopback(h):
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _as_bool(v):
+    """Strict boolean parse for the LAN opt-in: a real bool, or an explicit
+    truthy string. Plain bool() would treat any non-empty string ('false',
+    'no', '0') as True, which must never silently expose the rig on the LAN."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
+# SECURITY (HIL-1): the control UI is unauthenticated and exposes flashing,
+# USB-power, GPIO and runner-control. The kiosk only ever loads
+# http://localhost:5000, so default to loopback and require an explicit
+# `ui.allow_lan: true` opt-in to bind a network interface. This also protects
+# already-deployed rigs whose gitignored config.yaml still says "0.0.0.0":
+# without allow_lan we override the bind to loopback (and warn) rather than
+# silently exposing the box on the LAN.
+ALLOW_LAN = _as_bool(_ui.get("allow_lan", False))
+_requested_host = _ui.get("host", "127.0.0.1")
+if ALLOW_LAN:
+    UI_HOST = _requested_host
+else:
+    if not _is_loopback(_requested_host):
+        logging.getLogger("polykybd-ctnd").warning(
+            "ui.host=%r would expose the unauthenticated control UI on the "
+            "network; binding 127.0.0.1 instead (set ui.allow_lan: true to "
+            "override).", _requested_host)
+    UI_HOST = "127.0.0.1"
+
+# Browser origins allowed to open the SocketIO control channel. Scoped to the
+# kiosk's localhost origin unless LAN access is opted in — blocks a drive-by /
+# DNS-rebind page in the operator's browser from driving the rig.
+UI_CORS_ORIGINS = "*" if ALLOW_LAN else [
+    f"http://localhost:{UI_PORT}",
+    f"http://127.0.0.1:{UI_PORT}",
+    f"http://[::1]:{UI_PORT}",
+]
 
 # GitHub Actions CI status (optional)
 GITHUB_REPO  = _c.get("github", {}).get("repo", "")
