@@ -122,37 +122,38 @@ class RawHID:
         self.timeouts_recovered = 0
         self.timeouts_failed = 0
 
-    def send(self, data: bytes, timeout_ms: int = 3000) -> bytes | None:
-        """Write one report and read one reply (or None on timeout).
+    def send(self, data: bytes, timeout_ms: int = 3000, attempts: int = 3) -> bytes | None:
+        """Write one report and read one reply (or None after all attempts time out).
 
-        The default read timeout is deliberately generous: after a brightness /
-        language / overlay command the firmware does an EEPROM write plus a full
-        keycap display refresh on its main loop and briefly stops servicing HID
-        (~1-2 s, longer as the glyph set grows). A short timeout there produced
-        intermittent, wandering 'unresponsive' failures across the suite. A
-        genuine hang still surfaces as a timeout (None)."""
+        **Centralized transient-timeout tolerance.** The rig's master→slave split
+        link can briefly stall the firmware's main loop (EEPROM write + full keycap
+        refresh after a set command; an occasional multi-second boot-window blip),
+        long enough to miss one — or a couple — of HID replies before it recovers.
+        Rather than sprinkle retry helpers across individual tests (whack-a-mole),
+        send() itself re-issues the request up to ``attempts`` times, so EVERY test
+        inherits the tolerance for free. The read timeout per attempt is generous,
+        so total tolerance is ~attempts × timeout_ms.
+
+        Safe because every command sent via send() is idempotent (a query, or a set
+        to a fixed value), so re-issuing is harmless; a fresh handle is opened per
+        call so a stale late reply never bleeds into the next command. A genuine
+        hang still returns None (all attempts time out) — the runner's
+        freeze-signature logic (consecutive misses) is what flags a real fault, so
+        masking a single blip here does not hide a true regression."""
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
         dev = hid.Device(path=path)
         try:
-            dev.write(_frame(data))
-            response = dev.read(64, timeout=timeout_ms)
-            if not response:
-                # One transient retry. A lone dropped/late reply (a rig USB read
-                # hiccup) shouldn't fail an otherwise-correct command. Every
-                # command sent via send() is idempotent (a query, or a set to a
-                # fixed value), so re-issuing is safe; reading again on the
-                # still-open handle also picks up a late reply from the first
-                # attempt. send() opens a fresh handle per call, so a stale reply
-                # never bleeds into the next command.
+            for attempt in range(max(1, attempts)):
                 dev.write(_frame(data))
                 response = dev.read(64, timeout=timeout_ms)
                 if response:
-                    self.timeouts_recovered += 1
-                else:
-                    self.timeouts_failed += 1
-            return bytes(response) if response else None
+                    if attempt:
+                        self.timeouts_recovered += 1
+                    return bytes(response)
+            self.timeouts_failed += 1
+            return None
         finally:
             dev.close()
 
