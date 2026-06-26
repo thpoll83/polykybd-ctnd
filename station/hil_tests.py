@@ -76,6 +76,8 @@ CMD_START_COMPRESSED_OVERLAY = 16 # first RLE-compressed overlay packet (core1)
 CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
+CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7+)
+POLY_OS_COUNT               = 6   # enum poly_os values 0..5 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS)
 # Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
 # firmware update, reused per-bundle). Reply status byte is reply[2] ('.'/'!'/'~').
 CMD_FONTPACK_BEGIN          = 0x50  # data[2..5]=pack_size, [6..9]=pack_crc32, [10]=bundle_id
@@ -726,6 +728,67 @@ def test_idle_style_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     return _resp_ok(restore, CMD_IDLE_STYLE, log, expect_status=ACK)
 
 
+def test_os_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """SET_OS (cmd 29, protocol v7+) get/set round-trip + invalid NACK.
+
+    The active host-OS identity is its own state (independent of the unicode mode).
+    Query (0xFF) replies status '.', byte[3] = active OS, byte[4] = auto-mode flag.
+    This pins a couple of OSes (flags bit0 = manual pin) and reads them back, then
+    re-engages auto mode (0xFE) and confirms the auto flag, checks an out-of-range
+    value NACKs, and finally restores whatever was found (side-effecting but tidy).
+    """
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFF]))
+    log(f"OS query -> {cur!r}")
+    if not _resp_ok(cur, CMD_SET_OS, log, expect_status=ACK):
+        return False
+    if len(cur) < 5:
+        log("  FAIL: OS query reply missing value/auto bytes")
+        return False
+    original_os, original_auto = cur[3], cur[4]
+    log(f"  current OS = {original_os}, auto = {original_auto}")
+
+    # Pin macOS (2) then Windows (1) with flags bit0=1; read back each time.
+    for target in (2, 1):
+        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, target, 0x01]))
+        log(f"OS pin {target} -> {set_resp!r}")
+        if not _resp_ok(set_resp, CMD_SET_OS, log, expect_status=ACK):
+            return False
+        back = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFF]))
+        if not _resp_ok(back, CMD_SET_OS, log, expect_status=ACK) or len(back) < 5:
+            return False
+        if back[3] != target:
+            log(f"  FAIL: read back OS {back[3]} != pinned {target}")
+            return False
+        if back[4] != 0:
+            log(f"  FAIL: auto flag set ({back[4]}) after a manual pin")
+            return False
+
+    # Re-engage auto mode (0xFE) and confirm the auto flag comes back.
+    auto_resp = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFE]))
+    log(f"OS engage auto (0xFE) -> {auto_resp!r}")
+    if not _resp_ok(auto_resp, CMD_SET_OS, log, expect_status=ACK):
+        return False
+    back = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFF]))
+    if not _resp_ok(back, CMD_SET_OS, log, expect_status=ACK) or len(back) < 5:
+        return False
+    if back[4] != 1:
+        log(f"  FAIL: auto flag not set ({back[4]}) after engaging auto")
+        return False
+
+    # An out-of-range OS value (>= POLY_OS_COUNT, and not the 0xFE/0xFF sentinels) NACKs.
+    bad = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, POLY_OS_COUNT, 0x01]))
+    log(f"OS set {POLY_OS_COUNT} (invalid) -> {bad!r}")
+    if not _resp_ok(bad, CMD_SET_OS, log, expect_status=NACK):
+        return False
+
+    # Restore the original mode/OS so the rig is left as found.
+    if original_auto:
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFE]))
+    else:
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, original_os, 0x01]))
+    return _resp_ok(restore, CMD_SET_OS, log, expect_status=ACK)
+
+
 def test_overlay_flags_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     """OVERLAY_FLAGS on/off (cmd 11/12) round-trips a flag and restores default.
 
@@ -1044,6 +1107,7 @@ TESTS = [
     {"name": "set unicode mode (ACK + NACK)",   "fn": test_set_unicode_mode},
     {"name": "idle wake ACK",                   "fn": test_idle_wake},
     {"name": "idle style round-trip (v4)",      "fn": test_idle_style_round_trip, "min_protocol": 4},
+    {"name": "OS round-trip (v7)",              "fn": test_os_round_trip, "min_protocol": 7},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
