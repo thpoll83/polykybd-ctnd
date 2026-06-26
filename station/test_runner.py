@@ -249,24 +249,35 @@ class TestRunner:
                  f"({probes} probes) — running tests anyway")
         return False
 
-    def _settle_master(self, need: int = 3, timeout: float = 15.0,
+    def _settle_master(self, need: int = 15, timeout: float = 30.0,
                        fast_ms: int = 250, probe_timeout_ms: int = 2500,
                        spacing: float = 0.2) -> bool:
-        """Wait until the master answers *quickly* and consistently, so the graded
-        suite never starts inside the post-cold-flash split-sync settling window.
+        """Wait until the master answers *quickly* and consistently for a SUSTAINED
+        window, so the graded suite never starts inside the post-cold-flash
+        split-sync settling window.
 
         The read-only readiness gate (GET_LANG) can pass while the slave is still
         unreachable: with no state change there's no master->slave sync, so the
-        main loop isn't stalled and probes return fast. But once a state-changing
-        command lands (the keymap reset's slave sync, or the first test that
-        toggles state), the master can block its loop in split-sync retries —
-        delaying HID long enough to time out whatever command is in flight. The
-        firmware change (1-attempt periodic syncs) bounds that stall; this gate is
-        the belt-and-suspenders complement: it requires ``need`` consecutive
-        GET_LANG replies that each come back within ``fast_ms`` (a stalled loop
-        blows past that), confirming the settling window has cleared. GET_LANG is
-        used (not GET_ID) so the one-shot fresh-boot '*' marker is left intact for
-        test_fresh_boot_marker. Best-effort: logs and proceeds on timeout."""
+        main loop isn't stalled and probes return fast. The earlier mitigations
+        assumed the stall is *triggered by a state-changing command* (the keymap
+        reset's slave sync, or a test that toggles state) and placed settles around
+        those. But the rig's slave half connects asynchronously, and when it does
+        the master runs an initial split-sync **burst** that — on the rig's flaky
+        link, at ``PERIODIC_SYNC_RETRIES`` (3, not the 1 an older note here assumed)
+        — blocks the main loop for *several seconds*. That burst is NOT triggered by
+        any host command: it can land on a pure read-only query (a `legacy ASCII
+        lang list NACKs` cmd-8 timed out this way, between a healthy cmd 7 and cmd
+        27 — a >9 s silence that even send()'s 3x retry could not ride out).
+
+        A short settle is the hole: requiring only ~0.6 s of fast replies, the gate
+        passed during the pre-connect lull and the burst hit mid-suite. So require a
+        SUSTAINED streak (``need`` consecutive GET_LANG replies, each <= ``fast_ms``;
+        a stalled loop blows past that and **resets the streak**), which only
+        completes once the master has been continuously responsive long enough that
+        the one-shot connect burst is behind us. GET_LANG is used (not GET_ID) so the
+        one-shot fresh-boot '*' marker is left intact for test_fresh_boot_marker.
+        Best-effort: logs and proceeds on timeout (a genuine hang then surfaces as
+        the test failures it causes, not hidden here)."""
         deadline = time.monotonic() + timeout
         streak = 0
         probes = 0
