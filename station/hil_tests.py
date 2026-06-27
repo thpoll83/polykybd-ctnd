@@ -420,7 +420,8 @@ def test_get_lang(raw: RawHID, log: Callable[[str], None]) -> bool:
     return True
 
 
-def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None]):
+def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None],
+                            attempts: int = 3):
     """Read GET_LANG_LIST_PACKED (cmd 27) and decode it to a list of 'llCC' codes.
 
     The list is a count byte + two ISO index bytes per language, possibly split
@@ -430,33 +431,60 @@ def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None]):
     reassembled by raw byte slices, not text decoding. Returns the list of codes
     (empty if the firmware reports zero languages), or None on any protocol /
     decoding failure (already logged).
-    """
-    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LANG_LIST_PACKED]))
-    if not packets:
-        log("  FAIL: no packed-list packets received")
-        return None
-    payload = bytearray()
-    for p in packets:
-        if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED, log):
-            return None
-        payload += bytes(p[3:])  # strip "P\x1b." header; keep raw bytes (binary!)
-    if not payload:
-        log("  FAIL: packed reply had only headers, no payload (count byte missing)")
-        return None
-    count = payload[0]
-    total = 1 + 2 * count
-    if len(payload) < total:
-        log(f"  FAIL: truncated payload ({len(payload)} bytes, need {total})")
-        return None
-    try:
-        codes = decode_packed(payload[:total])
-    except (KeyError, IndexError) as e:
-        log(f"  FAIL: could not decode packed list: {e}")
-        return None
-    if len(codes) != count:
-        log(f"  FAIL: decoded {len(codes)} codes but count byte says {count}")
-        return None
-    return codes
+
+    This is the **largest** reply the rig reads — it now spans ~6+ reports and
+    grows with every language batch (NUM_LANG). ``send_and_read_all`` (unlike
+    ``send``) has no built-in retry and ends the read on the first empty
+    inter-packet gap, so a mid-transfer stall on the rig's flaky split link (the
+    same boot-window busy window that bites elsewhere) can truncate the read or
+    miss the first packet. So give it room: longer first-/inter-packet timeouts
+    than the defaults, and — because the count byte tells us the exact expected
+    length — **retry the whole exchange** (fresh handle each time) when it comes
+    back empty or short, rather than failing on a single slow transfer. A
+    *complete* payload that won't decode (bad index) is a real table fault, not a
+    timing blip, so that fails immediately without burning the retries."""
+    last_err = "no packed-list packets received"
+    for attempt in range(max(1, attempts)):
+        packets = raw.send_and_read_all(
+            bytes([POLY_CHANNEL, CMD_GET_LANG_LIST_PACKED]),
+            first_timeout_ms=2500, next_timeout_ms=600)
+        if not packets:
+            last_err = "no packed-list packets received"
+        else:
+            payload = bytearray()
+            bad_header = False
+            for p in packets:
+                if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED, lambda *_a: None):
+                    bad_header = True
+                    break
+                payload += bytes(p[3:])  # strip "P\x1b." header; keep raw bytes (binary!)
+            if bad_header:
+                last_err = "packed reply had a non-ACK / garbled header packet"
+            elif not payload:
+                last_err = "packed reply had only headers, no payload (count byte missing)"
+            else:
+                count = payload[0]
+                total = 1 + 2 * count
+                if len(payload) < total:
+                    # Almost certainly a mid-transfer stall cut the read short on
+                    # the flaky link — retry the whole exchange before giving up.
+                    last_err = f"truncated payload ({len(payload)} bytes, need {total})"
+                else:
+                    try:
+                        codes = decode_packed(payload[:total])
+                    except (KeyError, IndexError) as e:
+                        log(f"  FAIL: could not decode packed list: {e}")
+                        return None
+                    if len(codes) != count:
+                        log(f"  FAIL: decoded {len(codes)} codes but count byte says {count}")
+                        return None
+                    if attempt:
+                        log(f"  packed list read OK on attempt {attempt + 1}/{attempts}")
+                    return codes
+        if attempt + 1 < attempts:
+            log(f"  packed-list read attempt {attempt + 1}/{attempts}: {last_err} — retrying")
+    log(f"  FAIL: {last_err} (after {attempts} attempts)")
+    return None
 
 
 def test_legacy_lang_list_nacked(raw: RawHID, log: Callable[[str], None]) -> bool:
