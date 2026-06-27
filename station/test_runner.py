@@ -262,12 +262,16 @@ class TestRunner:
         assumed the stall is *triggered by a state-changing command* (the keymap
         reset's slave sync, or a test that toggles state) and placed settles around
         those. But the rig's slave half connects asynchronously, and when it does
-        the master runs an initial split-sync **burst** that — on the rig's flaky
-        link, at ``PERIODIC_SYNC_RETRIES`` (3, not the 1 an older note here assumed)
-        — blocks the main loop for *several seconds*. That burst is NOT triggered by
-        any host command: it can land on a pure read-only query (a `legacy ASCII
-        lang list NACKs` cmd-8 timed out this way, between a healthy cmd 7 and cmd
-        27 — a >9 s silence that even send()'s 3x retry could not ride out).
+        the master runs its boot-time 72-keycap OLED render plus the initial
+        split-sync to the just-booted slave, which blocks the main loop for
+        *several seconds*. This is NOT a link-quality issue: the rig uses the same
+        clean full-duplex two-wire split link as a shipping keyboard, so the cause
+        is purely *timing* — the rig fires HID queries within ~2 s of the master
+        booting, inside a boot-time busy window a human user never reaches. That
+        window is NOT triggered by any host command, so it can land on a pure
+        read-only query (a `legacy ASCII lang list NACKs` cmd-8 timed out this way,
+        between a healthy cmd 7 and cmd 27 — a >9 s silence that even send()'s 3x
+        retry could not ride out).
 
         A short settle is the hole: requiring only ~0.6 s of fast replies, the gate
         passed during the pre-connect lull and the burst hit mid-suite. So require a

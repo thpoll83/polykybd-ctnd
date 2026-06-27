@@ -435,14 +435,20 @@ def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None],
     This is the **largest** reply the rig reads — it now spans ~6+ reports and
     grows with every language batch (NUM_LANG). ``send_and_read_all`` (unlike
     ``send``) has no built-in retry and ends the read on the first empty
-    inter-packet gap, so a mid-transfer stall on the rig's flaky split link (the
-    same boot-window busy window that bites elsewhere) can truncate the read or
-    miss the first packet. So give it room: longer first-/inter-packet timeouts
-    than the defaults, and — because the count byte tells us the exact expected
-    length — **retry the whole exchange** (fresh handle each time) when it comes
-    back empty or short, rather than failing on a single slow transfer. A
-    *complete* payload that won't decode (bad index) is a real table fault, not a
-    timing blip, so that fails immediately without burning the retries."""
+    inter-packet gap, so a stall in the master's main loop can truncate the read
+    or miss the first packet. That stall is a *timing* artifact, not a link
+    problem: the rig uses the same clean full-duplex two-wire split link as a
+    shipping keyboard, but it fires this query inside the master's boot-time busy
+    window (the initial 72-keycap render + split-sync to the just-booted slave) —
+    something a human user never triggers. The proven host reader handles the same
+    list reliably; the only reason the rig needs more is that it has no outer
+    retry loop (the host re-enumerates on its next 1 s reconnect probe). So give
+    it room: longer first-/inter-packet timeouts than the defaults, and — because
+    the count byte tells us the exact expected length — **retry the whole
+    exchange** (fresh handle each time) when it comes back empty or short, rather
+    than failing on a single slow transfer. A *complete* payload that won't decode
+    (bad index) is a real table fault, not a timing blip, so that fails
+    immediately without burning the retries."""
     last_err = "no packed-list packets received"
     for attempt in range(max(1, attempts)):
         packets = raw.send_and_read_all(
@@ -468,8 +474,8 @@ def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None],
                 count = payload[0]
                 total = 1 + 2 * count
                 if len(payload) < total:
-                    # Almost certainly a mid-transfer stall cut the read short on
-                    # the flaky link — retry the whole exchange before giving up.
+                    # Almost certainly the master's boot-time busy window cut the
+                    # read short — retry the whole exchange before giving up.
                     last_err = f"truncated payload ({len(payload)} bytes, need {total})"
                 else:
                     skipped = []  # index pairs the frozen table couldn't resolve
@@ -991,9 +997,9 @@ def test_get_id_stress(raw: RawHID, log: Callable[[str], None], n: int = 50) -> 
     ``send_repeated`` retries such transient errors (and counts them).
 
     A single isolated no-answer is NOT failed: the immediately-preceding overlay
-    test leaves the master in its transient deaf window (worsened on the rig,
-    where master→slave sync is flaky, by the split-sync re-fire fix), so an
-    occasional GET_ID times out and then recovers. Only a freeze *signature*
+    test leaves the master in its transient deaf window — the post-overlay EEPROM
+    write + full keycap refresh, which the split-sync re-fire fix (#80) can
+    lengthen — so an occasional GET_ID times out and then recovers. Only a freeze *signature*
     (``classify_get_id_stress``) fails. A settle/liveness check first drains the
     deaf window and still catches a hang carried over from the overlay test.
     Logs min/avg/max round-trip so a slow-down trend is visible across runs.
