@@ -452,14 +452,16 @@ def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None],
             last_err = "no packed-list packets received"
         else:
             payload = bytearray()
-            bad_header = False
+            header_err = []  # capture the first bad-header detail (not just "garbled")
             for p in packets:
-                if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED, lambda *_a: None):
-                    bad_header = True
+                if not _resp_ok(p, CMD_GET_LANG_LIST_PACKED,
+                                lambda m: header_err.append(m) if not header_err else None):
                     break
                 payload += bytes(p[3:])  # strip "P\x1b." header; keep raw bytes (binary!)
-            if bad_header:
-                last_err = "packed reply had a non-ACK / garbled header packet"
+            if header_err:
+                detail = header_err[0].strip()  # _resp_ok messages start with "FAIL: "
+                detail = detail[5:].strip() if detail.startswith("FAIL:") else detail
+                last_err = f"non-ACK / garbled header packet: {detail}"
             elif not payload:
                 last_err = "packed reply had only headers, no payload (count byte missing)"
             else:
@@ -470,13 +472,19 @@ def _read_packed_lang_codes(raw: RawHID, log: Callable[[str], None],
                     # the flaky link — retry the whole exchange before giving up.
                     last_err = f"truncated payload ({len(payload)} bytes, need {total})"
                 else:
+                    skipped = []  # index pairs the frozen table couldn't resolve
                     try:
-                        codes = decode_packed(payload[:total])
+                        codes = decode_packed(
+                            payload[:total],
+                            on_skip=lambda pos, li, ci: skipped.append((pos, li, ci)))
                     except (KeyError, IndexError) as e:
                         log(f"  FAIL: could not decode packed list: {e}")
                         return None
                     if len(codes) != count:
-                        log(f"  FAIL: decoded {len(codes)} codes but count byte says {count}")
+                        # A drifted index pair is dropped by decode_packed, so name it
+                        # (frozen-table-vs-firmware drift) instead of a bare count miss.
+                        log(f"  FAIL: decoded {len(codes)} codes but count byte says "
+                            f"{count} (unknown/skipped index pairs: {skipped})")
                         return None
                     if attempt:
                         log(f"  packed list read OK on attempt {attempt + 1}/{attempts}")
