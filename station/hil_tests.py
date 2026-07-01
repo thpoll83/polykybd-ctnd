@@ -77,7 +77,7 @@ CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
 CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7+)
-POLY_OS_COUNT               = 6   # enum poly_os values 0..5 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS)
+POLY_OS_COUNT               = 8   # enum poly_os values 0..7 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS-reserved/LINUX_GNOME/LINUX_KDE); firmware SET_OS accepts arg < POLY_OS_COUNT
 # Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
 # firmware update, reused per-bundle). Reply status byte is reply[2] ('.'/'!'/'~').
 CMD_FONTPACK_BEGIN          = 0x50  # data[2..5]=pack_size, [6..9]=pack_crc32, [10]=bundle_id
