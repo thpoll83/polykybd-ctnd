@@ -218,6 +218,22 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
    polykybd-update.service`). The old manual path still works:
    `git -C /opt/polykybd-ctnd pull && sudo systemctl restart polykybd-ctnd`.
 
+> **⚠️ HIL CI runs the *installed* `/opt/polykybd-ctnd`, NOT a fresh checkout** —
+> `qmk-test.yml`'s "Locate station directory" step just finds the install and runs
+> `venv/bin/python -m station.test_runner`. So the suite only ever runs the station
+> code the **self-update timer has already fast-forwarded** onto the rig. When that
+> update lags (the rig was busy/offline, or the timer deferred), HIL runs **stale**
+> station code and already-merged rig fixes silently don't apply — you'll chase a
+> failure that was fixed days ago (seen 2026-07: the rig ran the old `need=3` settle
+> for ~5 days while `main` had `need=15`, so the boot-burst flake kept "recurring").
+> **When a HIL check flakes, verify the rig is current *first*, before blaming the
+> firmware or a test.** The cheapest tell is the settle log line: `master settled —
+> N consecutive GET_LANG replies … after N probe(s)` — `need=3` means stale
+> (pre-`df6401d`), `need=15` means current. If stale, tap **UPDATE** (or wait a
+> timer tick) and re-run before diagnosing anything else. The durable fix is to make
+> CI pull `main` before the run (qmk `qmk-test.yml` "Sync station to current ctnd
+> main" step) so a lagging timer can't leave HIL on stale code.
+
 ### Self-update mechanism
 
 - **`scripts/self-update.sh`** is the single actuator, run by both the timer
