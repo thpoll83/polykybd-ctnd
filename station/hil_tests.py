@@ -773,14 +773,15 @@ def test_idle_style_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
 
 
 def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """GLYPH_SCRIPT (cmd 30, protocol v9+) get/set round-trip + invalid NACK.
+    """GLYPH_SCRIPT (cmd 30, protocol v9+) get/set round-trip.
 
     Reads the current script (query byte 0xFF), sets TENGWAR (1) and reads it
-    back, then restores the original value. An out-of-range script (0xFE, not the
-    0xFF query sentinel) must NACK. The write is deferred to the EEPROM flush, so
-    the live state is what we read back here. Selecting a script does NOT require
-    the fantasy font-pack bundle to be present — the firmware just falls back to
-    Latin legends when a glyph is missing — so this round-trip is pack-agnostic.
+    back, then restores the original value. The write is deferred to the EEPROM
+    flush, so the live state is what we read back here. Selecting a script does
+    NOT require the fantasy font-pack bundle to be present — the firmware just
+    falls back to Latin legends when a glyph is missing — so this round-trip is
+    pack-agnostic. (No invalid-index NACK check here: from v10 the firmware
+    accepts any index and degrades gracefully — see test_glyph_script_expansion.)
     """
     cur = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
     log(f"glyph-script query -> {cur!r}")
@@ -792,7 +793,7 @@ def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> boo
     original = cur[3]
     log(f"  current glyph script = {original}")
 
-    target = 1 if original != 1 else 0   # flip to the other valid script
+    target = 1 if original != 1 else 0   # flip to the other always-present script
     set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, target]))
     log(f"glyph-script set {target} -> {set_resp!r}")
     if not _resp_ok(set_resp, CMD_GLYPH_SCRIPT, log, expect_status=ACK):
@@ -808,24 +809,22 @@ def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> boo
         log(f"  FAIL: read back {back[3]} != set {target}")
         return False
 
-    bad = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFE]))
-    log(f"glyph-script set 0xFE (invalid) -> {bad!r}")
-    if not _resp_ok(bad, CMD_GLYPH_SCRIPT, log, expect_status=NACK):
-        return False
-
     # Restore the original script so the rig is left as it was found.
     restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, original]))
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
 
 
 def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """Protocol v10 expanded glyph-script set (cmd 30, values 2..10).
+    """Protocol v10 open-ended glyph-script index (cmd 30).
 
-    v10 added 9 more scripts (runes, Aurebesh, SGA, Cirth, IBM VGA, C64, Amiga,
-    APL, Braille) on top of standard(0)/tengwar(1). This walks a few of the new
-    values — including the max (BRAILLE=10) — setting + reading each back, checks
-    that one past the max (11) NACKs, then restores the original. Pack-agnostic
-    like the base round-trip (missing glyphs just fall back to Latin).
+    v10 turns the glyph script into an OPEN-ENDED INDEX: it added 9 scripts
+    (runes, Aurebesh, SGA, Cirth, IBM VGA, C64, Amiga, APL, Braille; values 2..10)
+    AND made the firmware accept ANY index 0..0xFE — one it can't render just falls
+    back to the normal legend instead of NACKing, so new font faces never need a
+    protocol bump. This walks a few known scripts (incl. the max BRAILLE=10), then
+    sets a deliberately-unknown high index (200) and asserts it is ACCEPTED and
+    stored verbatim (a pre-v10 firmware would NACK here) — that acceptance is the
+    whole point of the decoupling. Restores the original. Pack-agnostic.
     """
     cur = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
     if not _resp_ok(cur, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(cur) < 4:
@@ -833,11 +832,14 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
         return False
     original = cur[3]
 
-    # RUNES(2), IBM VGA(6), BRAILLE(10) — spread across the new range incl. the max.
-    for target in (2, 6, GLYPH_SCRIPT_MAX):
+    # Known scripts RUNES(2), IBM VGA(6), BRAILLE(10) round-trip exactly.
+    # Then an UNKNOWN index (200) must also be accepted + stored (open-ended).
+    for target in (2, 6, GLYPH_SCRIPT_MAX, 200):
         set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, target]))
+        note = " (unknown index -> should ACK + degrade to normal)" if target > GLYPH_SCRIPT_MAX else ""
+        log(f"glyph-script set {target}{note} -> {set_resp!r}")
         if not _resp_ok(set_resp, CMD_GLYPH_SCRIPT, log, expect_status=ACK):
-            log(f"  FAIL: set script {target} did not ACK")
+            log(f"  FAIL: set script {target} did not ACK (open-ended accept expected)")
             return False
         back = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
         if not _resp_ok(back, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(back) < 4:
@@ -846,12 +848,6 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
             log(f"  FAIL: read back {back[3]} != set {target}")
             return False
         log(f"  script {target} round-tripped")
-
-    # One past the max must NACK (out of range).
-    bad = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, GLYPH_SCRIPT_MAX + 1]))
-    log(f"glyph-script set {GLYPH_SCRIPT_MAX + 1} (out of range) -> {bad!r}")
-    if not _resp_ok(bad, CMD_GLYPH_SCRIPT, log, expect_status=NACK):
-        return False
 
     restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, original]))
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
