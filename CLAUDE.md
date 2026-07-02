@@ -133,7 +133,12 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     so a pre-v9 board SKIPs it. Pack-agnostic (selecting Tengwar with no `fantasy` bundle
     just falls back to Latin on the keycaps, but the get/set state round-trips regardless),
     and non-side-effecting (restores the original script), so it sits with the other
-    mutate+restore round-trips, not among the disruptive upload tests.
+    mutate+restore round-trips, not among the disruptive upload tests. The companion
+    **`glyph script expansion (v10)`** test (`test_glyph_script_expansion`, `min_protocol: 10`)
+    covers the 9 scripts protocol v10 added (values 2..10): it round-trips RUNES(2),
+    IBMVGA(6) and the max BRAILLE(10), asserts one past the max (11) NACKs, and restores.
+    Same pack-agnostic, mutate+restore shape; a pre-v10 board SKIPs it. `GLYPH_SCRIPT_MAX`
+    (=10) tracks the highest valid `poly_glyph_script`.
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 

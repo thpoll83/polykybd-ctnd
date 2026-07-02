@@ -77,7 +77,8 @@ CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
 CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7+)
-CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (standard/tengwar, protocol v9+)
+CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (v9+ tengwar; v10 adds 9 more scripts)
+GLYPH_SCRIPT_MAX            = 10  # highest valid poly_glyph_script value (BRAILLE) as of protocol v10
 POLY_OS_COUNT               = 8   # enum poly_os values 0..7 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS-reserved/LINUX_GNOME/LINUX_KDE); firmware SET_OS accepts arg < POLY_OS_COUNT
 # Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
 # firmware update, reused per-bundle). Reply status byte is reply[2] ('.'/'!'/'~').
@@ -817,6 +818,45 @@ def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> boo
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
 
 
+def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Protocol v10 expanded glyph-script set (cmd 30, values 2..10).
+
+    v10 added 9 more scripts (runes, Aurebesh, SGA, Cirth, IBM VGA, C64, Amiga,
+    APL, Braille) on top of standard(0)/tengwar(1). This walks a few of the new
+    values — including the max (BRAILLE=10) — setting + reading each back, checks
+    that one past the max (11) NACKs, then restores the original. Pack-agnostic
+    like the base round-trip (missing glyphs just fall back to Latin).
+    """
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
+    if not _resp_ok(cur, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(cur) < 4:
+        log("  FAIL: could not read current glyph script")
+        return False
+    original = cur[3]
+
+    # RUNES(2), IBM VGA(6), BRAILLE(10) — spread across the new range incl. the max.
+    for target in (2, 6, GLYPH_SCRIPT_MAX):
+        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, target]))
+        if not _resp_ok(set_resp, CMD_GLYPH_SCRIPT, log, expect_status=ACK):
+            log(f"  FAIL: set script {target} did not ACK")
+            return False
+        back = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
+        if not _resp_ok(back, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(back) < 4:
+            return False
+        if back[3] != target:
+            log(f"  FAIL: read back {back[3]} != set {target}")
+            return False
+        log(f"  script {target} round-tripped")
+
+    # One past the max must NACK (out of range).
+    bad = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, GLYPH_SCRIPT_MAX + 1]))
+    log(f"glyph-script set {GLYPH_SCRIPT_MAX + 1} (out of range) -> {bad!r}")
+    if not _resp_ok(bad, CMD_GLYPH_SCRIPT, log, expect_status=NACK):
+        return False
+
+    restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, original]))
+    return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
+
+
 def test_os_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     """SET_OS (cmd 29, protocol v7+) get/set round-trip + invalid NACK.
 
@@ -1198,6 +1238,7 @@ TESTS = [
     {"name": "idle style round-trip (v4)",      "fn": test_idle_style_round_trip, "min_protocol": 4},
     {"name": "OS round-trip (v7)",              "fn": test_os_round_trip, "min_protocol": 7},
     {"name": "glyph script round-trip (v9)",    "fn": test_glyph_script_round_trip, "min_protocol": 9},
+    {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
