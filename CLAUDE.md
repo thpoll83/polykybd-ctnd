@@ -127,6 +127,13 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     (most disruptive) and is gated `min_protocol: 6`, so a pre-v6 board SKIPs it. The
     read-only **`font-pack version block (v6)`** test just validates the GET_ID block shape.
     `_build_empty_fontpack()` is byte-identical to PolyKybdHost `hid_fontpack.build_empty_pack()`.
+  - The **`glyph script round-trip (v9)`** test (`test_glyph_script_round_trip`) mirrors
+    the idle-style round-trip for HID cmd 30 (`GLYPH_SCRIPT`): query `0xFF` → set the
+    other valid script → read back → invalid `0xFE` NACK → restore. Gated `min_protocol: 9`,
+    so a pre-v9 board SKIPs it. Pack-agnostic (selecting Tengwar with no `fantasy` bundle
+    just falls back to Latin on the keycaps, but the get/set state round-trips regardless),
+    and non-side-effecting (restores the original script), so it sits with the other
+    mutate+restore round-trips, not among the disruptive upload tests.
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 
