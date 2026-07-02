@@ -798,7 +798,10 @@ def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> boo
         return False
 
     back = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
-    if not _resp_ok(back, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(back) < 4:
+    if not _resp_ok(back, CMD_GLYPH_SCRIPT, log, expect_status=ACK):
+        return False
+    if len(back) < 4:
+        log("  FAIL: glyph-script read-back reply has no value byte")
         return False
     if back[3] != target:
         log(f"  FAIL: read back {back[3]} != set {target}")
