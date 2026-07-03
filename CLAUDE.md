@@ -129,11 +129,19 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     `_build_empty_fontpack()` is byte-identical to PolyKybdHost `hid_fontpack.build_empty_pack()`.
   - The **`glyph script round-trip (v9)`** test (`test_glyph_script_round_trip`) mirrors
     the idle-style round-trip for HID cmd 30 (`GLYPH_SCRIPT`): query `0xFF` → set the
-    other valid script → read back → invalid `0xFE` NACK → restore. Gated `min_protocol: 9`,
+    other always-present script → read back → restore. Gated `min_protocol: 9`,
     so a pre-v9 board SKIPs it. Pack-agnostic (selecting Tengwar with no `fantasy` bundle
     just falls back to Latin on the keycaps, but the get/set state round-trips regardless),
     and non-side-effecting (restores the original script), so it sits with the other
-    mutate+restore round-trips, not among the disruptive upload tests.
+    mutate+restore round-trips, not among the disruptive upload tests. The companion
+    **`glyph script expansion (v10)`** test (`test_glyph_script_expansion`, `min_protocol: 10`)
+    covers the v10 **open-ended index**: it round-trips known scripts RUNES(2), IBMVGA(6)
+    and the max BRAILLE(10), then sets a deliberately-unknown high index (200) and asserts
+    it is **ACCEPTED + stored verbatim** (a pre-v10 board would NACK it) — that graceful
+    acceptance is what decouples "add a font face" from the protocol version — then restores.
+    Same pack-agnostic, mutate+restore shape; a pre-v10 board SKIPs it. `GLYPH_SCRIPT_MAX`
+    (=10) tracks the highest *known* `poly_glyph_script`; higher indices are valid on the
+    wire and just render the normal legend.
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 

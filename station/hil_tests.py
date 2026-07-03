@@ -77,7 +77,8 @@ CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
 CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7+)
-CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (standard/tengwar, protocol v9+)
+CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (v9+ tengwar; v10 adds 9 more scripts)
+GLYPH_SCRIPT_MAX            = 10  # highest valid poly_glyph_script value (BRAILLE) as of protocol v10
 POLY_OS_COUNT               = 8   # enum poly_os values 0..7 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS-reserved/LINUX_GNOME/LINUX_KDE); firmware SET_OS accepts arg < POLY_OS_COUNT
 # Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
 # firmware update, reused per-bundle). Reply status byte is reply[2] ('.'/'!'/'~').
@@ -772,14 +773,15 @@ def test_idle_style_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
 
 
 def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """GLYPH_SCRIPT (cmd 30, protocol v9+) get/set round-trip + invalid NACK.
+    """GLYPH_SCRIPT (cmd 30, protocol v9+) get/set round-trip.
 
     Reads the current script (query byte 0xFF), sets TENGWAR (1) and reads it
-    back, then restores the original value. An out-of-range script (0xFE, not the
-    0xFF query sentinel) must NACK. The write is deferred to the EEPROM flush, so
-    the live state is what we read back here. Selecting a script does NOT require
-    the fantasy font-pack bundle to be present — the firmware just falls back to
-    Latin legends when a glyph is missing — so this round-trip is pack-agnostic.
+    back, then restores the original value. The write is deferred to the EEPROM
+    flush, so the live state is what we read back here. Selecting a script does
+    NOT require the fantasy font-pack bundle to be present — the firmware just
+    falls back to Latin legends when a glyph is missing — so this round-trip is
+    pack-agnostic. (No invalid-index NACK check here: from v10 the firmware
+    accepts any index and degrades gracefully — see test_glyph_script_expansion.)
     """
     cur = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
     log(f"glyph-script query -> {cur!r}")
@@ -791,7 +793,7 @@ def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> boo
     original = cur[3]
     log(f"  current glyph script = {original}")
 
-    target = 1 if original != 1 else 0   # flip to the other valid script
+    target = 1 if original != 1 else 0   # flip to the other always-present script
     set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, target]))
     log(f"glyph-script set {target} -> {set_resp!r}")
     if not _resp_ok(set_resp, CMD_GLYPH_SCRIPT, log, expect_status=ACK):
@@ -807,12 +809,46 @@ def test_glyph_script_round_trip(raw: RawHID, log: Callable[[str], None]) -> boo
         log(f"  FAIL: read back {back[3]} != set {target}")
         return False
 
-    bad = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFE]))
-    log(f"glyph-script set 0xFE (invalid) -> {bad!r}")
-    if not _resp_ok(bad, CMD_GLYPH_SCRIPT, log, expect_status=NACK):
-        return False
-
     # Restore the original script so the rig is left as it was found.
+    restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, original]))
+    return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
+
+
+def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Protocol v10 open-ended glyph-script index (cmd 30).
+
+    v10 turns the glyph script into an OPEN-ENDED INDEX: it added 9 scripts
+    (runes, Aurebesh, SGA, Cirth, IBM VGA, C64, Amiga, APL, Braille; values 2..10)
+    AND made the firmware accept ANY index 0..0xFE — one it can't render just falls
+    back to the normal legend instead of NACKing, so new font faces never need a
+    protocol bump. This walks a few known scripts (incl. the max BRAILLE=10), then
+    sets a deliberately-unknown high index (200) and asserts it is ACCEPTED and
+    stored verbatim (a pre-v10 firmware would NACK here) — that acceptance is the
+    whole point of the decoupling. Restores the original. Pack-agnostic.
+    """
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
+    if not _resp_ok(cur, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(cur) < 4:
+        log("  FAIL: could not read current glyph script")
+        return False
+    original = cur[3]
+
+    # Known scripts RUNES(2), IBM VGA(6), BRAILLE(10) round-trip exactly.
+    # Then an UNKNOWN index (200) must also be accepted + stored (open-ended).
+    for target in (2, 6, GLYPH_SCRIPT_MAX, 200):
+        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, target]))
+        note = " (unknown index -> should ACK + degrade to normal)" if target > GLYPH_SCRIPT_MAX else ""
+        log(f"glyph-script set {target}{note} -> {set_resp!r}")
+        if not _resp_ok(set_resp, CMD_GLYPH_SCRIPT, log, expect_status=ACK):
+            log(f"  FAIL: set script {target} did not ACK (open-ended accept expected)")
+            return False
+        back = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
+        if not _resp_ok(back, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(back) < 4:
+            return False
+        if back[3] != target:
+            log(f"  FAIL: read back {back[3]} != set {target}")
+            return False
+        log(f"  script {target} round-tripped")
+
     restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, original]))
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
 
@@ -1198,6 +1234,7 @@ TESTS = [
     {"name": "idle style round-trip (v4)",      "fn": test_idle_style_round_trip, "min_protocol": 4},
     {"name": "OS round-trip (v7)",              "fn": test_os_round_trip, "min_protocol": 7},
     {"name": "glyph script round-trip (v9)",    "fn": test_glyph_script_round_trip, "min_protocol": 9},
+    {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
