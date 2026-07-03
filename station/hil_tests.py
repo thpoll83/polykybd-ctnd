@@ -108,7 +108,7 @@ MAX_LAYERS           = 14    # DYNAMIC_KEYMAP_LAYER_COUNT (split72/config.h)
 DISPLAY_OVERLAYS_BIT = 0x01  # overlay_flag DISPLAY_OVERLAYS (base/com.h)
 KC_A                 = 0x04  # QMK keycode for 'A'; A..Z = 0x04..0x1D
 NUM_SEGMENTS         = 6     # NUM_SEGMENTS_PER_OVERLAY
-PLAIN_SEG_BYTES      = 59    # data bytes per plain overlay report (64 - 5 header)
+PLAIN_SEG_BYTES      = 60    # data bytes per plain overlay report (64 - 4 header, protocol 11)
 OVERLAY_BYTES        = 360   # NUM_SEGMENTS_PER_OVERLAY * BYTES_PER_SEGMENT
 COMPRESSED_TEST_KEYS = 8     # KC_A..KC_H — exercise the core1 path repeatedly
 
@@ -998,7 +998,10 @@ def test_plain_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str], None
     """
     blank = bytes(PLAIN_SEG_BYTES)
     reports = [
-        bytes([POLY_CHANNEL, CMD_SEND_OVERLAY, KC_A, 0x00, seg]) + blank
+        # Protocol 11: header is [channel, cmd, keycode, (segment<<4)|modifier];
+        # modifier 0 here, so the packed byte is just seg<<4. The 4-byte header
+        # leaves a full 60-byte segment fitting the 64-byte report.
+        bytes([POLY_CHANNEL, CMD_SEND_OVERLAY, KC_A, (seg << 4) | 0x00]) + blank
         for seg in range(NUM_SEGMENTS)
     ]
     raw.write_reports(reports)
@@ -1238,7 +1241,7 @@ TESTS = [
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
-    {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive},
+    {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive, "min_protocol": 11},
     {"name": "compressed overlay keeps master alive (core1)", "fn": test_compressed_overlay_keeps_master_alive},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
     # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
