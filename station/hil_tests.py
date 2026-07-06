@@ -86,6 +86,11 @@ CMD_FONTPACK_BEGIN          = 0x50  # data[2..5]=pack_size, [6..9]=pack_crc32, [
 CMD_FONTPACK_CHUNK          = 0x51  # data[2..5]=offset, [6..]=56 bytes
 CMD_FONTPACK_COMMIT         = 0x52  # verify staged CRC + reload (no reboot); reply[3..4]=content_version
 FONTPACK_CHUNK_SIZE         = 56    # payload bytes/chunk (matches firmware FW_UP_CHUNK_SIZE)
+# Doom easter egg pseudo bundles (same BEGIN/CHUNK/COMMIT transport, routed to the
+# game-data / engine-pack resource slots). Lockstep with qmk base/fw_staging.h
+# FONTPACK_BUNDLE_DOOMWAD/_DOOMPACK and PolyKybdHost hid_fontpack.py.
+DOOMWAD_BUNDLE_ID           = 0x7F
+DOOMPACK_BUNDLE_ID          = 0x7E
 
 # VIA "reset dynamic keymap" report (bare command id, NOT a 'P' command — see
 # test_runner.VIA_DYNAMIC_KEYMAP_RESET). data[0]==0x06 -> legacy_command_kb ->
@@ -1126,6 +1131,91 @@ def _build_empty_fontpack() -> bytes:
     return struct.pack("<4sHHIIIIII", b"PlyF", 1, 0, 0, 0, 32, 32, body_crc, 0)
 
 
+def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
+                     payload: bytes, bundle_id: int) -> bytes | None:
+    """BEGIN/CHUNK/COMMIT `payload` to one doom pseudo-bundle slot; returns the raw
+    COMMIT reply (the caller checks ACK vs NACK) or None on a transport failure.
+    A BEGIN NACK (firmware without the doom slots) is returned as-is — the caller's
+    xfail gate tolerates it until the doom firmware is deployed."""
+    import binascii, struct
+    crc = binascii.crc32(payload) & 0xFFFFFFFF
+    begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
+    ready = False
+    for attempt in range(20):
+        reply = raw.send(begin, timeout_ms=15000)
+        if reply and len(reply) >= 3 and reply[2] == ord('.'):
+            ready = True
+            break
+        if reply and len(reply) >= 3 and reply[2] == ord('~'):
+            log(f"  BEGIN: erasing doom slot 0x{bundle_id:02x}... (attempt {attempt + 1})")
+            time.sleep(0.3)
+            continue
+        if reply and len(reply) >= 3 and reply[2] == ord('!'):
+            log(f"  BEGIN NACK for pseudo bundle 0x{bundle_id:02x} — firmware without the doom slots?")
+            return reply
+        log(f"  BEGIN: no/short reply {reply!r} (attempt {attempt + 1}) — retrying")
+        time.sleep(0.3)
+    if not ready:
+        log("  FAIL: FONTPACK_BEGIN never became ready")
+        return None
+    for off in range(0, len(payload), FONTPACK_CHUNK_SIZE):
+        part = payload[off:off + FONTPACK_CHUNK_SIZE]
+        padded = part + b"\xff" * (FONTPACK_CHUNK_SIZE - len(part))
+        chunk = bytes([POLY_CHANNEL, CMD_FONTPACK_CHUNK]) + struct.pack("<I", off) + padded
+        reply = raw.send(chunk, timeout_ms=8000)
+        if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+            _fontpack_abort(raw)
+            log(f"  FAIL: FONTPACK_CHUNK @ {off} not ACKed: {reply!r}")
+            return None
+    return raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
+
+
+def test_doomwad_slot_roundtrip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Flash a tiny stub WHX (valid 'IWHX' magic, 2 chunks) to the DOOMWAD pseudo
+    bundle (0x7F) and assert COMMIT ACKs — the COMMIT success gate re-reads the
+    just-written slot and checks the WHX magic in place, so a '.' proves the whole
+    routing chain: pseudo-bundle -> FW_TARGET_DOOMWAD -> the game-data slot at the
+    top of the resource region, on both halves (the BEGIN bridges the slave).
+
+    Side effect: overwrites the rig's game-data slot with the stub (harmless — the
+    rig never starts the game; a real install rewrites the slot). On firmware
+    without the doom slots the BEGIN NACKs -> FAIL, tolerated by the xfail gate."""
+    stub = b"IWHX" + bytes(range(60))   # 64 bytes -> exercises a 2-chunk transfer
+    reply = _doom_slot_flash(raw, log, stub, DOOMWAD_BUNDLE_ID)
+    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+        log(f"  FAIL: DOOMWAD COMMIT rejected (in-place WHX magic gate): {reply!r}")
+        return False
+    log("  COMMIT ok — WHX stub accepted into the game-data slot on both halves")
+    return True
+
+
+def test_doompack_commit_magic_gate(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """The DOOMPACK (0x7E) COMMIT gate is an O(1) in-place header check: 'PlyX'
+    magic + image_size fits the slot. Assert both directions: a bad-magic image
+    must NACK, then a minimal valid PlyX header (image_size 0) must ACK — so the
+    slot is left in a well-formed (empty) state, which the game-entry loader
+    refuses gracefully (fire-demo fallback), never a crash."""
+    import struct
+    bad = b"NOPE" + b"\x00" * 60
+    reply = _doom_slot_flash(raw, log, bad, DOOMPACK_BUNDLE_ID)
+    if reply is None:
+        return False
+    if len(reply) >= 3 and reply[2] == ord('.'):
+        log("  FAIL: COMMIT ACKed a non-PlyX image — the magic gate is not checking")
+        return False
+    log(f"  bad-magic image rejected as expected ({reply!r})")
+
+    # 64-byte header only: magic + abi 0 + image_size 0 + zeroed rest — passes the
+    # COMMIT header sanity; the loader's full CRC/ram-pairing check runs at game entry.
+    good = struct.pack("<4sII", b"PlyX", 0, 0) + b"\x00" * 52
+    reply = _doom_slot_flash(raw, log, good, DOOMPACK_BUNDLE_ID)
+    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+        log(f"  FAIL: minimal valid PlyX header rejected: {reply!r}")
+        return False
+    log("  COMMIT ok — engine-pack slot header gate passes valid, rejects invalid")
+    return True
+
+
 def _fontpack_abort(raw: RawHID) -> None:
     """Best-effort abort: a COMMIT clears fw_up mode on both halves regardless of
     outcome, so a partial transfer can't leave the keyboard stuck mid-flash."""
@@ -1249,4 +1339,13 @@ TESTS = [
     # LAST: it empties the 'symbol' bundle (a host re-flashes it on the next connect).
     # v6+ only; a pre-v6 board SKIPs it (no font-pack flash transport).
     {"name": "font-pack wipe round-trip (v6 flash)", "fn": test_fontpack_wipe_roundtrip, "min_protocol": 6},
+    # Doom easter egg resource slots (pseudo bundles 0x7F/0x7E over the same flash
+    # transport). Not visible in GET_ID (no protocol bump — the transport is the
+    # v6 fontpack flow), so gate with xfail instead of min_protocol: on pre-doom
+    # firmware the BEGIN NACKs -> XFAIL; once the doom firmware is flashed they
+    # XPASS loudly -> remove the markers then.
+    {"name": "doom game-data slot round-trip (WHX stub)", "fn": test_doomwad_slot_roundtrip,
+     "min_protocol": 6, "xfail": "needs doom-slot firmware (qmk PR #122)"},
+    {"name": "doom engine-pack slot magic gate", "fn": test_doompack_commit_magic_gate,
+     "min_protocol": 6, "xfail": "needs doom-slot firmware (qmk PR #122)"},
 ]
