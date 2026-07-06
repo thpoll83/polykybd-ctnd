@@ -1135,8 +1135,9 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
                      payload: bytes, bundle_id: int) -> bytes | None:
     """BEGIN/CHUNK/COMMIT `payload` to one doom pseudo-bundle slot; returns the raw
     COMMIT reply (the caller checks ACK vs NACK) or None on a transport failure.
-    A BEGIN NACK (firmware without the doom slots) is returned as-is — the caller's
-    xfail gate tolerates it until the doom firmware is deployed."""
+    A BEGIN NACK (firmware without the doom slots) is returned as-is so the caller
+    reports a clear failure — the shipping HIL firmware always builds the slots
+    (qmk-test.yml POLYKYBD_DOOM_PACK=yes), so a NACK now means the routing broke."""
     import binascii, struct
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
@@ -1179,7 +1180,8 @@ def test_doomwad_slot_roundtrip(raw: RawHID, log: Callable[[str], None]) -> bool
 
     Side effect: overwrites the rig's game-data slot with the stub (harmless — the
     rig never starts the game; a real install rewrites the slot). On firmware
-    without the doom slots the BEGIN NACKs -> FAIL, tolerated by the xfail gate."""
+    without the doom slots the BEGIN NACKs -> FAIL (the shipping HIL image always
+    has the slots, so a NACK is a real routing regression, not tolerated any more)."""
     stub = b"IWHX" + bytes(range(60))   # 64 bytes -> exercises a 2-chunk transfer
     reply = _doom_slot_flash(raw, log, stub, DOOMWAD_BUNDLE_ID)
     if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
@@ -1341,11 +1343,12 @@ TESTS = [
     {"name": "font-pack wipe round-trip (v6 flash)", "fn": test_fontpack_wipe_roundtrip, "min_protocol": 6},
     # Doom easter egg resource slots (pseudo bundles 0x7F/0x7E over the same flash
     # transport). Not visible in GET_ID (no protocol bump — the transport is the
-    # v6 fontpack flow), so gate with xfail instead of min_protocol: on pre-doom
-    # firmware the BEGIN NACKs -> XFAIL; once the doom firmware is flashed they
-    # XPASS loudly -> remove the markers then.
+    # v6 fontpack flow). The doom firmware is now the shipping shape: qmk-test.yml
+    # builds the HIL images with POLYKYBD_DOOM_PACK=yes, so every HIL run has the
+    # slots — the xfail markers were removed once the rig XPASSed them (qmk #122).
+    # These now hard-PASS on doom firmware and hard-FAIL if the slot routing breaks.
     {"name": "doom game-data slot round-trip (WHX stub)", "fn": test_doomwad_slot_roundtrip,
-     "min_protocol": 6, "xfail": "needs doom-slot firmware (qmk PR #122)"},
+     "min_protocol": 6},
     {"name": "doom engine-pack slot magic gate", "fn": test_doompack_commit_magic_gate,
-     "min_protocol": 6, "xfail": "needs doom-slot firmware (qmk PR #122)"},
+     "min_protocol": 6},
 ]
