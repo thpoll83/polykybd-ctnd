@@ -285,12 +285,17 @@ class PerfRunner:
             self._runner.status = "testing"
             raw = self._runner.raw
             profiler = Profiler(raw, self.log)
-            if not profiler.available():
+            # Fail fast, and precisely. A NACK means the firmware has no profiler;
+            # a missing reply means the device is not answering at all. Collapsing
+            # the second into the first would send someone off rebuilding firmware
+            # that was fine, so let each surface its own message.
+            try:
+                profiler.reset()
+            except ProfilerUnavailable as exc:
                 raise ProfilerUnavailable(
-                    "the flashed firmware NACKs the profiler command (32). Build the "
-                    "HIL images with `-e POLYKYBD_LOOP_PROFILE=yes` — a normal build "
-                    "compiles the profiler out entirely."
-                )
+                    f"{exc}. Build the HIL images with `-e POLYKYBD_LOOP_PROFILE=yes` "
+                    "— a normal build compiles the profiler out entirely."
+                ) from exc
 
             device = self._device_info()
             if device:
