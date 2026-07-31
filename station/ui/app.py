@@ -867,6 +867,52 @@ def on_run_tests(data):
     threading.Thread(target=_do, daemon=True).start()
 
 
+@socketio.on("run_perf")
+def on_run_perf(data):
+    """Measure firmware performance from the touch UI.
+
+    The selected images must be a **profiling** pair (built with
+    ``-e POLYKYBD_LOOP_PROFILE=yes``); a normal build NACKs the profiler command
+    and the run reports that instead of guessing. Same flash+settle path as a
+    HIL run, so it is safe to launch from the kiosk."""
+    left_uf2  = data.get("left_uf2")
+    right_uf2 = data.get("right_uf2")
+    if not left_uf2 or not right_uf2:
+        return
+
+    left_path  = str(Path(FIRMWARE_DIR) / left_uf2)
+    right_path = str(Path(FIRMWARE_DIR) / right_uf2)
+
+    # Same busy marker as a test run, so the self-update timer defers a
+    # pull+restart until the measurement is finished rather than killing it.
+    set_status("testing")
+
+    def _do():
+        from station.perf_runner import (
+            PerfRunner, compare_to_baseline, format_markdown, load_baseline,
+        )
+        from station.test_runner import _derive_label
+        label = _derive_label(left_path) or "split72"
+        runner = PerfRunner(log=emit_log)
+        try:
+            report = runner.run(left_path, right_path, label=label)
+            baseline = load_baseline(
+                str(Path(__file__).resolve().parents[2] / "perf" / "baselines" / f"{label}.json"),
+                log=emit_log)
+            comparison = compare_to_baseline(report, baseline) if baseline else []
+            for line in format_markdown(report, comparison).splitlines():
+                emit_log(f"[perf] {line}")
+            socketio.emit("perf_result", {"report": report, "comparison": comparison})
+            set_status("idle")
+        except Exception as exc:
+            emit_log(f"[ui] perf error: {exc}")
+            set_status("error")
+        finally:
+            runner.cleanup()
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 def _on_sigterm(signum, frame):
     try:
         from station.flash import FlashController

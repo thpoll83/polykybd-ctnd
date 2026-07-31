@@ -43,6 +43,10 @@ station/config.py       GPIO pin numbers, uhubctl hub/port config, QMK VID/PID
 station/flash.py        FlashController class — power off port, assert BOOTSEL, copy UF2
 station/hid.py          HIDConsole (reads QMK debug log) + RawHID (sends commands)
 station/test_runner.py  TestRunner class + __main__ CLI entry point
+station/perf.py         Firmware profiler client (HID cmd 32) + perf workloads
+station/perf_runner.py  PerfRunner + __main__ CLI — flash, measure, compare, report
+perf/baselines/         Committed perf baselines, one JSON per board
+tests/perf_test.py      Offline tests for the perf harness (no hardware needed)
 station/ui/app.py       Flask + Flask-SocketIO server; emits log/status events via WebSocket
 station/ui/templates/   index.html — 1024×600 dark touch UI
 station/ui/static/      style.css, app.js
@@ -208,6 +212,63 @@ The runner reports each test as its own line: a `[test] PASS/FAIL: <name>` log l
 — under GitHub Actions — a ✅/❌ bullet per test in the job **Step Summary** and a
 `::error::` annotation for each failure, so it is obvious from the run page which test
 failed without scrolling the raw log.
+
+## Performance measurement (`station/perf.py`, `station/perf_runner.py`)
+
+The rig does more than pass/fail HIL testing: it can **measure firmware
+performance automatically**, replacing the old loop of "deploy a build by hand,
+poke the keyboard, paste the `LoopProf:` block from the console".
+
+- **What drives it**: the firmware's main-loop profiler
+  (`qmk_firmware/keyboards/polykybd/profiling/`, built with
+  `-e POLYKYBD_LOOP_PROFILE=yes`) plus its **on-demand control command, HID cmd
+  32** (`RESET` / `READ` / `LOG`). Every measurement is therefore a *bounded
+  window*: RESET → run one workload → READ the counters back as binary. ⚠️ The
+  periodic console block alone cannot do this — its counters are cumulative from
+  boot and `worst` is an all-time maximum, so it can never attribute a number to
+  a specific workload.
+- **⚠️ cmd 32 NACKs on a normal build, by design.** The whole `case 32` is inside
+  `#ifdef POLYKYBD_LOOP_PROFILE`. That NACK is the capability signal — it is how
+  the harness distinguishes "no profiler in this firmware" from a real answer
+  instead of reporting a page of zeros. If a perf run says *"not a
+  POLYKYBD_LOOP_PROFILE build"*, the wrong images were flashed.
+- **Workloads** (each in its own profiler window): a quiet-loop **idle baseline**
+  (the control — without it a burst number has no reference), an **overlay burst**
+  in both flavours (plain cmd 10, and RLE/core1 cmd 16), and a host-side **HID
+  round-trip latency** burst (p50/p95/p99/max). Boot-to-first-stable-HID comes
+  from the runner, which owns the flash timing.
+- **Run it**: `python -m station.perf_runner --left …_perf_hil_left.uf2 --right
+  …_perf_hil_right.uf2 --json perf.json --markdown perf.md`. `--no-flash`
+  measures whatever is already on the rig (handy when iterating on the harness).
+  The touch UI has a **Measure Perf** button (`run_perf` → `PerfRunner`) that
+  takes the same selected firmware pair as **Run Tests**.
+- **CI: opt-in, report-only.** The `Performance measurement (split72)` job in
+  qmk's `qmk-test.yml` runs on the `perf` PR label, `[perf]` in a commit message,
+  or a manual `workflow_dispatch`. It posts a markdown table to the job summary +
+  a PR comment and uploads `perf-report.json`. It **never fails on a regression** —
+  these are wall-clock numbers on shared hardware and a flaky red check is one
+  people learn to ignore; only a *measurement* failure (wrong build, dead device)
+  exits non-zero. It is ordered `needs: [build-perf, hil-test]` with `always()`,
+  so the two rig jobs can't interleave their flashes but a red HIL suite still
+  gets a perf number (often exactly what explains a timing-related HIL failure).
+- **Baselines** live in `perf/baselines/<label>.json`, committed. ⚠️ There is
+  **deliberately no automatic baseline update** — a self-rewriting baseline
+  ratchets a slow regression in silently. Move it by committing a run's JSON (see
+  `perf/baselines/README.md`). `--update-baseline` exists for local iteration, but
+  CI force-syncs the rig checkout to `origin/main` before every run, so anything
+  written there is discarded next run.
+- **Reuse, don't duplicate, the readiness gates.** `PerfRunner` composes
+  `TestRunner` and calls its (now public) `flash_halves()`, `wait_for_master_ready()`
+  and `settle_master()`. The sustained-settle logic is subtle and load-bearing (see
+  the stale-rig warning above); a perf run that skipped it would measure the
+  master's boot-time busy window instead of the workload.
+- **Offline tests**: `tests/perf_test.py` (`python -m unittest discover -s tests -p
+  "*_test.py"`, 23 tests, no hardware). Its `FakeProfilerDevice` re-implements the
+  firmware's cmd-32 replies byte for byte, so it is a genuine **contract test of
+  the wire format** — if the C encoder and the Python decoder ever disagree on
+  layout/ordering/endianness it fails there rather than producing plausible
+  nonsense on the rig. `LOOP_PROFILE_SNAPSHOT_VERSION` (firmware) and
+  `SNAPSHOT_VERSION` (`perf.py`) must move together; a mismatch is refused loudly.
 
 ## Runner troubleshooting
 

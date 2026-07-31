@@ -108,6 +108,17 @@ function runTests() {
   socket.emit('run_tests', { left_uf2: left, right_uf2: right });
 }
 
+/* Performance measurement. Needs a PROFILING firmware pair (built with
+   -e POLYKYBD_LOOP_PROFILE=yes); on a normal build the profiler command NACKs
+   and the run says so rather than reporting zeros. */
+function runPerf() {
+  const left  = document.getElementById('left-fw').value;
+  const right = document.getElementById('right-fw').value;
+  if (!left || !right) { appendLog('[ui] select both left and right firmware files first'); return; }
+  appendLog('[ui] running performance measurement (needs a POLYKYBD_LOOP_PROFILE build)…');
+  socket.emit('run_perf', { left_uf2: left, right_uf2: right });
+}
+
 function runDiagnostics() {
   appendLog('[ui] running runner diagnostics…');
   socket.emit('run_diagnostics');
