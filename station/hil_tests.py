@@ -1128,7 +1128,10 @@ def _build_empty_fontpack() -> bytes:
     body_crc = binascii.crc32(b"") & 0xFFFFFFFF
     # <4sHHIIIIII: magic, abi, flags, content_version, font_count, font_table_off,
     #              total_size, crc32, reserved
-    return struct.pack("<4sHHIIIIII", b"PlyF", 1, 0, 0, 0, 32, 32, body_crc, 0)
+    # abi=2: column-native (OLED-page) glyph bitmaps — the per-glyph byte length
+    # formula changed (w*((h+7)//8) vs the old row-major (w*h+7)//8), so ABI-1
+    # row packs are structurally incompatible with ABI-2 firmware and vice versa.
+    return struct.pack("<4sHHIIIIII", b"PlyF", 2, 0, 0, 0, 32, 32, body_crc, 0)
 
 
 def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
