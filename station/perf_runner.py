@@ -232,6 +232,7 @@ class PerfRunner:
         self._runner = TestRunner(log=log)
         self._console = HIDConsole()
         self._console_lines = []
+        self._console_pending = ""   # partial line carried between HID reads
 
     def _device_info(self) -> dict:
         try:
@@ -244,16 +245,33 @@ class PerfRunner:
         identity = bytes(resp[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
         return parse_device_caps(identity) or {}
 
+    def _keep_console_line(self, line: str) -> None:
+        """Retain one *complete* console line if it is one we report."""
+        line = line.rstrip()
+        if line.startswith(CONSOLE_KEEP_PREFIXES):
+            self._console_lines.append(line)
+            del self._console_lines[:-CONSOLE_TAIL_MAX]
+
     def _start_console(self) -> bool:
         """Best-effort HID console capture (needs CONSOLE_ENABLE in the firmware).
 
         Only the profiler/split-link lines are retained: the console also carries
-        boot chatter and per-key traffic, which would bury the report."""
+        boot chatter and per-key traffic, which would bury the report.
+
+        ⚠️ A HID console read returns whatever fitted in one report, **not a whole
+        line** — a long `LoopProf:` line arrives split across several reads. So
+        reassemble across chunks and classify only completed lines. Matching the
+        prefix against raw chunks instead drops every continuation fragment and
+        leaves the kept lines truncated mid-word, which is exactly what the first
+        rig run produced (`ovltot wall=0ms b`)."""
         def sink(msg: str) -> None:
-            for line in msg.splitlines():
-                if line.startswith(CONSOLE_KEEP_PREFIXES):
-                    self._console_lines.append(line.rstrip())
-                    del self._console_lines[:-CONSOLE_TAIL_MAX]
+            buf = self._console_pending + msg
+            parts = buf.split("\n")
+            # The trailing element is an unterminated fragment; hold it for the
+            # next read rather than treating it as a line.
+            self._console_pending = parts.pop()
+            for line in parts:
+                self._keep_console_line(line)
             self.log(f"[qmk] {msg}")
 
         try:
@@ -262,6 +280,16 @@ class PerfRunner:
         except Exception as exc:
             self.log(f"[perf] HID console unavailable (continuing without it): {exc}")
             return False
+
+    def _flush_console(self) -> None:
+        """Classify any trailing fragment the firmware never newline-terminated.
+
+        The final summary line can still be sitting in the buffer when the reader
+        stops, so without this the most interesting line is the one that goes
+        missing."""
+        pending, self._console_pending = self._console_pending, ""
+        if pending:
+            self._keep_console_line(pending)
 
     def run(self, left_uf2: str = None, right_uf2: str = None, *,
             label: str = "", keys: int = 8, latency_n: int = 100,
@@ -336,7 +364,8 @@ class PerfRunner:
             # Leave a human-readable block in the captured console log too, so the
             # raw CI log tells the same story as the JSON.
             profiler.log_to_console()
-            time.sleep(0.5)  # let the console reader drain the block
+            time.sleep(1.0)  # let the console reader drain the whole 4-line block
+            self._flush_console()
 
             report["console_tail"] = list(self._console_lines)
             self._runner.status = "idle"
