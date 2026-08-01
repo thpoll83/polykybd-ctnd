@@ -159,6 +159,16 @@ def format_markdown(report: dict, comparison: list = None,
                      f"`P{dev.get('protocol', '?')}`")
         lines.append("")
 
+    # The readiness gates log and proceed on timeout, so a run *can* be taken
+    # inside the master's boot-time busy window. Say so loudly — otherwise those
+    # numbers read as clean and could be committed as a baseline.
+    timing = report.get("timing", {})
+    if timing.get("ready_gate_ok") is False or timing.get("settled") is False:
+        lines += ["> ⚠️ **A readiness gate timed out during this run.** The master may "
+                  "still have been in its boot-time busy window, so these numbers can "
+                  "reflect the boot rather than the workload. Re-run before drawing a "
+                  "conclusion, and do not record this run as a baseline.", ""]
+
     regressions = [c for c in (comparison or []) if c["verdict"] == "regression"]
     if comparison:
         if regressions:
@@ -268,18 +278,23 @@ class PerfRunner:
                 t_boot = time.perf_counter()
                 time.sleep(3)
                 console_started = self._start_console()
-                self._runner.wait_for_master_ready()
+                timing["ready_gate_ok"] = self._runner.wait_for_master_ready()
                 timing["boot_to_ready_s"] = round(time.perf_counter() - t_boot, 1)
             else:
                 self.log("[perf] --no-flash: measuring the firmware already on the rig")
                 console_started = self._start_console()
-                self._runner.wait_for_master_ready()
+                timing["ready_gate_ok"] = self._runner.wait_for_master_ready()
 
             # Same sustained-responsiveness gate the HIL suite uses. Without it the
             # first workload lands inside the master's boot-time busy window and
             # measures the boot, not the workload.
+            #
+            # Both gates are best-effort: they log and proceed on timeout, so a run
+            # can still be taken inside that busy window. Record their verdicts —
+            # otherwise a polluted run is indistinguishable from a clean one in the
+            # report, and could be committed as a baseline.
             t_settle = time.perf_counter()
-            self._runner.settle_master()
+            timing["settled"] = self._runner.settle_master()
             timing["settle_s"] = round(time.perf_counter() - t_settle, 1)
 
             self._runner.status = "testing"
@@ -329,7 +344,7 @@ class PerfRunner:
         finally:
             if console_started:
                 self._console.stop()
-            self._runner._flash.cleanup()
+            self._runner.cleanup()
 
     def cleanup(self) -> None:
         self._console.stop()
@@ -447,7 +462,11 @@ def main(argv=None) -> int:
                   f"({c['delta_pct']:+.1f}%)")
 
     if args.update_baseline:
-        os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
+        # `--baseline report.json` has no directory component, and makedirs("")
+        # raises — which would throw away a completed measurement at the last step.
+        parent = os.path.dirname(baseline_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(baseline_path, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, sort_keys=True)
         print(f"[perf] baseline updated: {baseline_path}")

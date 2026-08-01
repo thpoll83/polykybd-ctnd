@@ -723,18 +723,69 @@ def on_update_now(_data=None):
     threading.Thread(target=_do, daemon=True).start()
 
 
+def _selected_firmware(name) -> str | None:
+    """Resolve a UI-selected firmware filename to a real path inside FIRMWARE_DIR.
+
+    The name arrives in a Socket.IO payload, so it is untrusted input. Joining it
+    onto FIRMWARE_DIR directly would let an absolute path or a ``..`` component
+    escape the directory and have the flasher copy some *other* local file onto
+    the keyboard's bootloader drive. So accept a bare filename only, and require
+    it to resolve to an existing file sitting directly in FIRMWARE_DIR.
+
+    Returns the absolute path, or None if the selection is not acceptable.
+    """
+    if not isinstance(name, str) or not name or Path(name).name != name:
+        return None
+    root = Path(FIRMWARE_DIR).resolve()
+    path = (root / name).resolve()
+    if path.parent != root or not path.is_file():
+        return None
+    return str(path)
+
+
+# The rig drives exactly one keyboard pair, so the long-running device-owning
+# operations — a manual flash, a HIL run, a perf run — must not overlap. Two of
+# them at once would flash, reset and read HID on the same hardware
+# simultaneously and interleave their GPIO cleanup. `set_status()` alone does not
+# prevent that: nothing reads it as a gate. This single process-wide lock does.
+_RIG_LOCK = threading.Lock()
+
+
+def _run_exclusive(what: str, busy_status: str, body) -> bool:
+    """Run ``body()`` on a worker thread while holding the rig lock.
+
+    A second request while one is running is **rejected with a log line, not
+    queued** — on a touch UI a queued run would fire minutes later with the
+    operator long gone, and a double-tap would silently start two. The lock is
+    released in a ``finally`` inside the worker, so every path frees it,
+    exceptions included."""
+    if not _RIG_LOCK.acquire(blocking=False):
+        emit_log(f"[ui] rig busy — {what} ignored "
+                 "(a flash / test / perf run is already active)")
+        return False
+    set_status(busy_status)
+
+    def _wrapped():
+        try:
+            body()
+        finally:
+            _RIG_LOCK.release()
+
+    threading.Thread(target=_wrapped, daemon=True).start()
+    return True
+
+
 @socketio.on("flash")
 def on_flash(data):
+    if not isinstance(data, dict):
+        return
     side = data.get("side")
-    uf2  = data.get("uf2")
-    if side not in ("left", "right") or not uf2:
+    if side not in ("left", "right"):
         return
-    uf2_path = str(Path(FIRMWARE_DIR) / uf2)
-    if not os.path.exists(uf2_path):
-        emit_log(f"[ui] firmware not found: {uf2_path}")
+    uf2_path = _selected_firmware(data.get("uf2"))
+    if not uf2_path:
+        emit_log(f"[ui] firmware not found in {FIRMWARE_DIR}: {data.get('uf2')!r}")
         return
-
-    set_status(f"flashing-{side}")
 
     def _do():
         from station.flash import FlashController
@@ -749,7 +800,7 @@ def on_flash(data):
         finally:
             fc.cleanup()
 
-    threading.Thread(target=_do, daemon=True).start()
+    _run_exclusive(f"flash-{side}", f"flashing-{side}", _do)
 
 
 @socketio.on("usb_power")
@@ -839,17 +890,13 @@ def on_set_handedness(data):
 
 @socketio.on("run_tests")
 def on_run_tests(data):
-    left_uf2  = data.get("left_uf2")
-    right_uf2 = data.get("right_uf2")
-    if not left_uf2 or not right_uf2:
+    if not isinstance(data, dict):
         return
-
-    left_path  = str(Path(FIRMWARE_DIR) / left_uf2)
-    right_path = str(Path(FIRMWARE_DIR) / right_uf2)
-
-    # Mark busy so /status reports non-idle for the whole flash+test run — the
-    # self-update timer reads it to defer a pull+restart until the rig is idle.
-    set_status("testing")
+    left_path  = _selected_firmware(data.get("left_uf2"))
+    right_path = _selected_firmware(data.get("right_uf2"))
+    if not left_path or not right_path:
+        emit_log("[ui] select a valid left and right firmware file first")
+        return
 
     def _do():
         from station.test_runner import TestRunner
@@ -864,7 +911,9 @@ def on_run_tests(data):
         finally:
             runner.cleanup()
 
-    threading.Thread(target=_do, daemon=True).start()
+    # Busy status marks the whole flash+test run — the self-update timer reads
+    # it to defer a pull+restart until the rig is idle.
+    _run_exclusive("run_tests", "testing", _do)
 
 
 @socketio.on("run_perf")
@@ -875,17 +924,13 @@ def on_run_perf(data):
     ``-e POLYKYBD_LOOP_PROFILE=yes``); a normal build NACKs the profiler command
     and the run reports that instead of guessing. Same flash+settle path as a
     HIL run, so it is safe to launch from the kiosk."""
-    left_uf2  = data.get("left_uf2")
-    right_uf2 = data.get("right_uf2")
-    if not left_uf2 or not right_uf2:
+    if not isinstance(data, dict):
         return
-
-    left_path  = str(Path(FIRMWARE_DIR) / left_uf2)
-    right_path = str(Path(FIRMWARE_DIR) / right_uf2)
-
-    # Same busy marker as a test run, so the self-update timer defers a
-    # pull+restart until the measurement is finished rather than killing it.
-    set_status("testing")
+    left_path  = _selected_firmware(data.get("left_uf2"))
+    right_path = _selected_firmware(data.get("right_uf2"))
+    if not left_path or not right_path:
+        emit_log("[ui] select a valid left and right firmware file first")
+        return
 
     def _do():
         from station.perf_runner import (
@@ -910,7 +955,9 @@ def on_run_perf(data):
         finally:
             runner.cleanup()
 
-    threading.Thread(target=_do, daemon=True).start()
+    # Same busy marker as a test run, so the self-update timer defers a
+    # pull+restart until the measurement is finished rather than killing it.
+    _run_exclusive("run_perf", "testing", _do)
 
 
 def _on_sigterm(signum, frame):

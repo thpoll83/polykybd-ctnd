@@ -57,8 +57,12 @@ class FakeProfilerDevice:
     the harness uses to detect a non-profiling firmware.
     """
 
-    def __init__(self, profiling: bool = True):
+    def __init__(self, profiling: bool = True, drop_every: int = 0):
         self.profiling = profiling
+        # drop_every=N makes every Nth send_repeated exchange come back empty, so
+        # the miss-counting path is actually exercised rather than asserted to be
+        # zero against a fake that can never miss.
+        self.drop_every = drop_every
         self.reset_count = 0
         self.log_count = 0
         self.reports_written = []
@@ -87,7 +91,10 @@ class FakeProfilerDevice:
         self.reports_written.extend(reports)
 
     def send_repeated(self, data: bytes, count: int, timeout_ms: int = 1000, retries: int = 2):
-        responses = [self.send(data) for _ in range(count)]
+        responses = [
+            None if self.drop_every and (i + 1) % self.drop_every == 0 else self.send(data)
+            for i in range(count)
+        ]
         latencies = [3.0 + (i % 5) for i in range(count)]
         return responses, latencies, 0
 
@@ -178,6 +185,25 @@ class TestProfilerAvailability(unittest.TestCase):
         with self.assertRaises(perf.ProfilerUnavailable):
             prof.reset()
 
+    def test_no_reply_is_a_device_fault_not_a_missing_profiler(self):
+        """A dropped reply must NOT be reported as "not a profiling build".
+
+        Collapsing the two would send someone off rebuilding firmware that was
+        fine. A NACK is a capability answer; silence is a device fault."""
+        class _SilentDevice(FakeProfilerDevice):
+            def send(self, data, timeout_ms=3000, attempts=3):
+                return None
+
+        prof = perf.Profiler(_SilentDevice(), _quiet)
+        with self.assertRaisesRegex(RuntimeError, "not responding"):
+            prof.reset()
+        # ...and it must not be swallowed as ProfilerUnavailable.
+        with self.assertRaises(RuntimeError) as caught:
+            prof.read()
+        self.assertNotIsInstance(caught.exception, perf.ProfilerUnavailable)
+        # available() downgrades a fault to False (it is a probe), but logs it.
+        self.assertFalse(prof.available())
+
 
 class TestOverlayWorkloads(unittest.TestCase):
     def test_plain_burst_framing_is_protocol_11(self):
@@ -230,12 +256,20 @@ class TestLatencyStats(unittest.TestCase):
     def test_empty_sample_set(self):
         self.assertEqual(perf.percentiles([]), {})
 
-    def test_measure_hid_latency_counts_misses(self):
-        dev = FakeProfilerDevice()
-        out = perf.measure_hid_latency(dev, _quiet, n=10)
+    def test_measure_hid_latency_clean_run(self):
+        out = perf.measure_hid_latency(FakeProfilerDevice(), _quiet, n=10)
         self.assertEqual(out["sent"], 10)
         self.assertEqual(out["misses"], 0)
         self.assertEqual(out["n"], 10)
+
+    def test_measure_hid_latency_counts_misses(self):
+        """Dropped replies are counted and excluded from the percentile sample."""
+        dev = FakeProfilerDevice(drop_every=5)   # sends 5 and 10 come back empty
+        out = perf.measure_hid_latency(dev, _quiet, n=10)
+        self.assertEqual(out["sent"], 10)
+        self.assertEqual(out["misses"], 2)
+        # Percentiles are computed over the replies that arrived, not all sends.
+        self.assertEqual(out["n"], 8)
 
 
 class TestBaselineComparison(unittest.TestCase):
