@@ -1,0 +1,141 @@
+{
+  "console_tail": [
+    "LoopProf: iters=8192 ovl=0 worst=44ms(norm br=3ms rn=33ms)",
+    "  norm  <1=7543 1-2=618 2-5=30 5-10=0 10-20=0 20-50=1 50+=0",
+    "  ovl   <1=0 1-2=0 2-5=0 5-10=0 10-20=0 20-50=0 50+=0",
+    "  ovltot wall=0ms bridge=0ms render=0ms rest=0ms",
+    "LoopProf: iters=3329 ovl=8 worst=3ms(ovl br=2ms rn=0ms)",
+    "  norm  <1=2883 1-2=426 2-5=12 5-10=0 10-20=0 20-50=0 50+=0",
+    "  ovl   <1=0 1-2=7 2-5=1 5-10=0 10-20=0 20-50=0 50+=0",
+    "  ovltot wall=16ms bridge=2ms render=0ms rest=14ms"
+  ],
+  "device": {
+    "fw": "0.9.84",
+    "protocol": 11
+  },
+  "hid_latency": {
+    "max": 4.99,
+    "mean": 3.52,
+    "misses": 0,
+    "n": 100,
+    "p50": 3.91,
+    "p95": 4.01,
+    "p99": 4.12,
+    "sent": 100,
+    "transient_usb_errors": 0
+  },
+  "idle": {
+    "hist_norm": {
+      "1-2ms": 276,
+      "10-20ms": 0,
+      "2-5ms": 8,
+      "20-50ms": 0,
+      "5-10ms": 0,
+      "<1ms": 3149,
+      ">=50ms": 0
+    },
+    "hist_ovl": {
+      "1-2ms": 0,
+      "10-20ms": 0,
+      "2-5ms": 0,
+      "20-50ms": 0,
+      "5-10ms": 0,
+      "<1ms": 0,
+      ">=50ms": 0
+    },
+    "iters": 3347,
+    "iters_per_s": 1115.7,
+    "long_iters_ge_10ms": 0,
+    "ovl_bridge_ms": 0.0,
+    "ovl_iters": 0,
+    "ovl_render_ms": 0.0,
+    "ovl_rest_ms": 0.0,
+    "ovl_wall_ms": 0.0,
+    "window_s": 3.0,
+    "worst_bridge_ms": 0.0,
+    "worst_iter_ms": 3.48,
+    "worst_iter_was_overlay": false,
+    "worst_render_ms": 0.0
+  },
+  "label": "split72",
+  "overlay_compressed": {
+    "hist_norm": {
+      "1-2ms": 212,
+      "10-20ms": 0,
+      "2-5ms": 6,
+      "20-50ms": 0,
+      "5-10ms": 0,
+      "<1ms": 2630,
+      ">=50ms": 0
+    },
+    "hist_ovl": {
+      "1-2ms": 7,
+      "10-20ms": 0,
+      "2-5ms": 1,
+      "20-50ms": 0,
+      "5-10ms": 0,
+      "<1ms": 0,
+      ">=50ms": 0
+    },
+    "host_wall_ms": 2499.3,
+    "iters": 2778,
+    "keys": 8,
+    "kind": "compressed",
+    "long_iters_ge_10ms": 0,
+    "ovl_bridge_ms": 2.22,
+    "ovl_iters": 8,
+    "ovl_render_ms": 0.0,
+    "ovl_rest_ms": 14.33,
+    "ovl_wall_ms": 16.55,
+    "reports": 8,
+    "settled": true,
+    "worst_bridge_ms": 2.22,
+    "worst_iter_ms": 3.96,
+    "worst_iter_was_overlay": true,
+    "worst_render_ms": 0.0
+  },
+  "overlay_plain": {
+    "hist_norm": {
+      "1-2ms": 17,
+      "10-20ms": 0,
+      "2-5ms": 4,
+      "20-50ms": 1,
+      "5-10ms": 0,
+      "<1ms": 229,
+      ">=50ms": 0
+    },
+    "hist_ovl": {
+      "1-2ms": 32,
+      "10-20ms": 0,
+      "2-5ms": 11,
+      "20-50ms": 5,
+      "5-10ms": 0,
+      "<1ms": 0,
+      ">=50ms": 0
+    },
+    "host_wall_ms": 387.6,
+    "iters": 221,
+    "keys": 8,
+    "kind": "plain",
+    "long_iters_ge_10ms": 6,
+    "ovl_bridge_ms": 12.15,
+    "ovl_iters": 48,
+    "ovl_render_ms": 166.29,
+    "ovl_rest_ms": 84.56,
+    "ovl_wall_ms": 263.01,
+    "reports": 48,
+    "settled": true,
+    "worst_bridge_ms": 0.0,
+    "worst_iter_ms": 36.84,
+    "worst_iter_was_overlay": true,
+    "worst_render_ms": 33.55
+  },
+  "schema": 1,
+  "timing": {
+    "boot_to_ready_s": 3.9,
+    "flash_s": 25.3,
+    "ready_gate_ok": true,
+    "settle_s": 4.0,
+    "settled": true
+  }
+}
