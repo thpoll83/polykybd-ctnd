@@ -262,6 +262,17 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   and `settle_master()`. The sustained-settle logic is subtle and load-bearing (see
   the stale-rig warning above); a perf run that skipped it would measure the
   master's boot-time busy window instead of the workload.
+- ⚠️ **A `HIDConsole` read is a report-sized FRAGMENT, not a line.** QMK's console
+  delivers whatever fitted in one 32/64-byte report, so a long line (a `LoopProf:`
+  block, a `Split link:` summary) arrives split across several reads — and a split
+  can land mid-word. Anything that *filters or parses* console output must buffer
+  and reassemble across reads, and only classify lines terminated by `\n`; matching
+  the raw chunk instead silently drops every continuation fragment and truncates
+  what it keeps (`ovltot wall=16ms bridg` — shipped once, fixed in `perf_runner.py`
+  `_start_console`/`_flush_console`). Also flush the trailing unterminated fragment
+  when the reader stops, or the last — usually most interesting — line is the one
+  that goes missing. `test_runner.py` is unaffected only because it just echoes each
+  chunk to the log verbatim and never parses it.
 - **Offline tests**: `tests/perf_test.py` (`python -m unittest discover -s tests -p
   "*_test.py"`, 23 tests, no hardware). Its `FakeProfilerDevice` re-implements the
   firmware's cmd-32 replies byte for byte, so it is a genuine **contract test of
