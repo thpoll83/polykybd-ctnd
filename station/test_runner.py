@@ -36,8 +36,21 @@ class TestRunner:
         self._raw = RawHID()
         self._caps = None  # device caps (fw/protocol), read lazily for the gate
 
-    def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
-                       bin_path: str = None) -> dict:
+    @property
+    def raw(self) -> RawHID:
+        """The shared Raw HID channel.
+
+        Exposed so a sibling runner (``station.perf_runner``) can drive the device
+        through the same handle bookkeeping — notably ``timeouts_recovered`` /
+        ``timeouts_failed`` — instead of opening a second, uncoordinated one."""
+        return self._raw
+
+    def flash_halves(self, left_uf2: str, right_uf2: str) -> None:
+        """Validate the per-side image pairing, then flash both halves.
+
+        Split out of :meth:`flash_and_test` so the perf runner reuses the exact
+        same ordering and the same HIL-pairing guard rather than reimplementing
+        them (a swapped pair silently makes both halves master)."""
         # HIL images are built per side (POLYKYBD_HIL=left/right). If either path
         # looks like a HIL image, enforce the per-side contract before touching
         # hardware — flashing one master image (or a swapped pair) to both halves
@@ -52,12 +65,16 @@ class TestRunner:
                 "HIL runs need per-side images: pass *_hil_left.uf2 to --left and "
                 f"*_hil_right.uf2 to --right (got left={left_name!r}, right={right_name!r})"
             )
+        self.status = "flashing"
+        # Flash right first — it communicates via split cable, not USB HID
+        self._flash.flash("right", right_uf2, self.log)
+        self._flash.flash("left",  left_uf2,  self.log)
+
+    def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
+                       bin_path: str = None) -> dict:
         results = []
         try:
-            self.status = "flashing"
-            # Flash right first — it communicates via split cable, not USB HID
-            self._flash.flash("right", right_uf2, self.log)
-            self._flash.flash("left",  left_uf2,  self.log)
+            self.flash_halves(left_uf2, right_uf2)
 
             self.log("[runner] waiting for keyboard to enumerate...")
             time.sleep(3)
@@ -79,8 +96,8 @@ class TestRunner:
             # Wait out the post-cold-flash window during which the master blocks
             # its main loop on the initial 72-keycap render + split-sync and
             # times out HID reads, so the marker-sensitive GET_ID tests don't run
-            # inside it (see _wait_for_master_ready).
-            self._wait_for_master_ready()
+            # inside it (see wait_for_master_ready).
+            self.wait_for_master_ready()
             # Clear any dynamic keymap left in the keyboard's EEPROM by a previous
             # firmware whose layer layout differs from the freshly-flashed build.
             # A UF2/HID flash does not erase the wear-leveled EEPROM, and the
@@ -94,7 +111,7 @@ class TestRunner:
             # the post-cold-flash split-sync settling in general) to clear before
             # the graded suite, so no test runs while the master's loop is briefly
             # stalled in split retries. Best-effort.
-            self._settle_master()
+            self.settle_master()
             for test in (tests or []):
                 name = test.get("name", "unnamed")
                 # Capability gate: skip (do NOT fail) a test the flashed firmware
@@ -193,7 +210,7 @@ class TestRunner:
         finally:
             self._flash.cleanup()
 
-    def _wait_for_master_ready(self, need: int = 3, timeout: float = 30.0,
+    def wait_for_master_ready(self, need: int = 3, timeout: float = 30.0,
                                probe_timeout_ms: int = 800, spacing: float = 0.3) -> bool:
         """Block until the master is *stably* servicing HID, before the suite runs.
 
@@ -249,7 +266,7 @@ class TestRunner:
                  f"({probes} probes) — running tests anyway")
         return False
 
-    def _settle_master(self, need: int = 15, timeout: float = 30.0,
+    def settle_master(self, need: int = 15, timeout: float = 30.0,
                        fast_ms: int = 250, probe_timeout_ms: int = 2500,
                        spacing: float = 0.2) -> bool:
         """Wait until the master answers *quickly* and consistently for a SUSTAINED

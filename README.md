@@ -10,6 +10,9 @@ Runs on a Raspberry Pi 4 with a 7" touchscreen and provides automated flashing, 
 - Raw HID command interface (same protocol as PolyKybdHost)
 - Touch-friendly web UI optimised for 1024×600 (Flask + SocketIO, dark theme)
 - GitHub Actions self-hosted runner integration (`runs-on: [self-hosted, polykybd-ctnd]`)
+- Automated **firmware performance measurement** — flashes a profiler build, drives
+  defined workloads, and reports main-loop timing, overlay cost and HID latency
+  against a committed baseline (see below)
 
 ## Hardware Bill of Materials
 
@@ -319,6 +322,34 @@ Copy any `.uf2` file into `/opt/polykybd-ctnd/firmware/` — the UI picks it up 
 
 Copy `.github/workflows/qmk-test.yml` from this repo into `thpoll83/qmk_firmware/.github/workflows/`.
 The workflow builds both halves on a cloud runner, uploads the UF2 artifacts, then runs the HIL test job on the `polykybd-ctnd` self-hosted runner.
+
+### Performance measurement
+
+The rig can measure firmware performance, not just pass/fail it. It drives the
+firmware's main-loop profiler (`POLYKYBD_LOOP_PROFILE` builds) through its
+on-demand HID control command, so each workload is measured in its own bounded
+window rather than read off a free-running console counter.
+
+```bash
+# On the rig (or via the touch UI's "Measure Perf" button):
+venv/bin/python -m station.perf_runner \
+    --left  firmware/polykybd_split72_perf_hil_left.uf2 \
+    --right firmware/polykybd_split72_perf_hil_right.uf2 \
+    --json perf.json --markdown perf.md
+```
+
+Reported: an idle main-loop baseline, overlay-burst cost (plain and RLE/core1)
+split into bridge / render / rest, HID round-trip latency percentiles, and
+boot-to-first-stable-HID. Results are compared against `perf/baselines/<board>.json`
+and any metric moving beyond the tolerance is flagged.
+
+The images **must** be built with `-e POLYKYBD_LOOP_PROFILE=yes` — a normal build
+compiles the profiler out and NACKs its command, which the runner reports rather
+than guessing.
+
+In CI this is the **opt-in** `Performance measurement (split72)` job: add the
+`perf` label to a PR, put `[perf]` in a commit message, or run the workflow
+manually. It reports numbers and never fails a check on a regression.
 
 ---
 
