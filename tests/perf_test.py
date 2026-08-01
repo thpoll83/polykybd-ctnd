@@ -333,6 +333,72 @@ class TestBaselineComparison(unittest.TestCase):
             self.assertIsNotNone(dig(rep, path), f"{label}: unreachable path {path}")
 
 
+class TestConsoleCapture(unittest.TestCase):
+    """The HID console delivers fragments, not lines — reassembly must handle it."""
+
+    def _runner(self):
+        # PerfRunner's __init__ builds a TestRunner (GPIO/HID stubs above cover it);
+        # only the console-buffer plumbing is exercised here.
+        from station.perf_runner import PerfRunner
+        r = PerfRunner(log=_quiet)
+        r._console_lines = []
+        r._console_pending = ""
+        return r
+
+    def _feed(self, runner, chunks):
+        """Push raw HID chunks through the same sink the reader thread uses."""
+        for chunk in chunks:
+            buf = runner._console_pending + chunk
+            parts = buf.split("\n")
+            runner._console_pending = parts.pop()
+            for line in parts:
+                runner._keep_console_line(line)
+
+    def test_line_split_across_reads_is_reassembled(self):
+        """The exact failure from the first rig run: lines chopped mid-word.
+
+        Previously each chunk was matched against the prefix list on its own, so
+        continuations were dropped and the retained line ended at the chunk
+        boundary (`ovltot wall=0ms b`)."""
+        runner = self._runner()
+        self._feed(runner, [
+            "LoopProf: iters=781 ovl=8 worst=",
+            "36ms(ovl br=12ms rn=166ms)\n",
+            "  ovltot wall=261ms bridg",
+            "e=12ms render=166ms rest=83ms\n",
+        ])
+        self.assertEqual(runner._console_lines, [
+            "LoopProf: iters=781 ovl=8 worst=36ms(ovl br=12ms rn=166ms)",
+            "  ovltot wall=261ms bridge=12ms render=166ms rest=83ms",
+        ])
+
+    def test_several_lines_in_one_read(self):
+        runner = self._runner()
+        self._feed(runner, ["LoopProf: a\n  norm  b\nSplit link: c\n"])
+        self.assertEqual(runner._console_lines,
+                         ["LoopProf: a", "  norm  b", "Split link: c"])
+
+    def test_unrelated_console_chatter_is_dropped(self):
+        runner = self._runner()
+        self._feed(runner, ["LTR-559: lux=1\n", "some boot chatter\n"])
+        self.assertEqual(runner._console_lines, [])
+
+    def test_flush_emits_an_unterminated_trailing_line(self):
+        """The final summary line may never get a newline before the reader stops."""
+        runner = self._runner()
+        self._feed(runner, ["LoopProf: iters=99 ovl=0 worst=1ms"])
+        self.assertEqual(runner._console_lines, [])   # still buffered
+        runner._flush_console()
+        self.assertEqual(runner._console_lines, ["LoopProf: iters=99 ovl=0 worst=1ms"])
+
+    def test_tail_is_bounded(self):
+        runner = self._runner()
+        self._feed(runner, [f"LoopProf: line {i}\n" for i in range(200)])
+        from station.perf_runner import CONSOLE_TAIL_MAX
+        self.assertEqual(len(runner._console_lines), CONSOLE_TAIL_MAX)
+        self.assertEqual(runner._console_lines[-1], "LoopProf: line 199")
+
+
 class TestMarkdown(unittest.TestCase):
     def test_reports_regressions_and_keeps_console_tail(self):
         rep = {
