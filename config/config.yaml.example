@@ -39,6 +39,16 @@ ui:
   # allow_lan: true, and only on a trusted network — see HIL-1 in the security notes.
   host: "127.0.0.1"
   # allow_lan: true   # opt-in to bind `host` on a network interface (loopback enforced otherwise)
+  #
+  # ⚠️ allow_lan grants FULL, UNAUTHENTICATED rig control to every host that can
+  # reach the port (HIL-4): there is no login, no token and no per-event check on
+  # ANY of the SocketIO handlers — flash, usb_power, bootsel, reset_board,
+  # set_handedness, run_tests, run_perf, run_diagnostics, restart_runner,
+  # reregister_runner and update_now are all reachable by anyone who opens the
+  # page. It also widens the SocketIO CORS origin to "*", so a page in the
+  # operator's browser can drive the rig too. Treat it as "anyone on this network
+  # may reflash the keyboard and run commands on the Pi", and prefer an SSH
+  # tunnel to the loopback bind over turning it on.
   port: 5000
 
 # Self-update (optional)
@@ -59,7 +69,11 @@ github:
   repo: "thpoll83/qmk_firmware"
   token: ""  # personal access token. 'actions:read' is enough for the CI badge;
              # the RUNNER badge / diagnostics also need repo-admin
-             # ('administration:read') to query self-hosted runner status.
+             # ('administration:read') to query self-hosted runner status, and
+             # minting registration tokens (Re-register) needs it read/write.
+             # ⚠️ This is a plaintext secret on disk: keep config.yaml 0600 and
+             # owned by the station user (setup.sh enforces it — HIL-6), and
+             # scope the PAT to this one repo.
   # Labels the HIL job requires — must match `runs-on:` in qmk-test.yml.
   # The RUNNER badge turns green only when an online runner advertises all of these.
   runner_labels: [self-hosted, polykybd-ctnd]

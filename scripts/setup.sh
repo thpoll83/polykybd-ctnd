@@ -139,6 +139,14 @@ if [ ! -f "$INSTALL_DIR/config/config.yaml" ]; then
     echo "Created $INSTALL_DIR/config/config.yaml — edit it to match your hardware."
 fi
 
+# SECURITY (HIL-6): config.yaml holds the GitHub PAT used to mint runner
+# registration tokens (Administration: read/write), so it must not be
+# world/group readable. Applied on every run, not just on creation — an
+# existing rig was provisioned before this line and still carries the umask
+# default (0644).
+sudo chown "$CTND_USER:$CTND_USER" "$INSTALL_DIR/config/config.yaml"
+sudo chmod 600 "$INSTALL_DIR/config/config.yaml"
+
 # Install systemd service files, substituting the actual username, home
 # directory, and chromium binary for the 'pi' placeholders in the templates.
 sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
