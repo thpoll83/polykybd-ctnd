@@ -68,6 +68,7 @@ CMD_GET_LANG_LIST           = 8   # legacy ASCII list — RETIRED in protocol v2
 CMD_GET_LANG_LIST_PACKED    = 27  # language codes as 2-byte ISO index pairs (protocol v2+; the only list cmd)
 CMD_CHANGE_LANG             = 9   # set language by 4-char code
 CMD_SEND_OVERLAY            = 10  # uncompressed overlay segment (no ACK)
+CMD_SEND_OVERLAY_MAPPING_W  = 33  # overlay mapping, host-chosen value width (protocol v12+; no ACK)
 CMD_OVERLAY_FLAGS_ON        = 11  # set overlay flag bits
 CMD_OVERLAY_FLAGS_OFF       = 12  # clear overlay flag bits
 CMD_SET_BRIGHTNESS          = 13  # set OLED contrast (0..FULL_BRIGHT)
@@ -116,6 +117,21 @@ NUM_SEGMENTS         = 6     # NUM_SEGMENTS_PER_OVERLAY
 PLAIN_SEG_BYTES      = 60    # data bytes per plain overlay report (64 - 4 header, protocol 11)
 OVERLAY_BYTES        = 360   # NUM_SEGMENTS_PER_OVERLAY * BYTES_PER_SEGMENT
 COMPRESSED_TEST_KEYS = 8     # KC_A..KC_H — exercise the core1 path repeatedly
+# Variable-width overlay mapping (cmd 33, protocol v12+). Mirrors the firmware's
+# OVERLAY_MAP_W_HDR / OVERLAY_MAP_W_BYTES / OVERLAY_MAP_IDX_CNT (config.h).
+OVERLAY_MAP_W_HDR    = 3     # channel + cmd + width byte
+OVERLAY_MAP_W_BYTES  = 64 - OVERLAY_MAP_W_HDR   # 61 data bytes per report
+OVERLAY_MAP_IDX_CNT  = 1440  # NUM_OVERLAYS * NUM_VARIATIONS_WITH_MAP (90 * 16) at v12
+# The widths PolyKybdHost actually emits — 11 is the ceiling (max `from` is
+# 90*15+89 = 1439 < 2048). 9 and 11 are the load-bearing ones: gcd(w,8)==1, so
+# they are the only widths that walk all eight bit offsets and reach a third byte.
+OVERLAY_MAP_TEST_WIDTHS = (8, 9, 10, 11)
+# Outside OVERLAY_MAP_WIDTH_MIN(8)..MAX(16) — the firmware must drop these.
+OVERLAY_MAP_BAD_WIDTHS  = (7, 17)
+# cmd 11 action bits that restore the power-on state: MAPPING_RESET (1<<7)
+# re-establishes the identity mapping, USAGE_RESET (1<<6) clears the "this
+# display position has an overlay" bits (base/com.h). Both self-clear.
+OVERLAY_MAPPING_RESET_BITS = (1 << 7) | (1 << 6)
 
 
 # --- device capability gate ---------------------------------------------------
@@ -1043,6 +1059,113 @@ def test_compressed_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str],
     return True
 
 
+def _pack_mapping_values(values: list[int], data_bytes: int, width: int) -> bytes:
+    """Pack ``values`` LSB-first at ``width`` bits into ``data_bytes`` bytes.
+
+    Mirrors PolyKybdHost ``bit_packing.pack_values`` and the inverse of the
+    firmware's ``set_packed_overlay_mapping`` (fill_overlay.c): value *i* occupies
+    bits ``[i*width, i*width+width-1]``, little-endian. The second and third byte
+    are only touched when the value genuinely extends there, so a narrow width at
+    the tail of the buffer can't index past it.
+    """
+    buf = bytearray(data_bytes)
+    mask = (1 << width) - 1
+    for idx, v in enumerate(values):
+        start = idx * width
+        b, s = divmod(start, 8)
+        shifted = (v & mask) << s
+        buf[b] |= shifted & 0xFF
+        if s + width > 8:
+            buf[b + 1] |= (shifted >> 8) & 0xFF
+        if s + width > 16:
+            buf[b + 2] |= (shifted >> 16) & 0xFF
+    return bytes(buf)
+
+
+def _overlay_map_w_report(width: int) -> tuple[bytes, int]:
+    """One full cmd-33 report at ``width``, plus the pair count it carries.
+
+    Fills every value slot — there is no count field in the report, so the
+    firmware decodes all ``(61*8)//width`` of them and the sender must mean every
+    one. ``from`` values are drawn from the band that genuinely *needs* this
+    width (``2**(width-1) .. 2**width-1``, clamped to the flat index space), so
+    the report exercises the width it claims rather than riding narrow values in
+    a wide field. Consecutive values walk every bit offset, which is the point
+    for the odd widths — see the test docstring.
+    """
+    pairs = (OVERLAY_MAP_W_BYTES * 8 // width) // 2
+    lo = min(1 << (width - 1), OVERLAY_MAP_IDX_CNT - 1)
+    hi = min((1 << width) - 1, OVERLAY_MAP_IDX_CNT - 1)
+    span = hi - lo + 1
+    values: list[int] = []
+    for i in range(pairs):
+        values.append(lo + (i % span))     # from: a real display position
+        values.append(i % 4)               # to:   an in-pool slot (< NUM_OVERLAY_SLOTS)
+    data = _pack_mapping_values(values, OVERLAY_MAP_W_BYTES, width)
+    return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W, width]) + data, pairs
+
+
+def test_overlay_mapping_widths(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Variable-width overlay mapping (cmd 33, v12) survives every width it uses.
+
+    ⚠️ **This is a liveness/robustness guard, not a round-trip.** cmd 33 is
+    silent by design (it sits in the no-reply overlay-activity group with cmd 21),
+    and no command reads ``display_to_pool`` back — so the test cannot assert the
+    mapping *landed*, only that decoding it does not wedge the master. That is
+    still the coverage that matters here, because the bugs this command shipped
+    with were all in the bit arithmetic:
+
+    * The decoder walks a **different byte pattern per width**. ``gcd(width,8)``
+      decides it: at 8 every value is one whole byte at offset 0; at 10 the
+      offsets stay in {0,2,4,6} and never reach a third byte; **only the odd
+      widths 9 and 11 walk all eight offsets and read a third byte**. Those two
+      are new in v12 and are exactly where the pre-v12 fixed expression computed
+      ``0xff >> (8 - n)`` — a shift by −2 at offset 7, unreachable at 10 bits.
+    * Width 8 is where an unconditional second-byte read ran past the last data
+      byte.
+
+    So each of 8/9/10/11 gets a **full** report (every value slot filled, ``from``
+    drawn from the band that needs that width, including the ``>= 1024``
+    GUI-combo band that only protocol 12 can address), and the master must still
+    answer GET_ID after each. Then two out-of-range widths (7 and 17) confirm the
+    ``OVERLAY_MAP_WIDTH_MIN/MAX`` guard clause drops the report instead of
+    slicing garbage — the firmware logs ``REJECTED overlay mapping report: bad
+    width``, visible in the captured console output on a failure.
+
+    Side effects are undone: the mapping and usage bits are reset to the
+    power-on identity via cmd 11 ``MAPPING_RESET|USAGE_RESET`` in a finally.
+    """
+    try:
+        for width in OVERLAY_MAP_TEST_WIDTHS:
+            report, pairs = _overlay_map_w_report(width)
+            raw.write_reports([report])
+            log(f"sent cmd 33 mapping at width {width}: {pairs} pairs "
+                f"({OVERLAY_MAP_W_BYTES * 8 // width} values in {OVERLAY_MAP_W_BYTES} bytes)"
+                + (" — GUI-combo band, needs v12" if width == 11 else ""))
+            if not _master_alive(raw, log):
+                log(f"  FAIL: master unresponsive after a {width}-bit mapping report — "
+                    "decoder regression (bit-offset arithmetic / out-of-buffer read)")
+                return False
+
+        for bad in OVERLAY_MAP_BAD_WIDTHS:
+            # Hand-framed: _overlay_map_w_report would try to pack at this width.
+            raw.write_reports([bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W, bad])
+                               + bytes(OVERLAY_MAP_W_BYTES)])
+            log(f"sent cmd 33 with out-of-range width {bad} (expect firmware to reject + log)")
+            if not _master_alive(raw, log):
+                log(f"  FAIL: master unresponsive after width {bad} — the "
+                    "OVERLAY_MAP_WIDTH_MIN/MAX guard clause did not hold")
+                return False
+
+        log("  master still answering GET_ID after every width")
+        return True
+    finally:
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON, OVERLAY_MAPPING_RESET_BITS]))
+        ok = _resp_ok(restore, CMD_OVERLAY_FLAGS_ON, lambda *_a: None, expect_status=ACK)
+        log(f"  reset mapping + usage bits to identity: "
+            f"{'ok' if ok else 'FAILED — rig left with test mappings until next boot'}")
+
+
 # GET_ID stress pass/fail tuning. ``send_repeated`` already retries transient
 # host-side USB errors internally, so each no-answer counted here is a *sustained*
 # silence (~retries x timeout). Two failure shapes must be told apart:
@@ -1338,6 +1461,8 @@ TESTS = [
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
     {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive, "min_protocol": 11},
     {"name": "compressed overlay keeps master alive (core1)", "fn": test_compressed_overlay_keeps_master_alive},
+    {"name": "overlay mapping widths 8/9/10/11 (v12 cmd 33)", "fn": test_overlay_mapping_widths,
+     "min_protocol": 12},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
     # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
     # to slot 0 — exercises the flash transport + the COMMIT slot-present success gate.
