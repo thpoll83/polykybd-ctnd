@@ -135,7 +135,13 @@ python3 -m venv "$INSTALL_DIR/venv"
 
 # Create local config from the example if it doesn't exist yet
 if [ ! -f "$INSTALL_DIR/config/config.yaml" ]; then
-    cp "$INSTALL_DIR/config/config.yaml.example" "$INSTALL_DIR/config/config.yaml"
+    # umask in a subshell so the file is never briefly world-readable, rather
+    # than relying on the chmod below to close the window. The freshly-copied
+    # file holds no secret (it is the example, whose token is empty), so this is
+    # about making "config.yaml is never group/world readable" hold
+    # unconditionally instead of depending on that.
+    (umask 077; cp "$INSTALL_DIR/config/config.yaml.example" \
+                    "$INSTALL_DIR/config/config.yaml")
     echo "Created $INSTALL_DIR/config/config.yaml — edit it to match your hardware."
 fi
 

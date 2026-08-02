@@ -29,6 +29,7 @@ Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 | HIL-4 | Unauthenticated privileged SocketIO handlers | ctnd | 🟡 accepted + documented (mitigated by HIL-1) |
 | HIL-5 | Firmware-filename path traversal | ctnd | ✅ fixed |
 | HIL-6 | PAT in `config.yaml` with default perms | ctnd | ✅ fixed |
+| HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | 🔲 **open — needs a decision** |
 
 ---
 
@@ -49,6 +50,41 @@ one merged trivial PR earns an attacker unreviewed runner access forever). Consi
 isolating the runner (own network segment, no long-lived PAT on the box).
 
 This is the highest-impact open item and costs one settings change.
+
+### HIL-7 — sudoers wildcard admits extra `systemctl` arguments
+
+Raised by CodeRabbit on PR #51 and recorded rather than fixed there — it is pre-existing
+code outside that PR's diff, and the safe fix is bigger than a one-liner.
+
+`scripts/setup.sh` installs:
+
+```
+$CTND_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start actions.runner.*, … stop …, … restart …
+```
+
+Sudoers matches command-line arguments as a single concatenated string, and `*` **matches
+space characters**. So the rule does not mean "one unit whose name starts with
+`actions.runner.`" — it permits any argument tail beginning with that prefix, including
+further unit names and `systemctl` options. The station user gets that grant, and the
+control UI runs as the station user with no authentication (HIL-4), so the two compound:
+whatever this rule ultimately permits is reachable by anyone who can open the UI.
+
+**Not yet established:** whether a concrete root-code-execution path exists through it
+(e.g. whether `systemctl` will act on an attacker-writable unit *file path* supplied as a
+second argument). That needs checking on the rig — there is no systemd PID 1 in the dev
+container to test against. The wildcard-matches-spaces behaviour itself is documented
+sudoers semantics and is not in doubt.
+
+**Candidate fixes:**
+- a small **root-owned wrapper** that accepts exactly one of `start|stop|restart` plus one
+  unit name it validates against `^actions\.runner\.[A-Za-z0-9_.-]+\.service$`, with the
+  sudoers rule scoped to the wrapper. Most robust; costs a new script and a
+  `register-runner.sh` change.
+- or generate an **exact** sudoers rule at registration time, once the real unit name is
+  known (it is `actions.runner.<owner>-<repo>.<name>.service`, not knowable at
+  `setup.sh` time — which is why the wildcard is there).
+
+The same pattern is worth re-checking in `/etc/sudoers.d/polykybd-usb` while doing this.
 
 ### HIL-3 — self-update pulls and runs `main` unverified (accepted risk)
 
@@ -91,6 +127,10 @@ someone about to make the mistake will actually read it.
 If `allow_lan` ever becomes a routine deployment mode, revisit this — a shared-secret
 token on connect (required only when `allow_lan` is set) is the intended next step.
 
+⚠️ HIL-4 is also the **amplifier** for every station-user privilege: the UI runs as that
+user, so anything the station user can do without a password (see HIL-7) is reachable by
+whoever can reach the UI. Weigh new sudo grants with that in mind.
+
 ---
 
 ## ✅ Fixed — verification notes
@@ -125,7 +165,10 @@ Only a bare filename resolving to a real file directly in `FIRMWARE_DIR` is acce
 registration tokens. `scripts/setup.sh` now `chown`s it to the station user and `chmod`s
 it `600` **on every run**, not only when creating it from the example — an existing rig
 was provisioned before this line and still carries the `0644` umask default, so re-running
-`setup.sh` is what fixes it in the field.
+`setup.sh` is what fixes it in the field. The initial `cp` also runs under `umask 077`, so
+the file is never briefly world-readable; note that the window it closes never contained a
+secret (a freshly-copied file is the example, whose `token` is empty) — the point is that
+the invariant should not depend on that remaining true.
 
 ---
 
