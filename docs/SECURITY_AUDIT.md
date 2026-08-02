@@ -58,7 +58,7 @@ code outside that PR's diff, and the safe fix is bigger than a one-liner.
 
 `scripts/setup.sh` installs:
 
-```
+```text
 $CTND_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start actions.runner.*, … stop …, … restart …
 ```
 
