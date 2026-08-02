@@ -365,6 +365,21 @@ PYTHONPATH=. venv/bin/python -m station.ui.app
 
 System packages required: `uhubctl`, `libhidapi-hidraw0`, `libhidapi-libusb0`
 
+## Security
+
+**`docs/SECURITY_AUDIT.md` is the cross-repo findings tracker** (`FW-*` / `HOST-*` /
+`HIL-*`) — status, verification notes, and the two items still open. Read it before
+touching the UI's bind/CORS config, `config.yaml` handling, the self-update path, or the
+`runs-on: [self-hosted, …]` workflow, and update it in the same PR. Two standing facts it
+records that are easy to trip over:
+
+- **The control UI has no authentication of any kind** — every SocketIO handler (flash,
+  GPIO, USB power, runner re-register, self-update) is reachable by anyone who can open
+  the page. The *only* thing protecting it is the loopback bind, which
+  `ui.allow_lan: true` disables. Don't add a handler assuming some auth layer exists.
+- **The rig is a self-hosted runner for a public repo**, so fork-PR approval settings on
+  `qmk_firmware` are load-bearing security, not CI hygiene (HIL-2, still open).
+
 ## Related repos
 
 | Repo | Role |
