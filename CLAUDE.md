@@ -146,6 +146,31 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     Same pack-agnostic, mutate+restore shape; a pre-v10 board SKIPs it. `GLYPH_SCRIPT_MAX`
     (=10) tracks the highest *known* `poly_glyph_script`; higher indices are valid on the
     wire and just render the normal legend.
+  - The **`overlay mapping widths (v12)`** test (`test_overlay_mapping_widths`,
+    `min_protocol: 12`) covers HID cmd 33 (`SEND_OVERLAY_MAPPING_W`), the
+    variable-width mapping command. ⚠️ **It is a liveness guard, not a
+    round-trip** — cmd 33 is silent by design (it sits in the no-reply
+    overlay-activity group with cmd 21) and nothing reads `display_to_pool` back,
+    so the test can only assert that decoding a report doesn't wedge the master.
+    That is the coverage that matters, because every bug this command shipped
+    with was in the bit arithmetic, and **the byte pattern differs per width**:
+    `gcd(width,8)` decides it — at 8 each value is one whole byte at offset 0, at
+    10 the offsets stay in {0,2,4,6} and never reach a third byte, and **only the
+    odd widths 9 and 11 walk all eight offsets and read a third byte**. Those two
+    are new at v12 and are exactly where the old fixed expression computed
+    `0xff >> (8 - n)` (a shift by −2 at offset 7, unreachable at 10 bits); width 8
+    is where an unconditional second-byte read ran past the buffer. So each of
+    8/9/10/11 gets a **full** report — every value slot filled, `from` drawn from
+    the band that genuinely needs that width, including the `>= 1024` GUI-combo
+    band only v12 can address — followed by a GET_ID liveness check; then widths
+    7 and 17 confirm the `OVERLAY_MAP_WIDTH_MIN/MAX` guard drops the report
+    instead of slicing garbage (the firmware logs `REJECTED overlay mapping
+    report: bad width`, which shows up in the captured console on a failure).
+    Mutate+restore: a `finally` resets the mapping and usage bits to the power-on
+    identity via cmd 11 `MAPPING_RESET|USAGE_RESET` (`0xC0`). ⚠️ `_pack_mapping_values`
+    mirrors PolyKybdHost `bit_packing.pack_values` — verified byte-identical and
+    round-tripped through its decoder at all four widths, per the standing
+    "verify the packer through the decoder, not by eye" rule.
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 
