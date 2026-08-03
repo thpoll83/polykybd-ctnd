@@ -6,7 +6,8 @@ covers all four repos — check the **Where** column before going looking for co
 
 Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 `PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-03**
-(HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed).
+(HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed;
+HIL-8 raised).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -31,10 +32,72 @@ Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 | HIL-5 | Firmware-filename path traversal | ctnd | ✅ fixed |
 | HIL-6 | PAT in `config.yaml` with default perms | ctnd | ✅ fixed |
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
+| HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | 🔲 **open — action on the rig** |
 
 ---
 
 ## 🔲 Open
+
+### HIL-8 — the station user holds blanket passwordless root
+
+Found 2026-08-03 while verifying HIL-7 on the rig, by the check that was supposed to
+prove the new grant was exact:
+
+```console
+$ sudo /usr/local/sbin/polykybd-runner-ctl status   # expected: refused by sudo
+usage: polykybd-runner-ctl {start|stop|restart}     # actual: it RAN, as root
+```
+
+`status` is not one of the three permitted commands, so something else was granting it.
+`sudo -l` on the rig:
+
+```text
+(ALL : ALL) ALL          ← sudo group membership (password required)
+(ALL) NOPASSWD: ALL      ← /etc/sudoers.d/010_pi-nopasswd, stock Raspberry Pi OS
+```
+
+**Consequence: every scoped grant in this repo is decorative on a stock rig.** The HIL-7
+wrapper, `polykybd-update`, `polykybd-uhubctl`, `polykybd-usb` — the station user does not
+need any of them, it can ask for root directly. And because the Actions runner executes
+workflow code **as that user**, on such a rig *code execution on the rig* and *root on the
+rig* are the same thing. That is what made HIL-2's approval setting load-bearing well
+beyond what its own entry claimed.
+
+**What it costs to remove** — checked against the tree, not assumed. Every automated path
+is already covered by a scoped grant:
+
+| Path | Needs | Covered by |
+|---|---|---|
+| `flash.py` | `sudo uhubctl`, `sudo picotool` | `polykybd-uhubctl`, `polykybd-usb` |
+| UI restart / self-update | `sudo -n systemctl …` on two units | `polykybd-update` |
+| UI ⟳ Restart, ↻ Re-register | `sudo polykybd-runner-ctl …` | `polykybd-runner` |
+| `register-runner.sh` `run_as_ctnd()` | `sudo -u $CTND_USER` | n/a — skipped, already that user |
+| **HIL CI jobs** | nothing | `qmk-test.yml` contains no `sudo` at all |
+
+Only two things start prompting, both interactive admin operations where that is correct:
+first-time runner installation (`sudo ./svc.sh install`, in the full registration path —
+*not* the kiosk button) and `setup.sh` itself.
+
+**Remediation.** ⚠️ Confirm a usable password first or this removes sudo access entirely,
+and keep a second root session open while testing:
+
+```console
+$ sudo passwd -S <user>                                    # want "<user> P ..."
+$ sudo mv /etc/sudoers.d/010_pi-nopasswd /root/010_pi-nopasswd.bak
+$ sudo -l                                                  # scoped rules only now
+$ sudo /usr/local/sbin/polykybd-runner-ctl status          # must now be REFUSED
+```
+
+Move rather than delete so it can be restored instantly; exercise the touch UI and let one
+HIL run pass before discarding the backup.
+
+`setup.sh` now **warns** when it detects this (`warn_if_blanket_sudo`) instead of removing
+it — pulling a distro file out from under an operator who may have no password set is not
+something an install script should do unasked. The warning is what stops the next person
+installing scoped grants and reasonably assuming they mean something.
+
+⚠️ **This finding is rig state, not repo state** — nothing in the repo can pin it, and a
+reimaged Pi will have it again. Re-check with `sudo -l` when re-auditing.
 
 ### HIL-3 — self-update pulls and runs `main` unverified (accepted risk)
 
@@ -79,8 +142,9 @@ If `allow_lan` ever becomes a routine deployment mode, revisit this — a shared
 token on connect (required only when `allow_lan` is set) is the intended next step.
 
 ⚠️ HIL-4 is also the **amplifier** for every station-user privilege: the UI runs as that
-user, so anything the station user can do without a password (see HIL-7) is reachable by
-whoever can reach the UI. Weigh new sudo grants with that in mind.
+user, so anything the station user can do without a password (see HIL-7, and HIL-8 for
+why that set may be *everything*) is reachable by whoever can reach the UI. Weigh new
+sudo grants with that in mind.
 
 ---
 
