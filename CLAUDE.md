@@ -171,6 +171,15 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     mirrors PolyKybdHost `bit_packing.pack_values` — verified byte-identical and
     round-tripped through its decoder at all four widths, per the standing
     "verify the packer through the decoder, not by eye" rule.
+- [ ] **Provisioning-drift self-check.** Nothing compares the *installed*
+  `/etc/systemd/system/polykybd-*.{service,timer}` + `/etc/sudoers.d/polykybd-*`
+  against the repo's templates, so any unit or grant added after a rig was built
+  stays silently absent until someone presses the button that needs it (2026-08-03:
+  `polykybd-update.service`/`.timer`, missing since that rig was provisioned). Compare
+  them at startup and surface drift as a header badge + a line in the ⚕ Diagnose
+  report; the fix is then `sudo bash ./scripts/setup.sh --units-only`. The diagnose
+  plumbing already exists — this is the durable fix for the whole class, of which
+  the UI's in-process update fallback only softens one instance.
 - [ ] Add GPIO-driven key matrix simulation so tests can simulate key presses
 - [ ] Test `scripts/setup.sh` on a fresh RPi4 and fix any issues
 
@@ -345,6 +354,18 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
 > timer tick) and re-run before diagnosing anything else. The durable fix is to make
 > CI pull `main` before the run (qmk `qmk-test.yml` "Sync station to current ctnd
 > main" step) so a lagging timer can't leave HIL on stale code.
+>
+> ⚠️ **That sync is a FORCE checkout — `git checkout -q -f -B main origin/main` —
+> so the rig's checkout is NOT a place to park a branch.** Testing an unmerged
+> ctnd branch on the rig (e.g. to get a `setup.sh` flag that isn't on `main` yet)
+> works only until the next HIL run, which discards it with no warning and no log
+> line anyone reads. The self-update side dislikes it too: `self-update.sh` tracks
+> `main`, so while a branch is checked out it reads 0-behind and does nothing, and
+> once `main` advances the two diverge and its `--ff-only` merge fails (exit 75)
+> on every 5-minute tick. **Check the branch out, do the one thing you need, then
+> `git checkout main` in the same sitting.** Anything installed *outside* the
+> checkout (systemd units, sudoers) survives the switch back — that is what makes
+> the round trip safe.
 
 ### Self-update mechanism
 
@@ -388,6 +409,15 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
   sudoers grants (no apt, no venv rebuild, no `config.yaml`/chown churn), which is
   what you want on a *working* rig. Don't send someone through a full `setup.sh`
   run to drop two files.
+  - ⚠️ **Why it hid for the rig's whole life: the CI force-sync masked it.** The
+    "Sync station to current ctnd main" step was added so a *lagging* timer
+    couldn't leave HIL on stale code — and it also removed the only symptom that
+    would have revealed a timer that was never installed *at all*. HIL stayed
+    green throughout; the UPDATE badge polls git directly, so it correctly showed
+    "N behind" while reporting nothing about whether the mechanism that applies
+    updates exists. Generalise before adding the next such workaround: **a
+    compensating sync hides the difference between "slow" and "absent", and
+    nothing here checks that the installed units/grants still match the repo.**
 
 For rapid UI iteration the Flask dev server can be run directly:
 ```bash
