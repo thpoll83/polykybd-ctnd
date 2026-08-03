@@ -7,7 +7,7 @@ covers all four repos — check the **Where** column before going looking for co
 Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 `PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-03**
 (HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed;
-HIL-8 raised).
+HIL-8 raised and remediated; HIL-9 raised).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -32,72 +32,53 @@ HIL-8 raised).
 | HIL-5 | Firmware-filename path traversal | ctnd | ✅ fixed |
 | HIL-6 | PAT in `config.yaml` with default perms | ctnd | ✅ fixed |
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
-| HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | 🔲 **open — action on the rig** |
+| HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | ✅ fixed (rig) |
+| HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🔲 **open — needs a decision** |
 
 ---
 
 ## 🔲 Open
 
-### HIL-8 — the station user holds blanket passwordless root
+### HIL-9 — the operator account and the Actions runner are the same user
 
-Found 2026-08-03 while verifying HIL-7 on the rig, by the check that was supposed to
-prove the new grant was exact:
+Raised 2026-08-03, immediately after HIL-8 — removing blanket root revealed the next layer
+rather than finishing the job.
 
-```console
-$ sudo /usr/local/sbin/polykybd-runner-ctl status   # expected: refused by sudo
-usage: polykybd-runner-ctl {start|stop|restart}     # actual: it RAN, as root
-```
+The Actions runner executes workflow code as `thpoll`, which is also the human operator's
+login. Two consequences survive HIL-8:
 
-`status` is not one of the three permitted commands, so something else was granting it.
-`sudo -l` on the rig:
+1. **The sudo credential cache is shared.** This rig runs `Defaults timestamp_type=global`,
+   so one successful `sudo` authenticates the *user*, not the terminal, for
+   `timestamp_timeout` (15 min default). Any process running as `thpoll` during that
+   window — workflow code included — can `sudo` to root without knowing the password. The
+   operator working on the desktop opens the window; nothing on the CI side has to.
+2. **CI has write access to the station code.** `qmk-test.yml` force-syncs the checkout
+   (`git checkout -q -f -B main origin/main`) and then runs
+   `venv/bin/python -m station.test_runner` from it. So workflow code can modify station
+   code that later runs as `thpoll` under systemd — an escalation that needs no sudo at
+   all, just patience.
 
-```text
-(ALL : ALL) ALL          ← sudo group membership (password required)
-(ALL) NOPASSWD: ALL      ← /etc/sudoers.d/010_pi-nopasswd, stock Raspberry Pi OS
-```
+Both are gated in practice by HIL-2 (fork PRs need approval), which is again doing more
+work than a settings toggle should have to.
 
-**Consequence: every scoped grant in this repo is decorative on a stock rig.** The HIL-7
-wrapper, `polykybd-update`, `polykybd-uhubctl`, `polykybd-usb` — the station user does not
-need any of them, it can ask for root directly. And because the Actions runner executes
-workflow code **as that user**, on such a rig *code execution on the rig* and *root on the
-rig* are the same thing. That is what made HIL-2's approval setting load-bearing well
-beyond what its own entry claimed.
+**The fix is a dedicated unprivileged runner user**, separate from the login. Not
+attempted, because it is more than a `useradd` — anyone taking it on needs:
 
-**What it costs to remove** — checked against the tree, not assumed. Every automated path
-is already covered by a scoped grant:
+- group membership for the hardware the tests drive: `gpio` (RPi.GPIO in `flash.py`) and
+  `plugdev` (hidraw, per `99-polykybd.rules`);
+- the `uhubctl` and `picotool` scoped grants — the HIL job really does flash through
+  `sudo`, so those follow the runner user, not the operator;
+- **write access to the station checkout**, because of the force-sync above. That is the
+  awkward part: it either re-opens consequence 2 for the new user, or the sync has to move
+  somewhere the runner cannot write to;
+- re-registration of the runner under the new account (`svc.sh install <user>`).
 
-| Path | Needs | Covered by |
-|---|---|---|
-| `flash.py` | `sudo uhubctl`, `sudo picotool` | `polykybd-uhubctl`, `polykybd-usb` |
-| UI restart / self-update | `sudo -n systemctl …` on two units | `polykybd-update` |
-| UI ⟳ Restart, ↻ Re-register | `sudo polykybd-runner-ctl …` | `polykybd-runner` |
-| `register-runner.sh` `run_as_ctnd()` | `sudo -u $CTND_USER` | n/a — skipped, already that user |
-| **HIL CI jobs** | nothing | `qmk-test.yml` contains no `sudo` at all |
+Until then, a cheaper partial mitigation is dropping `timestamp_type=global` (or setting
+`timestamp_timeout=0`) so the operator's sudo cannot be borrowed by another process running
+as the same user. That closes consequence 1 and costs a password per sudo.
 
-Only two things start prompting, both interactive admin operations where that is correct:
-first-time runner installation (`sudo ./svc.sh install`, in the full registration path —
-*not* the kiosk button) and `setup.sh` itself.
-
-**Remediation.** ⚠️ Confirm a usable password first or this removes sudo access entirely,
-and keep a second root session open while testing:
-
-```console
-$ sudo passwd -S <user>                                    # want "<user> P ..."
-$ sudo mv /etc/sudoers.d/010_pi-nopasswd /root/010_pi-nopasswd.bak
-$ sudo -l                                                  # scoped rules only now
-$ sudo /usr/local/sbin/polykybd-runner-ctl status          # must now be REFUSED
-```
-
-Move rather than delete so it can be restored instantly; exercise the touch UI and let one
-HIL run pass before discarding the backup.
-
-`setup.sh` now **warns** when it detects this (`warn_if_blanket_sudo`) instead of removing
-it — pulling a distro file out from under an operator who may have no password set is not
-something an install script should do unasked. The warning is what stops the next person
-installing scoped grants and reasonably assuming they mean something.
-
-⚠️ **This finding is rig state, not repo state** — nothing in the repo can pin it, and a
-reimaged Pi will have it again. Re-check with `sudo -l` when re-auditing.
+⚠️ Like HIL-8 this is **rig state, not repo state** — re-check with `sudo -l` and
+`systemctl show -p User actions.runner.*.service` when re-auditing.
 
 ### HIL-3 — self-update pulls and runs `main` unverified (accepted risk)
 
@@ -143,7 +124,7 @@ token on connect (required only when `allow_lan` is set) is the intended next st
 
 ⚠️ HIL-4 is also the **amplifier** for every station-user privilege: the UI runs as that
 user, so anything the station user can do without a password (see HIL-7, and HIL-8 for
-why that set may be *everything*) is reachable by whoever can reach the UI. Weigh new
+why that set was until 2026-08-03 *everything*) is reachable by whoever can reach the UI. Weigh new
 sudo grants with that in mind.
 
 ---
@@ -152,6 +133,79 @@ sudo grants with that in mind.
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### HIL-8 — the station user held blanket passwordless root
+
+Found 2026-08-03 while verifying HIL-7 on the rig, by the check that was supposed to
+prove the new grant was exact:
+
+```console
+$ sudo /usr/local/sbin/polykybd-runner-ctl status   # expected: refused by sudo
+usage: polykybd-runner-ctl {start|stop|restart}     # actual: it RAN, as root
+```
+
+`status` is not one of the three permitted commands, so something else was granting it.
+`sudo -l` on the rig:
+
+```text
+(ALL : ALL) ALL          ← sudo group membership (password required)
+(ALL) NOPASSWD: ALL      ← /etc/sudoers.d/010_pi-nopasswd, stock Raspberry Pi OS
+```
+
+**Consequence: every scoped grant in this repo is decorative on a stock rig.** The HIL-7
+wrapper, `polykybd-update`, `polykybd-uhubctl`, `polykybd-usb` — the station user does not
+need any of them, it can ask for root directly. And because the Actions runner executes
+workflow code **as that user**, on such a rig *code execution on the rig* and *root on the
+rig* are the same thing. That is what made HIL-2's approval setting load-bearing well
+beyond what its own entry claimed.
+
+**What it costs to remove** — checked against the tree, not assumed. Every automated path
+is already covered by a scoped grant:
+
+| Path | Needs | Covered by |
+|---|---|---|
+| `flash.py` | `sudo uhubctl`, `sudo picotool` | `polykybd-uhubctl`, `polykybd-usb` |
+| UI restart / self-update | `sudo -n systemctl …` on two units | `polykybd-update` |
+| UI ⟳ Restart, ↻ Re-register | `sudo polykybd-runner-ctl …` | `polykybd-runner` |
+| `register-runner.sh` `run_as_ctnd()` | `sudo -u $CTND_USER` | n/a — skipped, already that user |
+| **HIL CI jobs** | nothing | `qmk-test.yml` contains no `sudo` at all |
+
+Only two things start prompting, both interactive admin operations where that is correct:
+first-time runner installation (`sudo ./svc.sh install`, in the full registration path —
+*not* the kiosk button) and `setup.sh` itself.
+
+**Remediated on the rig 2026-08-03** — `/etc/sudoers.d/010_pi-nopasswd` removed, leaving
+`(ALL : ALL) ALL` (password required) plus the scoped NOPASSWD grants. ⚠️ Confirm
+`sudo passwd -S <user>` reports `P` before removing it on any rig: with no usable password
+this takes away sudo entirely.
+
+⚠️ **Verify by whether sudo PROMPTS, not by whether it refuses.** The obvious check —
+"a non-granted command must be refused" — is wrong for any user in the `sudo` group:
+`(ALL : ALL) ALL` permits everything *with a password*, so a non-granted command prompts,
+it is never refused. Worse, `timestamp_type=global` means a recent `sudo` elsewhere makes
+it run with no prompt at all, which looks exactly like the blanket rule still being there.
+That false negative cost a round here. Clear the cache first:
+
+```console
+$ sudo -k
+$ sudo /usr/local/sbin/polykybd-runner-ctl status   # PROMPTS  → blanket rule is gone
+$ sudo -k
+$ sudo /usr/local/sbin/polykybd-runner-ctl start    # no prompt → scoped grant works
+```
+
+Both confirmed on the rig. The `status` run also exercised the HIL-7 wrapper end to end on
+real hardware: sudo let it through on the password, and the wrapper itself rejected the
+action with its usage message and exit 2.
+
+``setup.sh` **warns** when it detects this (`warn_if_blanket_sudo`) rather than removing
+it — pulling a distro file out from under an operator who may have no password set is not
+something an install script should do unasked. The warning is what stops the next person
+installing scoped grants and reasonably assuming they mean something.
+
+⚠️ **This finding is rig state, not repo state** — nothing in the repo can pin it, and a
+reimaged Pi will have it again, which is why `setup.sh` warns rather than assuming. Re-check
+with `sudo -l` when re-auditing. Removing the blanket rule does not finish the job: see
+HIL-9 for what it exposed.
 
 ### HIL-7 — sudoers wildcard admitted extra `systemctl` arguments
 
