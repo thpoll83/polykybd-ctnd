@@ -107,6 +107,49 @@ install_service_sudoers() {
     "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
     | sudo tee /etc/sudoers.d/polykybd-update > /dev/null
   sudo chmod 0440 /etc/sudoers.d/polykybd-update
+
+  warn_if_blanket_sudo
+}
+
+# SECURITY (HIL-8): every grant above is scoped to exact commands — which buys
+# nothing if the station user separately holds blanket passwordless root. Stock
+# Raspberry Pi OS ships exactly that in /etc/sudoers.d/010_pi-nopasswd
+# (`<user> ALL=(ALL) NOPASSWD: ALL`), so the default rig has it and the scoped
+# rules are decorative. Worse, the Actions runner executes workflow code AS this
+# user, so on such a rig "code execution" and "root" are the same thing.
+#
+# Warn rather than remove it: dropping a distro file out from under someone —
+# who may have no password set, and would then lose sudo entirely — is not a
+# thing an install script should do unasked.
+warn_if_blanket_sudo() {
+  command -v sudo >/dev/null 2>&1 || return 0
+  # Match `NOPASSWD: ALL` followed by end-of-line, whitespace or a comma. The
+  # trailing class matters: `NOPASSWD: ALL, /usr/bin/foo` is still blanket root
+  # (ALL already covers everything, the rest is redundant), and an end-of-line
+  # anchor alone would miss it. It does not match a command literally named
+  # ALLOWED_* etc, and the scoped `NOPASSWD: /usr/...` rules cannot match either.
+  # `(ALL : ALL) ALL` (password required) is deliberately not flagged — only the
+  # passwordless form is the finding.
+  sudo -l -U "$CTND_USER" 2>/dev/null \
+    | grep -qE 'NOPASSWD:[[:space:]]*ALL([[:space:],]|$)' || return 0
+
+  cat >&2 <<EOF
+
+⚠️  WARNING: $CTND_USER has blanket passwordless sudo (NOPASSWD: ALL).
+
+    The scoped grants just installed are therefore decorative — this user can
+    already run anything as root. The GitHub Actions runner executes workflow
+    code as this user, so on this rig code execution IS root.
+
+    Usually /etc/sudoers.d/010_pi-nopasswd (stock Raspberry Pi OS). To remove it,
+    FIRST confirm the account has a usable password, or you will lose sudo:
+
+        sudo passwd -S $CTND_USER        # want: "$CTND_USER P ..."
+        sudo mv /etc/sudoers.d/010_pi-nopasswd /root/010_pi-nopasswd.bak
+
+    Keep a second root session open while testing. See HIL-8 in
+    docs/SECURITY_AUDIT.md.
+EOF
 }
 
 # Install every unit, substituting the actual username, home directory, install
