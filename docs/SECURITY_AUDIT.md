@@ -5,7 +5,8 @@ Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` ho
 covers all four repos — check the **Where** column before going looking for code.
 
 Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
-`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-02**.
+`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-03**
+(HIL-2 confirmed set; HIL-7 raised).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -24,7 +25,7 @@ Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 | FW-8 | RLE non-aligned OOB | qmk | ✅ fixed (PR #112) |
 | HOST-1 | Legacy plaintext window relay on by default | host | ✅ fixed (PR #133) |
 | HIL-1 | Control UI bound to all interfaces | ctnd | ✅ fixed |
-| HIL-2 | Self-hosted runner reachable from fork PRs | qmk *(repo settings)* | 🔲 **open — needs a settings decision** |
+| HIL-2 | Self-hosted runner reachable from fork PRs | qmk *(repo settings)* | ✅ fixed (settings) |
 | HIL-3 | Self-update pulls and runs `main` unverified | ctnd | 🔲 open (accepted risk, documented) |
 | HIL-4 | Unauthenticated privileged SocketIO handlers | ctnd | 🟡 accepted + documented (mitigated by HIL-1) |
 | HIL-5 | Firmware-filename path traversal | ctnd | ✅ fixed |
@@ -34,22 +35,6 @@ Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 ---
 
 ## 🔲 Open
-
-### HIL-2 — self-hosted runner RCE from fork PRs (Critical; settings, not code)
-
-`.github/workflows/qmk-test.yml` in the **public** `thpoll83/qmk_firmware` repo runs two
-jobs on the rig (`runs-on: [self-hosted, polykybd-ctnd]`, lines 101 and 312) and triggers
-on `pull_request: [opened, synchronize, reopened, labeled]`. A fork PR that reaches the
-runner executes attacker-controlled code on the Pi — which holds the GitHub PAT, drives
-GPIO, and can flash the keyboard.
-
-**Fix (no code change):** qmk_firmware → Settings → Actions → General → *Fork pull request
-workflows from outside collaborators* → **Require approval for all external
-contributors** (GitHub's default is only *first-time* contributors, which is not enough —
-one merged trivial PR earns an attacker unreviewed runner access forever). Consider also
-isolating the runner (own network segment, no long-lived PAT on the box).
-
-This is the highest-impact open item and costs one settings change.
 
 ### HIL-7 — sudoers wildcard admits extra `systemctl` arguments
 
@@ -98,8 +83,9 @@ Mitigating factors: push access to `main` is already fully trusted, the merge is
 
 **If we ever want to close it:** require signed commits on `main` and verify with
 `git verify-commit` before the fast-forward, or pin the rig to reviewed release tags
-instead of a branch head. Not urgent, but note that HIL-2 and HIL-3 compound: runner
-compromise (HIL-2) is a plausible route to obtaining push credentials (HIL-3).
+instead of a branch head. Not urgent. Note that HIL-2 and HIL-3 compound — runner
+compromise is a plausible route to obtaining push credentials — so the urgency of this one
+now rests on HIL-2's *settings* state holding, which nothing in the repo enforces.
 
 ---
 
@@ -137,6 +123,37 @@ whoever can reach the UI. Weigh new sudo grants with that in mind.
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### HIL-2 — self-hosted runner RCE from fork PRs
+
+`.github/workflows/qmk-test.yml` in the **public** `thpoll83/qmk_firmware` repo runs two
+jobs on the rig (`runs-on: [self-hosted, polykybd-ctnd]`) and triggers on
+`pull_request: [opened, synchronize, reopened, labeled]`. A fork PR that reached the
+runner would execute attacker-controlled code on the Pi — which holds the GitHub PAT,
+drives GPIO, and can flash the keyboard.
+
+Closed by tightening the repo setting (Settings → Actions → General → *Fork pull request
+workflows from outside collaborators*) to **Require approval for all external
+contributors**. GitHub's default is only *first-time* contributors, which is not enough:
+one merged trivial PR would earn an attacker unreviewed runner access from then on.
+
+**Verified 2026-08-03** by the repo owner:
+
+```console
+$ gh api repos/thpoll83/qmk_firmware/actions/permissions/fork-pr-contributor-approval
+{ "approval_policy": "all_external_contributors" }
+```
+
+⚠️ **This one is a settings state, not code, so nothing in the repo pins it** — it can be
+changed back at any time with no diff, no review and no CI signal, and the affected
+workflows keep passing either way. Re-run the command above when re-auditing rather than
+trusting this entry. (Note it is not readable from a Claude Code session: the agent proxy
+refuses `/actions/permissions/*` with *"Access to this GitHub Actions path is not
+permitted through this proxy"*, so it has to be checked by a human or from CI.)
+
+Still worth considering as defence in depth, since approval is now the only thing standing
+between a fork PR and the hardware: isolate the runner on its own network segment, and
+stop keeping a long-lived PAT on the box.
 
 ### HIL-1 — UI bind
 
