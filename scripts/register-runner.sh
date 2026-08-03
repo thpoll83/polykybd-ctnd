@@ -70,11 +70,35 @@ find_runner_unit() {
         'actions.runner.*' 2>/dev/null | awk 'NR==1{print $1}' || true
 }
 
+# ── Privileged start/stop/restart of the runner service ───────────────────────
+# SECURITY (HIL-7): go through the installed root-owned wrapper, whose sudoers
+# grant is an exact three-command list with no wildcard, instead of
+# `sudo systemctl <action> <unit>` under a `actions.runner.*` rule that also
+# admitted extra arguments. The wrapper discovers the unit itself, so $unit here
+# is only used for the human-readable messages and the is-active check (both
+# unprivileged).
+#
+# The fallback keeps a rig provisioned before the wrapper existed working — its
+# old wildcard grant is still in place until setup.sh re-runs, and losing the
+# recovery button on an un-updated rig would be worse than the wildcard. Re-run
+# `sudo bash scripts/setup.sh --units-only` to install the wrapper and replace
+# the grant.
+RUNNER_CTL_BIN=/usr/local/sbin/polykybd-runner-ctl
+
+runner_ctl() {
+    local action="$1" unit="$2"
+    if [[ -x "$RUNNER_CTL_BIN" ]]; then
+        sudo "$RUNNER_CTL_BIN" "$action"
+    else
+        sudo systemctl "$action" "$unit"
+    fi
+}
+
 # Start the unit and report whether it stayed up. $1 = unit name.
 start_and_verify() {
     local unit="$1"
     echo "Starting $unit …"
-    sudo systemctl start "$unit"
+    runner_ctl start "$unit"
     sleep 2
     if systemctl is-active --quiet "$unit"; then
         echo "Done. $unit is active (running)."
@@ -96,7 +120,7 @@ if $RESTART_ONLY; then
     fi
     echo "=== PolyKybd CTND — restart runner service ==="
     echo "Restarting $UNIT …"
-    sudo systemctl restart "$UNIT"
+    runner_ctl restart "$UNIT"
     sleep 2
     if systemctl is-active --quiet "$UNIT"; then
         echo "Done. $UNIT is active (running)."
@@ -281,7 +305,7 @@ RUNNER_UNIT="$(find_runner_unit)"
 if $NO_REINSTALL; then
     if [[ -n "$RUNNER_UNIT" ]]; then
         echo "Stopping $RUNNER_UNIT …"
-        sudo systemctl stop "$RUNNER_UNIT" 2>/dev/null || true
+        runner_ctl stop "$RUNNER_UNIT" 2>/dev/null || true
     else
         echo "Error: no installed actions.runner unit found." >&2
         echo "Run once over SSH without --no-reinstall to install the service first." >&2
