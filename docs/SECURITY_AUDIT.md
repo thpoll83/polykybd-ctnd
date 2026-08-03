@@ -155,6 +155,38 @@ Still worth considering as defence in depth, since approval is now the only thin
 between a fork PR and the hardware: isolate the runner on its own network segment, and
 stop keeping a long-lived PAT on the box.
 
+#### Why only `qmk_firmware` and not the other repos
+
+The question comes up every time, so: the setting is deliberately **not** applied to the
+other seven repos. The risk is not "fork PRs run CI", it is "fork PRs run CI **on our
+Pi**", and only `qmk_firmware` has a self-hosted job a fork PR can reach. Surveyed
+2026-08-03 — all eight repos are public, so fork PRs are possible everywhere:
+
+| Repo | Self-hosted job reachable by a fork PR? |
+|---|---|
+| `qmk_firmware` | **yes** — 2 jobs `runs-on: [self-hosted, polykybd-ctnd]`, triggered by `pull_request` |
+| `polykybd-ctnd` | no — its workflow *mentions* `self-hosted` but is the reference copy, `on: workflow_dispatch` only (needs write access to fire) |
+| `PolyKybdHost`, `polykybd-docs`, `wincompose`, `Adafruit-GFX-Library` | no — all `ubuntu-latest` |
+| `PolyKybd`, `gnome-wayland-winreader` | no workflows |
+
+On `ubuntu-latest` an attacker gets an ephemeral VM that GitHub destroys afterwards, with a
+read-only `GITHUB_TOKEN` and no secrets (`pull_request` from a fork withholds them by
+design) — running untrusted code there is what it is for. On the rig they get a persistent
+box holding the PAT, wired to GPIO, able to flash the keyboard. Same trigger, entirely
+different blast radius. Enabling approval on the other repos buys ~nothing and costs a
+manual click before every contributor's CI run.
+
+**The rule to apply going forward is "does a fork PR reach a self-hosted runner?", not "is
+this repo public?"** If a `runs-on: [self-hosted, …]` job is ever added to another repo,
+that repo needs this setting on the same day.
+
+⚠️ **The approval setting does not gate `pull_request_target`.** That trigger runs in the
+*base* repo context with secrets and a write token no matter what the fork-PR policy says.
+`qmk_firmware` has one — the stock upstream `labeler.yml` — which is safe as written
+because it runs on `ubuntu-latest` and never checks out the PR's code. If any
+`pull_request_target` workflow ever gains a checkout of
+`github.event.pull_request.head.sha`, that is a full compromise regardless of HIL-2.
+
 ### HIL-1 — UI bind
 
 `station/config.py`: `ALLOW_LAN` is parsed with a strict `_as_bool()` (plain `bool()`
