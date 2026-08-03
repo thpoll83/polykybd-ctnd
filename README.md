@@ -502,6 +502,23 @@ If the update adds new Python dependencies, also run:
 sudo /opt/polykybd-ctnd/venv/bin/pip install -q -r /opt/polykybd-ctnd/requirements.txt
 ```
 
+### UPDATE button fails — `Unit polykybd-update.service not found`
+
+The rig was provisioned before that unit existed. `setup.sh` is the only thing
+that installs units, and nothing re-runs it, so the matching **timer** is missing
+too — meaning unattended self-updates have never run on this rig. Install just
+the units and their sudoers grants (no apt, no venv rebuild, `config.yaml`
+untouched):
+
+```bash
+cd /opt/polykybd-ctnd
+./scripts/setup.sh --units-only
+```
+
+The UI button keeps working meanwhile — it falls back to running
+`scripts/self-update.sh` in-process — but the periodic timer only comes back with
+the units installed.
+
 ---
 
 ## Project Structure

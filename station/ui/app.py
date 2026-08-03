@@ -35,7 +35,9 @@ REQUIRED_LABELS = {label.lower() for label in RUNNER_LABELS}
 # it from __file__ rather than hardcoding /opt/polykybd-ctnd in user-facing hints.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTER_SCRIPT = REPO_ROOT / "scripts" / "register-runner.sh"
+UPDATE_SCRIPT   = REPO_ROOT / "scripts" / "self-update.sh"
 UPDATE_SERVICE  = "polykybd-update.service"   # oneshot unit that runs self-update.sh
+CTND_SERVICE    = "polykybd-ctnd.service"     # this very service (restarted to apply)
 
 _status         = {"value": "idle"}
 _ci_state       = {"running": False, "url": None}
@@ -670,6 +672,74 @@ def on_restart_runner(_data=None):
                        "runner restarted ✓", "restart failed")
 
 
+def _diagnose_unit_start_failure(stderr: str) -> list[str]:
+    """Explain why `systemctl start polykybd-update.service` was refused.
+
+    The two causes need opposite fixes, so guessing one is worse than saying
+    nothing: a MISSING UNIT means the rig was provisioned before the self-update
+    units existed (re-run setup.sh — and note the *timer* is missing too, so the
+    rig has not been auto-updating at all), while a sudo refusal means the unit
+    is there but /etc/sudoers.d/polykybd-update isn't.
+    """
+    s = (stderr or "").lower()
+    if "not found" in s or "no such file" in s:
+        return [
+            f"[ui] {UPDATE_SERVICE} is not installed on this rig — it was provisioned",
+            "[ui] before the self-update units landed. polykybd-update.timer is missing",
+            "[ui] too, so unattended updates have never been running here.",
+            f"[ui] fix over SSH: cd {REPO_ROOT} && ./scripts/setup.sh --units-only",
+        ]
+    if "password" in s or "not allowed" in s or "sudo" in s:
+        return [
+            "[ui] sudo refused — the NOPASSWD grant is missing.",
+            f"[ui] fix over SSH: cd {REPO_ROOT} && ./scripts/setup.sh --units-only",
+        ]
+    return [f"[ui] fix over SSH: cd {REPO_ROOT} && ./scripts/setup.sh --units-only"]
+
+
+def _update_in_process() -> None:
+    """Apply the update from THIS process when the oneshot unit can't be started.
+
+    Runs the same actuator with ``--no-restart`` so the pull finishes while we are
+    still alive, then restarts the station separately. The split is the whole
+    point: letting the script issue its own restart would tear down our cgroup —
+    which is fine *after* the fast-forward, but would kill it mid-pull otherwise.
+    Losing this process to the restart is the expected end state, so everything
+    worth reading is logged before it is issued.
+    """
+    if not UPDATE_SCRIPT.exists():
+        emit_log(f"[ui] {UPDATE_SCRIPT} is missing — cannot update from the UI.")
+        return
+
+    emit_log("[ui] falling back to running scripts/self-update.sh directly.")
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(UPDATE_SCRIPT), "--no-restart"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        )
+        for line in proc.stdout:
+            emit_log(line.rstrip())
+        rc = proc.wait()
+    except Exception as exc:
+        emit_log(f"[ui] self-update.sh failed: {exc}")
+        return
+    if rc != 0:
+        emit_log(f"[ui] self-update.sh exited {rc} — not restarting the station.")
+        return
+
+    emit_log(f"[ui] restarting {CTND_SERVICE} to apply — the UI will reconnect.")
+    try:
+        res = subprocess.run(["sudo", "-n", "systemctl", "restart", CTND_SERVICE],
+                             capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        res = None
+        emit_log(f"[ui] restart failed: {exc}")
+    if res is not None and res.returncode != 0:
+        emit_log(f"[ui] could not restart: {res.stderr.strip() or res.returncode}")
+        emit_log("[ui] the code IS updated — it runs after the next restart or reboot:")
+        emit_log(f"[ui]   sudo systemctl restart {CTND_SERVICE}")
+
+
 @socketio.on("update_now")
 def on_update_now(_data=None):
     """Manual "Update" button: check the tracked branch and, if behind, kick the
@@ -714,7 +784,13 @@ def on_update_now(_data=None):
             )
             if rc.returncode != 0:
                 emit_log(f"[ui] could not start {UPDATE_SERVICE}: {rc.stderr.strip() or rc.returncode}")
-                emit_log("[ui] check the sudoers grant (setup.sh installs /etc/sudoers.d/polykybd-update).")
+                for line in _diagnose_unit_start_failure(rc.stderr):
+                    emit_log(line)
+                # The unit is only the preferred *carrier*; the actuator is a plain
+                # script this process can run itself. So a missing unit / missing
+                # sudoers grant degrades the button to "slower and it takes the UI
+                # down with it", not to "does nothing".
+                _update_in_process()
                 _update_poll_once()  # revert the badge from 'updating'
         except Exception as exc:
             emit_log(f"[ui] update trigger failed: {exc}")
