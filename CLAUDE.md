@@ -382,7 +382,9 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
   `systemctl restart` — the script's own restart would tear down the UI's cgroup
   mid-pull) and `_diagnose_unit_start_failure()` distinguishes a missing unit from
   a missing sudoers grant, which need opposite fixes. Recovery is
-  **`./scripts/setup.sh --units-only`** — installs only the units + service
+  **`sudo bash ./scripts/setup.sh --units-only`** (`bash …`, not `./…`: an older
+  checkout lacks the execute bit, and with no `x` bit set *even root* gets
+  `Permission denied`) — installs only the units + service
   sudoers grants (no apt, no venv rebuild, no `config.yaml`/chown churn), which is
   what you want on a *working* rig. Don't send someone through a full `setup.sh`
   run to drop two files.

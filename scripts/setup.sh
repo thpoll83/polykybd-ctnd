@@ -22,8 +22,19 @@ for arg in "$@"; do
     esac
 done
 
-# Resolve the real user even when the script is run via sudo
+# Resolve the real user even when the script is run via sudo. Running the script
+# *through* sudo is fine and expected — it needs root for every tee/systemctl —
+# but that must not make the station itself run as root: CTND_USER is baked into
+# the unit files as User=. From a plain root shell there is no SUDO_USER to
+# recover the intended owner from, so refuse rather than silently install
+# User=root units.
 CTND_USER="${SUDO_USER:-$USER}"
+if [[ "$CTND_USER" == "root" ]]; then
+    echo "Error: run this as the station user (sudo is fine: 'sudo bash ./scripts/setup.sh')," >&2
+    echo "       not from a root shell — the units would be installed as User=root." >&2
+    echo "       If you really mean root, set SUDO_USER to the intended owner." >&2
+    exit 1
+fi
 CTND_HOME=$(getent passwd "$CTND_USER" | cut -d: -f6)
 
 # Guard: must be run from the repository root
