@@ -72,13 +72,30 @@ echo "Chromium package: $CHROMIUM_PKG"
 
 # Grants that let the touch UI recover the rig without SSH. Scoped to specific
 # units; deliberately no 'status' (it can open a pager — a known escalation vector).
+RUNNER_CTL_BIN=/usr/local/sbin/polykybd-runner-ctl
+
 install_service_sudoers() {
   SYSTEMCTL_BIN=$(command -v systemctl)
   [[ -n "$SYSTEMCTL_BIN" ]] || return 0
 
-  # "Re-register runner" button → start/stop/restart on actions.runner.* only.
-  printf '%s ALL=(root) NOPASSWD: %s start actions.runner.*, %s stop actions.runner.*, %s restart actions.runner.*\n' \
-    "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
+  # "Re-register runner" button → start/stop/restart the runner service.
+  #
+  # SECURITY (HIL-7): granted on the polykybd-runner-ctl wrapper with an EXACT
+  # command list, NOT on `systemctl … actions.runner.*`. Sudoers matches
+  # arguments as one concatenated string and `*` spans spaces, so the old
+  # wildcard rule permitted an argument tail (further units, systemctl options)
+  # rather than a single unit — and the UI that triggers it is unauthenticated
+  # (HIL-4). Three literal commands admit no arguments at all; the wrapper
+  # discovers the unit itself. See scripts/runner-ctl.sh.
+  #
+  # Installed to /usr/local/sbin (root-owned, not writable by the station user).
+  # It must NOT be granted at its repo path: the station user can write to the
+  # checkout, and self-update rewrites it unattended, so that would restore the
+  # very escalation this closes.
+  sudo install -o root -g root -m 0755 scripts/runner-ctl.sh "$RUNNER_CTL_BIN"
+
+  printf '%s ALL=(root) NOPASSWD: %s start, %s stop, %s restart\n' \
+    "$CTND_USER" "$RUNNER_CTL_BIN" "$RUNNER_CTL_BIN" "$RUNNER_CTL_BIN" \
     | sudo tee /etc/sudoers.d/polykybd-runner > /dev/null
   sudo chmod 0440 /etc/sudoers.d/polykybd-runner
 

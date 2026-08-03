@@ -6,7 +6,7 @@ covers all four repos — check the **Where** column before going looking for co
 
 Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 `PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-03**
-(HIL-2 confirmed set; HIL-7 raised).
+(HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -30,46 +30,11 @@ Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 | HIL-4 | Unauthenticated privileged SocketIO handlers | ctnd | 🟡 accepted + documented (mitigated by HIL-1) |
 | HIL-5 | Firmware-filename path traversal | ctnd | ✅ fixed |
 | HIL-6 | PAT in `config.yaml` with default perms | ctnd | ✅ fixed |
-| HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | 🔲 **open — needs a decision** |
+| HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
 
 ---
 
 ## 🔲 Open
-
-### HIL-7 — sudoers wildcard admits extra `systemctl` arguments
-
-Raised by CodeRabbit on PR #51 and recorded rather than fixed there — it is pre-existing
-code outside that PR's diff, and the safe fix is bigger than a one-liner.
-
-`scripts/setup.sh` installs:
-
-```text
-$CTND_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start actions.runner.*, … stop …, … restart …
-```
-
-Sudoers matches command-line arguments as a single concatenated string, and `*` **matches
-space characters**. So the rule does not mean "one unit whose name starts with
-`actions.runner.`" — it permits any argument tail beginning with that prefix, including
-further unit names and `systemctl` options. The station user gets that grant, and the
-control UI runs as the station user with no authentication (HIL-4), so the two compound:
-whatever this rule ultimately permits is reachable by anyone who can open the UI.
-
-**Not yet established:** whether a concrete root-code-execution path exists through it
-(e.g. whether `systemctl` will act on an attacker-writable unit *file path* supplied as a
-second argument). That needs checking on the rig — there is no systemd PID 1 in the dev
-container to test against. The wildcard-matches-spaces behaviour itself is documented
-sudoers semantics and is not in doubt.
-
-**Candidate fixes:**
-- a small **root-owned wrapper** that accepts exactly one of `start|stop|restart` plus one
-  unit name it validates against `^actions\.runner\.[A-Za-z0-9_.-]+\.service$`, with the
-  sudoers rule scoped to the wrapper. Most robust; costs a new script and a
-  `register-runner.sh` change.
-- or generate an **exact** sudoers rule at registration time, once the real unit name is
-  known (it is `actions.runner.<owner>-<repo>.<name>.service`, not knowable at
-  `setup.sh` time — which is why the wildcard is there).
-
-The same pattern is worth re-checking in `/etc/sudoers.d/polykybd-usb` while doing this.
 
 ### HIL-3 — self-update pulls and runs `main` unverified (accepted risk)
 
@@ -123,6 +88,59 @@ whoever can reach the UI. Weigh new sudo grants with that in mind.
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### HIL-7 — sudoers wildcard admitted extra `systemctl` arguments
+
+Raised by CodeRabbit on PR #51, recorded there, fixed separately.
+
+The grant `setup.sh` used to install was:
+
+```text
+$CTND_USER ALL=(root) NOPASSWD: /usr/bin/systemctl start actions.runner.*, … stop …, … restart …
+```
+
+Sudoers matches command-line arguments as a single concatenated string and `*` **matches
+space characters**, so that did not mean "one unit whose name starts with
+`actions.runner.`" — it permitted any argument tail beginning with that prefix, including
+further unit names and `systemctl` options. Because the control UI runs as the station
+user with no authentication (HIL-4), whatever it admitted was reachable by anyone who
+could open the page.
+
+**The fix is not a tighter pattern** — sudoers cannot express "one word", so no wildcard
+formulation is safe. Instead the unit name was taken out of the caller's hands:
+
+- `scripts/runner-ctl.sh` (installed as `/usr/local/sbin/polykybd-runner-ctl`, root-owned
+  `0755`) takes **exactly one argument** from `{start, stop, restart}` and **discovers the
+  unit itself** with the same query `register-runner.sh` uses. No caller-supplied string
+  reaches `systemctl`, so there is nothing to inject.
+- The sudoers rule is now three **literal** commands with no arguments to fill in:
+  `polykybd-runner-ctl start`, `… stop`, `… restart`.
+- `register-runner.sh` calls the wrapper via `runner_ctl()`, falling back to the old
+  `sudo systemctl` path when the wrapper is absent — so a rig provisioned before this
+  change keeps its recovery button until `setup.sh` re-runs.
+
+⚠️ **The wrapper must be granted at its `/usr/local/sbin` path, never at its repo path.**
+The station user can write to the checkout, and self-update rewrites it unattended, so a
+sudo grant pointing into the repo would hand back exactly the escalation this removes.
+That also means **a change to `runner-ctl.sh` only takes effect once `setup.sh` has re-run
+on the rig** — the installed copy is what the grant refers to.
+
+`tests/runner_ctl_test.py` pins the refusal paths (extra arguments, unknown actions,
+missing/odd unit names) against a fake `systemctl` on `PATH`, because the security value
+here is entirely in what the script *refuses* and none of that is visible from reading the
+sudoers rule.
+
+**Deploy step:** `sudo bash scripts/setup.sh --units-only` on the rig installs the wrapper
+and replaces the grant. Until then the rig still carries the wildcard. Confirm with
+`sudo -l | grep runner-ctl`.
+
+Not established, and deliberately not claimed: whether the old wildcard had a concrete
+root-code-execution path (it depends on what `systemctl` does with a second argument, and
+the dev container has no systemd PID 1 to test against). The fix does not rest on that
+question — the argument tail should never have been reachable either way.
+
+Still worth a look while in the area: `/etc/sudoers.d/polykybd-usb` uses the same
+grant shape for `uhubctl`/`picotool` and was not part of this change.
 
 ### HIL-2 — self-hosted runner RCE from fork PRs
 
@@ -214,7 +232,13 @@ Only a bare filename resolving to a real file directly in `FIRMWARE_DIR` is acce
 registration tokens. `scripts/setup.sh` now `chown`s it to the station user and `chmod`s
 it `600` **on every run**, not only when creating it from the example — an existing rig
 was provisioned before this line and still carries the `0644` umask default, so re-running
-`setup.sh` is what fixes it in the field. The initial `cp` also runs under `umask 077`, so
+`setup.sh` is what fixes it in the field.
+
+**Rig remediated 2026-08-03** — the deployed `config.yaml` was `chmod 600`'d by hand
+(faster than a full `setup.sh` re-run on a healthy rig), and the **PAT was rotated**. The
+rotation is the part that mattered: the file had been world-readable while HIL-2 still let
+returning contributors run code on the box, so tightening the mode afterwards would not
+have helped if the old token had been read. Any token predating 2026-08-03 is revoked. The initial `cp` also runs under `umask 077`, so
 the file is never briefly world-readable; note that the window it closes never contained a
 secret (a freshly-copied file is the example, whose `token` is empty) — the point is that
 the invariant should not depend on that remaining true.
