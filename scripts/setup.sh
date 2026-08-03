@@ -3,13 +3,21 @@
 set -euo pipefail
 
 # Parse flags
-# --local  Use the current directory as the install location instead of
-#          cloning into /opt/polykybd-ctnd. Useful when you have already
-#          cloned the repo and want to run it in place.
+# --local       Use the current directory as the install location instead of
+#               cloning into /opt/polykybd-ctnd. Useful when you have already
+#               cloned the repo and want to run it in place.
+# --units-only  Install ONLY the systemd units + their sudoers grants into the
+#               existing in-place install, then exit. For a rig provisioned
+#               before a unit existed (e.g. polykybd-update.service/.timer):
+#               re-running the full setup would apt-update and rebuild the venv
+#               on a working rig just to drop two files. Idempotent, and it
+#               touches neither config.yaml nor the venv.
 LOCAL=false
+UNITS_ONLY=false
 for arg in "$@"; do
     case "$arg" in
-        --local) LOCAL=true ;;
+        --local)      LOCAL=true ;;
+        --units-only) UNITS_ONLY=true; LOCAL=true ;;
         *) echo "Unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -24,7 +32,10 @@ if [[ ! -f station/ui/app.py ]]; then
     exit 1
 fi
 
-if $LOCAL; then
+if $UNITS_ONLY; then
+    INSTALL_DIR=$(pwd)
+    echo "=== PolyKybd CTND Setup — units only, in $INSTALL_DIR (user: $CTND_USER) ==="
+elif $LOCAL; then
     INSTALL_DIR=$(pwd)
     echo "=== PolyKybd CTND Setup — local install in $INSTALL_DIR (user: $CTND_USER) ==="
 else
@@ -43,6 +54,66 @@ else
     CHROMIUM_BIN=chromium-browser
 fi
 echo "Chromium package: $CHROMIUM_PKG"
+
+# ── Service sudoers grants + systemd units ────────────────────────────────────
+# Defined as functions because --units-only needs exactly these two steps and
+# nothing else (no apt, no venv, no chown) — see the flag comment at the top.
+
+# Grants that let the touch UI recover the rig without SSH. Scoped to specific
+# units; deliberately no 'status' (it can open a pager — a known escalation vector).
+install_service_sudoers() {
+  SYSTEMCTL_BIN=$(command -v systemctl)
+  [[ -n "$SYSTEMCTL_BIN" ]] || return 0
+
+  # "Re-register runner" button → start/stop/restart on actions.runner.* only.
+  printf '%s ALL=(root) NOPASSWD: %s start actions.runner.*, %s stop actions.runner.*, %s restart actions.runner.*\n' \
+    "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
+    | sudo tee /etc/sudoers.d/polykybd-runner > /dev/null
+  sudo chmod 0440 /etc/sudoers.d/polykybd-runner
+
+  # Self-update (see scripts/self-update.sh):
+  #  - the updater (running as $CTND_USER) restarts the station after a pull
+  #  - the "Update" UI button kicks the oneshot updater unit
+  # Both scoped to the two specific units only.
+  printf '%s ALL=(root) NOPASSWD: %s restart polykybd-ctnd.service, %s start --no-block polykybd-update.service, %s start polykybd-update.service\n' \
+    "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
+    | sudo tee /etc/sudoers.d/polykybd-update > /dev/null
+  sudo chmod 0440 /etc/sudoers.d/polykybd-update
+}
+
+# Install every unit, substituting the actual username, home directory, install
+# path and chromium binary for the 'pi' placeholders in the templates.
+install_systemd_units() {
+  sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
+    systemd/polykybd-ctnd.service \
+    | sudo tee /etc/systemd/system/polykybd-ctnd.service > /dev/null
+
+  sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g; s|chromium-browser|$CHROMIUM_BIN|g" \
+    systemd/polykybd-kiosk.service \
+    | sudo tee /etc/systemd/system/polykybd-kiosk.service > /dev/null
+
+  # Self-update timer + oneshot (pulls the tracked branch and restarts the station
+  # when it gains commits and the rig is idle — see scripts/self-update.sh).
+  for unit in polykybd-update.service polykybd-update.timer; do
+    sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
+      "systemd/$unit" \
+      | sudo tee "/etc/systemd/system/$unit" > /dev/null
+  done
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable polykybd-ctnd.service polykybd-kiosk.service
+  sudo systemctl enable --now polykybd-update.timer
+}
+
+if $UNITS_ONLY; then
+    install_service_sudoers
+    install_systemd_units
+    echo ""
+    echo "Units and sudoers grants installed. Nothing else was touched."
+    echo "The self-update timer is enabled; the UI's UPDATE button works now."
+    systemctl list-timers polykybd-update.timer --no-pager || true
+    exit 0
+fi
 
 # System packages
 sudo apt-get update -qq
@@ -90,26 +161,9 @@ printf '%s ALL=(ALL) NOPASSWD: %s\n' "$CTND_USER" "$PICOTOOL_BIN" \
   | sudo tee -a /etc/sudoers.d/polykybd-usb > /dev/null
 sudo chmod 0440 /etc/sudoers.d/polykybd-usb
 
-# Allow the station user to start/stop the GitHub Actions runner service without
-# a password, so the "Re-register runner" button in the touch UI can recover the
-# runner without SSH. Scoped to start/stop/restart on actions.runner.* units only
-# (no 'status' — that can open a pager and is a known privilege-escalation vector).
-SYSTEMCTL_BIN=$(command -v systemctl)
-if [[ -n "$SYSTEMCTL_BIN" ]]; then
-  printf '%s ALL=(root) NOPASSWD: %s start actions.runner.*, %s stop actions.runner.*, %s restart actions.runner.*\n' \
-    "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
-    | sudo tee /etc/sudoers.d/polykybd-runner > /dev/null
-  sudo chmod 0440 /etc/sudoers.d/polykybd-runner
-
-  # Self-update grants (see scripts/self-update.sh):
-  #  - the updater (running as $CTND_USER) restarts the station after a pull
-  #  - the "Update" UI button kicks the oneshot updater unit
-  # Both scoped to the two specific units only.
-  printf '%s ALL=(root) NOPASSWD: %s restart polykybd-ctnd.service, %s start --no-block polykybd-update.service, %s start polykybd-update.service\n' \
-    "$CTND_USER" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" "$SYSTEMCTL_BIN" \
-    | sudo tee /etc/sudoers.d/polykybd-update > /dev/null
-  sudo chmod 0440 /etc/sudoers.d/polykybd-update
-fi
+# Allow the station user to recover the runner and drive self-update from the
+# touch UI without SSH (definitions above; --units-only installs just these).
+install_service_sudoers
 
 # Install application
 if $LOCAL; then
@@ -153,27 +207,8 @@ fi
 sudo chown "$CTND_USER:$CTND_USER" "$INSTALL_DIR/config/config.yaml"
 sudo chmod 600 "$INSTALL_DIR/config/config.yaml"
 
-# Install systemd service files, substituting the actual username, home
-# directory, and chromium binary for the 'pi' placeholders in the templates.
-sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
-  systemd/polykybd-ctnd.service \
-  | sudo tee /etc/systemd/system/polykybd-ctnd.service > /dev/null
-
-sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g; s|chromium-browser|$CHROMIUM_BIN|g" \
-  systemd/polykybd-kiosk.service \
-  | sudo tee /etc/systemd/system/polykybd-kiosk.service > /dev/null
-
-# Self-update timer + oneshot (pulls the tracked branch and restarts the station
-# when it gains commits and the rig is idle — see scripts/self-update.sh).
-for unit in polykybd-update.service polykybd-update.timer; do
-  sed "s|User=pi|User=$CTND_USER|g; s|/home/pi|$CTND_HOME|g; s|/opt/polykybd-ctnd|$INSTALL_DIR|g" \
-    "systemd/$unit" \
-    | sudo tee "/etc/systemd/system/$unit" > /dev/null
-done
-
-sudo systemctl daemon-reload
-sudo systemctl enable polykybd-ctnd.service polykybd-kiosk.service
-sudo systemctl enable --now polykybd-update.timer
+# Install the systemd units (definitions above; --units-only installs just these).
+install_systemd_units
 
 echo ""
 echo "=== GitHub Actions Runner ==="

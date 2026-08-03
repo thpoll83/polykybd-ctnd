@@ -371,6 +371,21 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
   `/etc/sudoers.d/polykybd-update` granting the station user NOPASSWD on exactly
   `systemctl restart polykybd-ctnd.service` and `systemctl start
   polykybd-update.service`.
+- ⚠️ **A rig provisioned before a unit landed never gets it — `setup.sh` is the
+  only installer, and nothing re-runs it.** Hit 2026-08-03: the UPDATE button
+  failed with `Unit polykybd-update.service not found`, i.e. the rig predates the
+  self-update feature, so **the timer was missing too and unattended updates had
+  never run there** (HIL was unaffected only because `qmk-test.yml` force-syncs
+  the station to `origin/main` itself — see the stale-rig warning above). The unit
+  is just the *carrier*; `scripts/self-update.sh` is the actuator, so `update_now`
+  now falls back to running it in-process (`--no-restart`, then a separate
+  `systemctl restart` — the script's own restart would tear down the UI's cgroup
+  mid-pull) and `_diagnose_unit_start_failure()` distinguishes a missing unit from
+  a missing sudoers grant, which need opposite fixes. Recovery is
+  **`./scripts/setup.sh --units-only`** — installs only the units + service
+  sudoers grants (no apt, no venv rebuild, no `config.yaml`/chown churn), which is
+  what you want on a *working* rig. Don't send someone through a full `setup.sh`
+  run to drop two files.
 
 For rapid UI iteration the Flask dev server can be run directly:
 ```bash
