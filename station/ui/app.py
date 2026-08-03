@@ -687,14 +687,14 @@ def _diagnose_unit_start_failure(stderr: str) -> list[str]:
             f"[ui] {UPDATE_SERVICE} is not installed on this rig — it was provisioned",
             "[ui] before the self-update units landed. polykybd-update.timer is missing",
             "[ui] too, so unattended updates have never been running here.",
-            f"[ui] fix over SSH: cd {REPO_ROOT} && ./scripts/setup.sh --units-only",
+            f"[ui] fix over SSH: cd {REPO_ROOT} && sudo bash ./scripts/setup.sh --units-only",
         ]
     if "password" in s or "not allowed" in s or "sudo" in s:
         return [
             "[ui] sudo refused — the NOPASSWD grant is missing.",
-            f"[ui] fix over SSH: cd {REPO_ROOT} && ./scripts/setup.sh --units-only",
+            f"[ui] fix over SSH: cd {REPO_ROOT} && sudo bash ./scripts/setup.sh --units-only",
         ]
-    return [f"[ui] fix over SSH: cd {REPO_ROOT} && ./scripts/setup.sh --units-only"]
+    return [f"[ui] fix over SSH: cd {REPO_ROOT} && sudo bash ./scripts/setup.sh --units-only"]
 
 
 def _update_in_process() -> None:

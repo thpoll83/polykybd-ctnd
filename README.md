@@ -512,8 +512,13 @@ untouched):
 
 ```bash
 cd /opt/polykybd-ctnd
-./scripts/setup.sh --units-only
+sudo bash ./scripts/setup.sh --units-only
 ```
+
+(`bash …` rather than `./…` because an older checkout may not have the execute
+bit — without any `x` bit even root gets *Permission denied*. Running the script
+through `sudo` is expected; it refuses to run from a bare root shell, where it
+can't tell which user the units should belong to.)
 
 The UI button keeps working meanwhile — it falls back to running
 `scripts/self-update.sh` in-process — but the periodic timer only comes back with
