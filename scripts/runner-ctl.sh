@@ -30,6 +30,18 @@
 
 set -euo pipefail
 
+# ⚠️ `systemctl` below is resolved through PATH, and this runs as root. That is
+# safe because sudo replaces the caller's PATH with the `secure_path` from
+# /etc/sudoers (Debian/Raspberry Pi OS ship one, and `env_reset` is the default),
+# so the station user cannot point it at a fake binary. It is a DEPENDENCY, not
+# an accident: if secure_path is ever removed or commented out, this script hands
+# root to whoever can set PATH. Verify with `sudo -l`, which prints the matching
+# Defaults entries above the granted commands.
+#
+# Deliberately not hardcoding an absolute path here: it varies (/usr/bin vs /bin,
+# and /run/current-system/... on NixOS), and a wrong constant fails closed but
+# noisily on a rig that is fine. The check above is the guard.
+
 readonly USAGE="usage: polykybd-runner-ctl {start|stop|restart}"
 
 # Exactly one argument, from a fixed set. Anything else is refused — no
