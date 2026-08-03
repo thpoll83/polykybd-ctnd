@@ -123,10 +123,15 @@ install_service_sudoers() {
 # thing an install script should do unasked.
 warn_if_blanket_sudo() {
   command -v sudo >/dev/null 2>&1 || return 0
-  # Anchored to end-of-line so the scoped `NOPASSWD: /usr/...` rules never match;
-  # `(ALL : ALL) ALL` (password required) is intentionally not flagged.
+  # Match `NOPASSWD: ALL` followed by end-of-line, whitespace or a comma. The
+  # trailing class matters: `NOPASSWD: ALL, /usr/bin/foo` is still blanket root
+  # (ALL already covers everything, the rest is redundant), and an end-of-line
+  # anchor alone would miss it. It does not match a command literally named
+  # ALLOWED_* etc, and the scoped `NOPASSWD: /usr/...` rules cannot match either.
+  # `(ALL : ALL) ALL` (password required) is deliberately not flagged — only the
+  # passwordless form is the finding.
   sudo -l -U "$CTND_USER" 2>/dev/null \
-    | grep -qE 'NOPASSWD:[[:space:]]*ALL[[:space:]]*$' || return 0
+    | grep -qE 'NOPASSWD:[[:space:]]*ALL([[:space:],]|$)' || return 0
 
   cat >&2 <<EOF
 
