@@ -240,13 +240,75 @@ cd /opt/polykybd-ctnd
 
 Or recover straight from the **touchscreen** — no SSH — with the **Runner** row's **⟳ Restart** / **↻ Re-register** buttons (see [Troubleshooting](#github-actions-runner-waiting-for-a-runner)).
 
-### 5. Reboot
+### 5. Harden the rig
+
+`setup.sh` installs narrowly-scoped sudo grants, but three things it **cannot** do for you.
+Stock Raspberry Pi OS ships the first two, so a freshly-imaged rig needs them every time.
+
+⚠️ **Confirm the station user has a usable password first** — without one, removing the
+blanket sudo rule takes away sudo entirely:
+
+```bash
+sudo passwd -S "$USER"      # want "<user> P ..."; if L or NP, run: sudo passwd "$USER"
+```
+
+Keep a second terminal open at a root prompt (`sudo -i`) while doing the next two, so you
+can undo them instantly if anything surprises you.
+
+**a. Remove blanket passwordless root** (HIL-8). The station user otherwise has
+`NOPASSWD: ALL`, which makes every scoped grant decorative — and since the Actions runner
+executes workflow code as this user, code execution on the rig *is* root:
+
+```bash
+sudo mv /etc/sudoers.d/010_pi-nopasswd /root/010_pi-nopasswd.bak
+```
+
+**b. Stop the sudo credential being shared across terminals** (HIL-9). Pi OS sets
+`timestamp_type=global`, so one `sudo` authenticates the *user* for 15 minutes — long
+enough for any other process running as that user to borrow it:
+
+```bash
+sudo mv /etc/sudoers.d/010_global-tty /root/010_global-tty.bak
+```
+
+**c. Require approval for fork PRs** (HIL-2) — on GitHub, not the rig. In the
+`qmk_firmware` repo: Settings → Actions → General → *Fork pull request workflows from
+outside collaborators* → **Require approval for all external contributors**. The default
+gates only *first-time* contributors, so one merged trivial PR would otherwise earn
+permanent unreviewed access to your hardware.
+
+**Verify** — judge by whether sudo *prompts*, not by whether it refuses. A user in the
+`sudo` group can always run anything with a password, so a non-granted command prompts; it
+is never refused. Clear the cached credential first or a recent `sudo` masks the result:
+
+```bash
+sudo -k
+sudo /usr/local/sbin/polykybd-runner-ctl status   # PROMPTS  → (a) worked
+sudo -k
+sudo /usr/local/sbin/polykybd-runner-ctl start    # no prompt → scoped grants intact
+sudo -l | grep -E 'NOPASSWD: ALL|timestamp'       # no output → (a) and (b) both done
+```
+
+For (b), authenticate in one terminal and run `sudo -n true` in another: it must report
+*"a password is required"*.
+
+Nothing automated depends on either removed file — every scoped path uses `sudo -n`
+against a NOPASSWD grant. You will be asked for a password once per terminal instead of
+once per 15 minutes, and `setup.sh` / `svc.sh install` will prompt.
+
+Background and rationale for each: [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
+
+### 6. Reboot
 
 ```bash
 sudo reboot
 ```
 
-The touchscreen UI starts automatically. It is also accessible from any machine on your local network at `http://<rpi-ip>:5000`.
+The touchscreen UI starts automatically. It listens on **loopback only** by default — the
+kiosk browser reaches it at `http://localhost:5000`, but other machines cannot. The UI is
+unauthenticated and can flash firmware, drive GPIO and control the runner, so reach it
+from elsewhere with an SSH tunnel (`ssh -L 5000:localhost:5000 <user>@<rpi-ip>`) rather
+than by setting `ui.allow_lan`.
 
 ---
 
@@ -377,7 +439,9 @@ sudo journalctl -u polykybd-ctnd -n 50
 ss -tlnp | grep 5000
 ```
 
-No output means the process is not running. If it shows `0.0.0.0:5000` the service is up; check your firewall (see below).
+No output means the process is not running. **`127.0.0.1:5000` is correct and expected** —
+the UI binds loopback by default (it is unauthenticated and can flash firmware, drive GPIO
+and control the runner). `0.0.0.0:5000` means `ui.allow_lan` is on.
 
 **Test locally on the Pi first:**
 
@@ -385,7 +449,16 @@ No output means the process is not running. If it shows `0.0.0.0:5000` the servi
 curl http://localhost:5000
 ```
 
-If this works but a remote browser cannot connect, a firewall is blocking the port:
+If that works but a *remote* browser cannot connect, the loopback bind is doing its job —
+that is not a fault to fix. Reach it over an SSH tunnel instead:
+
+```bash
+ssh -L 5000:localhost:5000 <user>@<rpi-ip>    # then browse http://localhost:5000
+```
+
+Prefer that over `ui.allow_lan: true`, which exposes full unauthenticated rig control to
+everything that can reach the port (see HIL-4 in `docs/SECURITY_AUDIT.md`). Only if you
+have deliberately set `allow_lan` and it is still unreachable is a firewall the culprit:
 
 ```bash
 sudo ufw status
