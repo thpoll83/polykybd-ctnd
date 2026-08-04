@@ -33,7 +33,7 @@ HIL-8 raised and remediated; HIL-9 raised and partly mitigated).
 | HIL-6 | PAT in `config.yaml` with default perms | ctnd | ✅ fixed |
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
 | HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | ✅ fixed (rig) |
-| HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 partly mitigated — (2) still open |
+| HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 (1) fixed; (2) deferred by decision |
 
 ---
 
@@ -95,6 +95,13 @@ Not attempted, because it is more than a `useradd` — anyone taking it on needs
   awkward part: it either re-opens consequence 2 for the new user, or the sync has to move
   somewhere the runner cannot write to;
 - re-registration of the runner under the new account (`svc.sh install <user>`).
+
+**Decision 2026-08-03: (2) is deferred, not rejected.** The dedicated-runner-user work is
+recorded as a recommendation in the rig setup guide (`README.md` §5d) so a new rig build
+sees it at the point it would be cheapest to do — before the runner is registered — rather
+than only in this tracker. Revisit if the rig ever serves a repo taking outside
+contributions routinely; until then HIL-2's approval gate is what keeps untrusted code off
+the box.
 
 ⚠️ Like HIL-8 this is **rig state, not repo state** — re-check with `sudo -l` and
 `systemctl show -p User actions.runner.*.service` when re-auditing.

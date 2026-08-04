@@ -277,6 +277,24 @@ outside collaborators* → **Require approval for all external contributors**. T
 gates only *first-time* contributors, so one merged trivial PR would otherwise earn
 permanent unreviewed access to your hardware.
 
+**d. Recommended, not required: run the Actions runner as its own user** (HIL-9). The
+steps above stop workflow code from *borrowing* root, but the runner still executes as the
+same account you log in with — and CI force-syncs and runs the station checkout, so a
+workflow can rewrite station code that later runs as that user under systemd, with no sudo
+involved. A dedicated unprivileged account closes that; it is skipped here because it is
+more than a `useradd`:
+
+- `gpio` + `plugdev` group membership (RPi.GPIO in `flash.py`, hidraw for the keyboard)
+- the `uhubctl` and `picotool` sudo grants move to the runner user — the HIL job really
+  does flash through `sudo`
+- write access to the station checkout, because CI force-syncs it. This is the awkward
+  part: granted naively it re-opens the same hole for the new user, so the sync wants to
+  live somewhere the runner cannot write
+- re-registration under the new account (`svc.sh install <user>`)
+
+Worth doing if the rig ever serves a repo that accepts outside contributions routinely.
+Until then, (c) above is what keeps untrusted code off the box.
+
 **Verify** — judge by whether sudo *prompts*, not by whether it refuses. A user in the
 `sudo` group can always run anything with a password, so a non-granted command prompts; it
 is never refused. Clear the cached credential first or a recent `sudo` masks the result:
