@@ -7,7 +7,7 @@ covers all four repos — check the **Where** column before going looking for co
 Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
 `PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-03**
 (HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed;
-HIL-8 raised and remediated; HIL-9 raised).
+HIL-8 raised and remediated; HIL-9 raised and partly mitigated).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -33,7 +33,7 @@ HIL-8 raised and remediated; HIL-9 raised).
 | HIL-6 | PAT in `config.yaml` with default perms | ctnd | ✅ fixed |
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
 | HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | ✅ fixed (rig) |
-| HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🔲 **open — needs a decision** |
+| HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 partly mitigated — (2) still open |
 
 ---
 
@@ -47,22 +47,45 @@ rather than finishing the job.
 The Actions runner executes workflow code as `thpoll`, which is also the human operator's
 login. Two consequences survive HIL-8:
 
-1. **The sudo credential cache is shared.** This rig runs `Defaults timestamp_type=global`,
-   so one successful `sudo` authenticates the *user*, not the terminal, for
-   `timestamp_timeout` (15 min default). Any process running as `thpoll` during that
-   window — workflow code included — can `sudo` to root without knowing the password. The
-   operator working on the desktop opens the window; nothing on the CI side has to.
+1. ~~**The sudo credential cache is shared.**~~ **CLOSED 2026-08-03.** The rig ran
+   `Defaults timestamp_type=global` (its own stock file, `/etc/sudoers.d/010_global-tty`,
+   containing exactly that one line), so one successful `sudo` authenticated the *user*,
+   not the terminal, for `timestamp_timeout` (15 min default) — any process running as
+   `thpoll` in that window, workflow code included, could `sudo` to root without knowing
+   the password, with the operator opening the window just by working on the desktop.
+   Removed, reverting sudo to its upstream default `timestamp_type=tty`: the credential is
+   keyed to the authenticating terminal, and the runner service has no tty (a pty it
+   allocated would be a different one). See the verification below.
 2. **CI has write access to the station code.** `qmk-test.yml` force-syncs the checkout
    (`git checkout -q -f -B main origin/main`) and then runs
    `venv/bin/python -m station.test_runner` from it. So workflow code can modify station
    code that later runs as `thpoll` under systemd — an escalation that needs no sudo at
    all, just patience.
 
-Both are gated in practice by HIL-2 (fork PRs need approval), which is again doing more
-work than a settings toggle should have to.
+(2) remains, and is gated in practice by HIL-2 (fork PRs need approval) — which is again
+doing more work than a settings toggle should have to.
 
-**The fix is a dedicated unprivileged runner user**, separate from the login. Not
-attempted, because it is more than a `useradd` — anyone taking it on needs:
+**Partial mitigation applied 2026-08-03.** Chosen over `timestamp_timeout=0`, which buys
+the same thing but makes the operator retype a password on every single `sudo`; per-tty
+scoping keeps normal ergonomics within one terminal. Verified with two terminals:
+
+```console
+# terminal A
+$ sudo -k && sudo true      # authenticate A
+# terminal B
+$ sudo -n true
+sudo: a password is required
+```
+
+B failing is the proof — before the change it succeeded silently by borrowing A's
+credential, which is precisely what workflow code could do. Nothing on the rig depends on
+the shared cache: `self-update.sh` and the UI use `sudo -n` against NOPASSWD grants, and
+`flash.py`'s `uhubctl`/`picotool` are NOPASSWD too — none consult a timestamp. The only
+visible change is a password once per terminal instead of once per 15 minutes across all
+of them.
+
+**The full fix for (2) is a dedicated unprivileged runner user**, separate from the login.
+Not attempted, because it is more than a `useradd` — anyone taking it on needs:
 
 - group membership for the hardware the tests drive: `gpio` (RPi.GPIO in `flash.py`) and
   `plugdev` (hidraw, per `99-polykybd.rules`);
@@ -72,10 +95,6 @@ attempted, because it is more than a `useradd` — anyone taking it on needs:
   awkward part: it either re-opens consequence 2 for the new user, or the sync has to move
   somewhere the runner cannot write to;
 - re-registration of the runner under the new account (`svc.sh install <user>`).
-
-Until then, a cheaper partial mitigation is dropping `timestamp_type=global` (or setting
-`timestamp_timeout=0`) so the operator's sudo cannot be borrowed by another process running
-as the same user. That closes consequence 1 and costs a password per sudo.
 
 ⚠️ Like HIL-8 this is **rig state, not repo state** — re-check with `sudo -l` and
 `systemctl show -p User actions.runner.*.service` when re-auditing.
