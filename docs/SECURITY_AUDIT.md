@@ -150,8 +150,8 @@ token on connect (required only when `allow_lan` is set) is the intended next st
 
 ⚠️ HIL-4 is also the **amplifier** for every station-user privilege: the UI runs as that
 user, so anything the station user can do without a password (see HIL-7, and HIL-8 for
-why that set was until 2026-08-03 *everything*) is reachable by whoever can reach the UI. Weigh new
-sudo grants with that in mind.
+why that set was, until 2026-08-03, *everything*) is reachable by whoever can reach the
+UI. Weigh new sudo grants with that in mind.
 
 ---
 
@@ -223,7 +223,7 @@ Both confirmed on the rig. The `status` run also exercised the HIL-7 wrapper end
 real hardware: sudo let it through on the password, and the wrapper itself rejected the
 action with its usage message and exit 2.
 
-``setup.sh` **warns** when it detects this (`warn_if_blanket_sudo`) rather than removing
+`setup.sh` **warns** when it detects this (`warn_if_blanket_sudo`) rather than removing
 it — pulling a distro file out from under an operator who may have no password set is not
 something an install script should do unasked. The warning is what stops the next person
 installing scoped grants and reasonably assuming they mean something.
@@ -382,7 +382,8 @@ was provisioned before this line and still carries the `0644` umask default, so 
 (faster than a full `setup.sh` re-run on a healthy rig), and the **PAT was rotated**. The
 rotation is the part that mattered: the file had been world-readable while HIL-2 still let
 returning contributors run code on the box, so tightening the mode afterwards would not
-have helped if the old token had been read. Any token predating 2026-08-03 is revoked. The initial `cp` also runs under `umask 077`, so
+have helped if the old token had been read. Any token predating 2026-08-03 is
+revoked. The initial `cp` also runs under `umask 077`, so
 the file is never briefly world-readable; note that the window it closes never contained a
 secret (a freshly-copied file is the example, whose `token` is empty) — the point is that
 the invariant should not depend on that remaining true.
