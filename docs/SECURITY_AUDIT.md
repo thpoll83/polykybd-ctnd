@@ -5,9 +5,10 @@ Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` ho
 covers all four repos — check the **Where** column before going looking for code.
 
 Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
-`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-03**
+`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-04**
 (HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed;
-HIL-8 raised and remediated; HIL-9 raised and partly mitigated).
+HIL-8 raised and remediated; HIL-9 raised and partly mitigated; FW-2 key
+provisioned).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -18,7 +19,7 @@ HIL-8 raised and remediated; HIL-9 raised and partly mitigated).
 | ID | Title | Where | Status |
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
-| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ **warn-only** — see below |
+| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ warn-only — key provisioned, 3 steps left |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
 | FW-6 | (note only) | qmk | ✅ closed (PR #112) |
@@ -390,18 +391,33 @@ the invariant should not depend on that remaining true.
 
 ---
 
-## ⚠️ FW-2 — firmware signing is warn-only until keys are provisioned
+## ⚠️ FW-2 — firmware signing is warn-only until enforcement is switched on
 
-The Ed25519 image-signature check ships **warn-only**: `base/fw_pubkey.h` is an all-zero
-placeholder and the verification result is logged, never enforced. To actually enforce
-authenticity, in this order:
+The Ed25519 image-signature check ships **warn-only**: the verification result is logged,
+never enforced. Progress toward enforcing authenticity, in the order the steps must happen:
 
-1. `python3 keyboards/polykybd/tools/gen_signing_key.py …` — writes `base/fw_pubkey.h`
-   (commit it) and a private key that must **not** enter the repo.
-2. Add that private key as the `FW_SIGNING_KEY` secret in `qmk_firmware`; release CI then
-   signs the `.bin` and ships a `.bin.sig` alongside it.
-3. Add `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` to `keyboards/polykybd/rules.mk`.
+1. ✅ **Done 2026-08-04** (qmk PR #183) — real keypair generated with
+   `tools/gen_signing_key.py`; `base/fw_pubkey.h` committed with the real public key (no
+   longer the all-zero placeholder). The private half was generated on the maintainer's
+   machine and never entered the repo or a transcript. Build + HIL both green with it.
+2. 🔲 Add the private key as the `FW_SIGNING_KEY` secret in `qmk_firmware`, cut a release,
+   and confirm the assets include `<target>.bin.sig`. ⚠️ Fails **quietly** if the secret is
+   missing — the workflow logs `::notice::FW_SIGNING_KEY not set` and releases unsigned, so
+   check for the `.sig` asset rather than assuming a green release signed anything.
+3. 🔲 Flash that signed build and confirm the console prints `FW_UP: image signature OK`.
+   **Do not skip this.** It is the first and only moment that proves the private key, the
+   committed public key and the firmware's verifier agree; everything before it is
+   untested plumbing.
+4. 🔲 Add `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` to `keyboards/polykybd/rules.mk`.
 
-⚠️ **Step 3 only after 1 and 2** — otherwise the firmware refuses to flash anything,
-including the image that would undo it. Full procedure:
+Note that after step 1 a keyboard logs `UNSIGNED` for every flash until releases are
+actually signed. That is expected, not a regression.
+
+⚠️ **Step 4 only after 1–3** — otherwise the firmware refuses to flash anything, including
+the image that would undo it. Full procedure:
 `qmk_firmware/keyboards/polykybd/tools/SIGNING.md`.
+
+Enforcement needs **no slave-side work**: verification is master-only by design, on the
+argument that reaching the slave requires a cable to the UART bridge, and anyone with that
+access can flash over BOOTSEL anyway — so slave verification would add
+split-transaction-window risk for no real threat reduction.
