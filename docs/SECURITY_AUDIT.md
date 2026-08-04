@@ -19,7 +19,7 @@ provisioned).
 | ID | Title | Where | Status |
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
-| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ warn-only — key provisioned, 3 steps left |
+| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ warn-only — signed release out, 2 steps left |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
 | FW-6 | (note only) | qmk | ✅ closed (PR #112) |
@@ -400,10 +400,18 @@ never enforced. Progress toward enforcing authenticity, in the order the steps m
    `tools/gen_signing_key.py`; `base/fw_pubkey.h` committed with the real public key (no
    longer the all-zero placeholder). The private half was generated on the maintainer's
    machine and never entered the repo or a transcript. Build + HIL both green with it.
-2. 🔲 Add the private key as the `FW_SIGNING_KEY` secret in `qmk_firmware`, cut a release,
-   and confirm the assets include `<target>.bin.sig`. ⚠️ Fails **quietly** if the secret is
-   missing — the workflow logs `::notice::FW_SIGNING_KEY not set` and releases unsigned, so
-   check for the `.sig` asset rather than assuming a green release signed anything.
+2. ✅ **Done 2026-08-04** — `FW_SIGNING_KEY` set; `PolyKybd-fw-v0.9.94` ships
+   `polykybd_split72_default.bin.sig` (64 B). Verified beyond "the asset exists": the
+   released `.bin` + `.sig` check out against the committed `fw_pubkey.h`, so the secret's
+   private key and the firmware's public key are a confirmed pair.
+   ⚠️ Two traps hit here, both costing a release run. The signing step fails **quietly**
+   when the secret is *absent* (`::notice::FW_SIGNING_KEY not set`, unsigned release, job
+   still green) — so check for the `.sig`, never a green run. And when the secret is
+   *malformed* the job fails **loudly but misleadingly**: `base64.b64decode` discards
+   non-alphabet characters while keeping letters, so a value short by one character (or
+   carrying the tool's label) raises `binascii.Error: Incorrect padding` with the trailing
+   `=` plainly present — which reads as a padding problem and sends you to the wrong place.
+   qmk PR #184 replaces that with the character count and a regeneration one-liner.
 3. 🔲 Flash that signed build and confirm the console prints `FW_UP: image signature OK`.
    **Do not skip this.** It is the first and only moment that proves the private key, the
    committed public key and the firmware's verifier agree; everything before it is
