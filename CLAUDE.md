@@ -451,6 +451,12 @@ records that are easy to trip over:
   `ui.allow_lan: true` disables. Don't add a handler assuming some auth layer exists.
 - **The rig is a self-hosted runner for a public repo**, so fork-PR approval settings on
   `qmk_firmware` are load-bearing security, not CI hygiene (HIL-2, still open).
+- ⚠️ **Firmware signing (FW-2) does NOT close the code-execution surface — FW-9 is open.**
+  The `.plyx` DOOM engine pack is *executable code* flashed over the same HID transport,
+  and `doom_pack_load.c` authenticates it with a CRC32 only, then branches into it. Anyone
+  who can talk raw HID can flash a crafted pack, set the idle style to IDDQD over cmd 28,
+  and get arbitrary code execution on the next idle. Don't cite "the firmware is signed"
+  as though it settles this.
 
 ## Related repos
 

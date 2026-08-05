@@ -4,12 +4,17 @@ Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` ho
 `HIL-*` rig/CI). It lives here because most of the still-open items are rig items, but it
 covers all four repos — check the **Where** column before going looking for code.
 
-Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.96`,
-`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-05**
-(FW-2 enforced, with the unsigned-build escape hatch moved to an on-keycap
-ACCEPT/REJECT prompt). Previous review 2026-08-04 (HIL-2 confirmed set; HIL-6
-remediated on the rig; HIL-7 raised and fixed; HIL-8 raised and remediated;
-HIL-9 raised and partly mitigated; FW-2 key provisioned).
+Status verified against: `polykybd-ctnd` @ `0d1463a`, `qmk_firmware` @ `0.11.0`,
+`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. Last review **2026-08-05 (evening)** —
+a *fresh* evaluation of the surfaces FW-2 changed, plus one never examined before. It
+raised **FW-9** (executable DOOM pack is unsigned — it bypasses FW-2 entirely), FW-10 and
+HOST-2. Earlier the same day: FW-2 enforced, with the unsigned-build escape hatch moved to
+an on-keycap ACCEPT/REJECT prompt. Previous review 2026-08-04 (HIL-2 confirmed set; HIL-6
+remediated on the rig; HIL-7 raised and fixed; HIL-8 raised and remediated; HIL-9 raised
+and partly mitigated; FW-2 key provisioned).
+
+⚠️ **Read FW-9 before concluding that firmware signing closes the code-execution
+surface. It does not.**
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -21,12 +26,15 @@ HIL-9 raised and partly mitigated; FW-2 key provisioned).
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
 | FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ✅ enforced — key provisioned, both verdicts confirmed on hardware |
+| **FW-9** | **Executable DOOM pack (`.plyx`) is CRC-checked, not signed — arbitrary code execution, bypasses FW-2** | qmk | 🔲 **open (high)** |
+| FW-10 | Unsigned-flash confirmation is a repeatable input DoS (60 s modal) | qmk | 🟡 accepted + documented |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
 | FW-6 | (note only) | qmk | ✅ closed (PR #112) |
 | FW-7 | Plain-overlay 1-byte over-read | qmk / host / rig | ✅ fixed as the protocol-11 reframe (#120 / #96 / #43) |
 | FW-8 | RLE non-aligned OOB | qmk | ✅ fixed (PR #112) |
 | HOST-1 | Legacy plaintext window relay on by default | host | ✅ fixed (PR #133) |
+| HOST-2 | Confirmation polling holds `worker.exclusive()` for up to 75 s | host | 🟡 accepted + documented |
 | HIL-1 | Control UI bound to all interfaces | ctnd | ✅ fixed |
 | HIL-2 | Self-hosted runner reachable from fork PRs | qmk *(repo settings)* | ✅ fixed (settings) |
 | HIL-3 | Self-update pulls and runs `main` unverified | ctnd | 🔲 open (accepted risk, documented) |
@@ -40,6 +48,82 @@ HIL-9 raised and partly mitigated; FW-2 key provisioned).
 ---
 
 ## 🔲 Open
+
+### FW-9 — the executable DOOM pack is CRC-checked, not signed (bypasses FW-2)
+
+Raised **2026-08-05**, by a fresh look at what FW-2 does *not* cover. FW-2 signs the
+**firmware image**. It does not sign the **DOOM engine pack** (`.plyx`) — which is
+executable code, flashed over the same HID transport, and *called* by the firmware.
+
+`doom/doom_pack_load.c` validates a flashed pack with: the `PlyX` magic, `abi ==
+DOOM_PACK_ABI`, `image_size` fits the slot, the `ram_base`/`ram_size` pairing, and a
+**CRC32** over the body. Every one of those is an integrity/compatibility check. **None
+authenticates the author** — a CRC32 is trivially satisfied by whoever crafts the image.
+It then does:
+
+```c
+doom_pack_init_fn init = (…)(slot + sizeof(*hdr) + hdr->entry_off + 1u);
+const doom_pack_api_t *api = init(&s_fw_api);
+```
+
+i.e. it **branches into attacker-supplied bytes at an attacker-supplied offset**, on a
+Cortex-M0+ with no MPU. Once executing, the code is not confined to `s_fw_api` — it has
+the whole address space, including the flash-write routines.
+
+**The chain needs no physical access and no user interaction:**
+
+1. Flash a crafted `.plyx` (cmds `0x50`–`0x52`, DOOMPACK target). No signature is checked
+   on this path — `fw_staging_check_signature()` is only called in the `FW_TARGET_FIRMWARE`
+   branch of `fw_staging_finalize_impl`.
+2. Set the idle style to `IDLE_STYLE_IDDQD` (2) over **HID cmd 28** — in range, so it is
+   accepted.
+3. Wait for the keyboard to idle. `doom_begin` → `doom_session_start` →
+   `doom_pack_load()` → the call above.
+
+So an attacker who can open the raw HID interface gets **arbitrary code execution with
+full firmware privilege**, which is precisely the outcome FW-2 exists to prevent. It
+applies to shipped keyboards: `release.yml` builds the `POLYKYBD_DOOM_PACK` flavour, and
+the `.plyx` is a published release asset.
+
+**Fix (recommended): verify the pack with the existing Ed25519 machinery, at LOAD time.**
+The verifier and `FW_SIGNING_PUBKEY` are already compiled in (`base/crypto/`,
+`base/fw_pubkey.h`). Put the 64-byte signature in the PlyX header (a `PACK_VERSION` bump)
+and check it in `doom_pack_load()` immediately before computing `init`. Verify at *load*,
+not at COMMIT: flash can be rewritten afterwards, so a "was validated once" flag is not a
+control. The cost is one SHA-512 over ~211 KB at session start — the loader already walks
+the whole image for the CRC there, so it is the same order of work, once per game session,
+not per frame. `release.yml` signs the `.plyx` alongside the `.bin`.
+
+**Interim mitigation** if that is not done promptly: build releases without
+`POLYKYBD_DOOM_PACK`. That removes the feature, so it is a stopgap, not a fix.
+
+⚠️ **The same "flashed over HID, authenticated by CRC only" property applies to the WAD
+(`.whx`) and the font-pack bundles (`.plyf`)** — but those are *data*, so the exposure is
+parser bugs in `fontpack.c` / the WAD reader rather than direct code execution. Lower
+severity, same root cause: the resource-flash path has no notion of authenticity.
+
+### FW-10 — the unsigned-flash confirmation is a repeatable input DoS
+
+Raised **2026-08-05**, as a known cost of the FW-2 escape hatch rather than a defect.
+
+Reaching COMMIT with an unsigned image raises the on-keycap prompt, which blanks every
+keycap and makes `process_record_user` swallow **all** key events for up to
+`FW_CONFIRM_WINDOW_MS` (60 s). Anyone who can talk raw HID can do this, repeatedly, by
+streaming ~446 KB and committing — so the keyboard can be held unusable in 60-second
+windows.
+
+**Accepted.** Severity is bounded and the trade is clearly worth it:
+
+- Pressing **R** ends it instantly, and the status OLED says what is being asked, so the
+  user is not left guessing.
+- The attacker is one who could *already* flash arbitrary firmware before FW-2 was
+  enforced. This is what a total-compromise capability was reduced *to*.
+- A flash already disrupts typing regardless (`poly_prepare_for_flash` drops to the base
+  layer), so the marginal new capability is the 60 s modal window.
+
+Revisit only if the window is ever raised, or if the prompt is made reachable without a
+completed, CRC-valid transfer.
+
 
 ### HIL-9 — the operator account and the Actions runner are the same user
 
@@ -128,6 +212,21 @@ now rests on HIL-2's *settings* state holding, which nothing in the repo enforce
 
 ## 🟡 Accepted and documented
 
+### HOST-2 — the confirmation poll holds `worker.exclusive()` for up to 75 s
+
+Raised **2026-08-05**. When the keyboard raises the unsigned-image prompt, the host polls
+COMMIT for up to `CONFIRM_POLL_TIMEOUT_S` (75 s) — all of it inside the
+`worker.exclusive()` the flash already held. For that window the daemon serves no other
+device RPC: `polyctl` device calls return the "suspended" error, and the reconnect probe
+does not run.
+
+**Accepted.** A flash already monopolises the device by design, this only extends it by
+the user's decision time, and the failure mode is an honest error rather than a stale
+answer (see the `polyctl fw version` note in `PolyKybdHost/CLAUDE.md` — returning a cached
+value instead was the actual bug). Worth revisiting only if the daemon ever needs to serve
+something time-critical during a flash.
+
+
 ### HIL-4 — the control UI has no authentication at all
 
 Every SocketIO handler in `station/ui/app.py` is unauthenticated — not just the privileged
@@ -154,6 +253,60 @@ token on connect (required only when `allow_lan` is set) is the intended next st
 user, so anything the station user can do without a password (see HIL-7, and HIL-8 for
 why that set was, until 2026-08-03, *everything*) is reachable by whoever can reach the
 UI. Weigh new sudo grants with that in mind.
+
+---
+
+## ✅ Checked and NOT vulnerable — don't re-litigate
+
+Things this audit examined and found sound. Recorded because each one looks like a hole
+until you read the guard, and re-deriving that costs more than reading it.
+
+### Key injection is double-gated — host debug flag AND firmware debug flag
+
+Asked directly during the 2026-08-05 review ("is the execute-command file gated by the
+firmware debug flag?"). The answer has two halves and they are *different* flags:
+
+| layer | gate | default | how it unlocks |
+|---|---|---|---|
+| Host — command file / `commands.execute` RPC | `allow_key_injection`, set from the host's `--debug` | off | restart the host in debug mode |
+| Firmware — HID **cmd 14** itself | `debug_enable` | off | **`DB_TOGG` key — physical access** |
+
+`PolyCore.execute_commands` runs `strip_key_injection()` (`poly_core.py`), dropping
+`press`/`release` unless the host process was started in debug mode — so a command file,
+or an unauthenticated caller on the control socket, cannot drive keystrokes on a
+production host. Everything *else* in a command file still runs; only the injection subset
+is gated.
+
+That is a host **policy**, and a policy on the host is not a control on the keyboard — any
+local process can talk raw HID directly and skip it. What actually holds is the second
+gate: `hid_com.c` case 14 is wrapped in `if (debug_enable)` and NACKs otherwise. So key
+injection needs a debug host **and** a physically unlocked keyboard.
+
+⚠️ The residual to check if this is ever revisited: anything *other than* `DB_TOGG` that
+can set `debug_enable` (a VIA/QMK-side debug toggle reachable over HID would collapse the
+second gate to nothing). Not observed, not exhaustively ruled out.
+
+### The FW-2 confirmation state machine cannot be raced
+
+The prompt leaves a window — up to 60 s — between the CRC being verified and the header
+being stamped. Two ways that could have gone wrong, both closed:
+
+- **Swapping the image while the user decides.** `fw_staging_write_chunk()` rejects
+  `offset >= s_image_size`, so once a complete image has been staged no further bytes can
+  be written without a new BEGIN — and `fw_staging_begin` resets `s_confirm` to `IDLE`, so
+  a new image always re-asks. (`write_chunk` does *not* test `s_fw_up_active`, which
+  finalize has already cleared by then — the size bound is what actually holds the line.)
+- **Reusing an acceptance.** `CONFIRM_ACCEPTED` is consumed by the finalize that acts on
+  it, and that finalize re-checks the CRC and the signature of the staged image. One
+  confirmation authorises exactly one image.
+
+### Cancelling the prompt over HID is safe; accepting it is not exposed
+
+COMMIT carrying `'x'` in `data[2]` resolves a pending prompt to a **refusal**. That is
+reachable by anyone who can talk HID, deliberately: a cancel can only ever *deny*, so it
+grants an attacker nothing they did not already have (they can simply not flash). The
+worst case is refusing a legitimate user's own in-progress confirmation — an annoyance,
+not an escalation. Accepting remains a keypress on the matrix and must stay that way.
 
 ---
 
