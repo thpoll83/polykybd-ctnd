@@ -48,6 +48,12 @@ FW_UP_VERSION_LEN = 16
 FW_SIG_LEN        = 64
 ACK   = ord(".")
 NACK  = ord("!")
+# FW-2 COMMIT statuses beyond ACK/NACK: '?' = the keyboard is showing its
+# ACCEPT/REJECT keycap prompt for an unsigned image, 'S' = refused as unsigned
+# (kept distinct from NACK's "staged CRC mismatch" so a refusal is not misread as
+# a corrupt transfer).
+AWAITING_CONFIRM  = ord("?")
+REFUSED_UNSIGNED  = ord("S")
 BUSY  = ord("~")   # BEGIN: still erasing — re-poll
 
 
@@ -269,13 +275,23 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
             log("  COMMIT ok — staged image CRC verified on the keyboard (not applied)")
             return True
 
-        # ⚠️ A NACK here is NOT necessarily a CRC failure, and saying so sent a
+        # ⚠️ A non-ACK here is NOT necessarily a CRC failure, and saying so sent a
         # real investigation the wrong way (2026-08-05). Since FW-2 enforcement
-        # (qmk #184) the firmware also refuses an image that is not validly
-        # signed — and it reports that with the SAME status byte, because the
-        # signature check sits behind the CRC result in fw_staging_finalize().
-        # So the reply alone cannot tell the two apart.
-        #
+        # (qmk #184) an image that is not validly signed is handled separately:
+        # the keyboard puts an ACCEPT/REJECT prompt on its own keycaps and answers
+        # AWAITING_CONFIRM ('?') until someone presses a key. The rig has no
+        # fingers, so it CANCELS the prompt (a COMMIT with the 'x' marker) rather
+        # than leaving the board modal for the whole 60 s window — the firmware
+        # then answers REFUSED_UNSIGNED ('S').
+        if reply[2] == AWAITING_CONFIRM:
+            log("  COMMIT: keyboard is asking for physical ACCEPT/REJECT (unsigned "
+                "image) — cancelling the prompt, the rig cannot press a key")
+            reply = link.xfer(bytes([HID_POLYKYBD, CMD_FW_UP_COMMIT, ord('x')]),
+                              timeout_ms=8000)
+            if reply is None or len(reply) < 3:
+                log("  FAIL: FW_UP_COMMIT (cancel) — no reply")
+                return False
+
         # CI builds are unsigned (signing happens in the release workflow, which
         # holds the key), so on an enforcing firmware a refusal is the CORRECT
         # outcome and must not fail the run. Everything this test exists to cover
