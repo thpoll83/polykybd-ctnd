@@ -425,8 +425,15 @@ the project key is not applied. The steps, in the order they had to happen:
    `FW_UP: image signature INVALID`. This is the test that matters — enforcement rejects
    on `sig != 1`, so a verifier that returned OK for a bad signature would make step 4
    pure theatre, and the passing case cannot distinguish the two. Verified OK *and*
-   INVALID, so the check genuinely discriminates. (`UNSIGNED`, the no-`.sig` case, is the
-   weaker third branch and was not separately exercised.)
+   INVALID, so the check genuinely discriminates. ✅ **`UNSIGNED` exercised 2026-08-05**
+   as a side effect of testing the confirmation prompt — an unsigned developer build now
+   has its own path, so all three verifier branches have been seen on hardware.
+
+   ⚠️ **UNSIGNED and INVALID are not the same event and must not share a path.** No
+   signature is a developer build; a signature that fails to verify is an image that is
+   not what it claims to be. The physical confirmation is offered only for the first.
+   Offering it for the second would hand an attacker the one thing the gate exists to
+   withhold — a user who has been told to press A.
 4. ✅ **Done 2026-08-05** (qmk PR #186) — `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` in
    `keyboards/polykybd/rules.mk`. Enabled only after step 3's *negative* case, since a
    verifier that rubber-stamped would make enforcement theatre.
