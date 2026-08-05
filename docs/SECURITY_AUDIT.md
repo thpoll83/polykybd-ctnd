@@ -19,7 +19,7 @@ provisioned).
 | ID | Title | Where | Status |
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
-| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ warn-only — signed release out, 2 steps left |
+| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ warn-only — verified on hardware, only enforcement left |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
 | FW-6 | (note only) | qmk | ✅ closed (PR #112) |
@@ -412,10 +412,18 @@ never enforced. Progress toward enforcing authenticity, in the order the steps m
    carrying the tool's label) raises `binascii.Error: Incorrect padding` with the trailing
    `=` plainly present — which reads as a padding problem and sends you to the wrong place.
    qmk PR #184 replaces that with the character count and a regeneration one-liner.
-3. 🔲 Flash that signed build and confirm the console prints `FW_UP: image signature OK`.
-   **Do not skip this.** It is the first and only moment that proves the private key, the
-   committed public key and the firmware's verifier agree; everything before it is
-   untested plumbing.
+3. ✅ **Done 2026-08-04** — flashed `PolyKybd-fw-v0.9.94` over HID; the console printed
+   `FW_UP: image signature OK`. That is the first moment the private key, the committed
+   public key and the firmware's Monocypher verifier were shown to agree on hardware.
+   ⚠️ **The verdict is invisible from the host log** — a flash runs under
+   `worker.exclusive()`, which suspends the console-read periodic, and QMK drops console
+   output nobody drains. Capture it with `PolyKybdHost/tools/poly_console.py` in a second
+   terminal (`qmk console` refuses to run outside MSYS2 MinGW64 on Windows). The verdict
+   prints at COMMIT, before APPLY reboots, so staging alone is enough — no need to apply.
+   ⚠️ Before step 4, also confirm the **negative** cases the same way: no `.sig` →
+   `UNSIGNED`, and a byte-flipped `.sig` → `INVALID`. Enforcement rejects on `sig != 1`,
+   so a verifier that wrongly returned OK for a bad signature would make step 4 pure
+   theatre — and the passing case looks identical either way.
 4. 🔲 Add `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` to `keyboards/polykybd/rules.mk`.
 
 Note that after step 1 a keyboard logs `UNSIGNED` for every flash until releases are
