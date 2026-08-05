@@ -5,9 +5,10 @@ Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` ho
 covers all four repos — check the **Where** column before going looking for code.
 
 Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
-`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-03**
+`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-04**
 (HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed;
-HIL-8 raised and remediated; HIL-9 raised).
+HIL-8 raised and remediated; HIL-9 raised and partly mitigated; FW-2 key
+provisioned).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -18,7 +19,7 @@ HIL-8 raised and remediated; HIL-9 raised).
 | ID | Title | Where | Status |
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
-| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ **warn-only** — see below |
+| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ warn-only — verified on hardware, only enforcement left |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
 | FW-6 | (note only) | qmk | ✅ closed (PR #112) |
@@ -33,7 +34,7 @@ HIL-8 raised and remediated; HIL-9 raised).
 | HIL-6 | PAT in `config.yaml` with default perms | ctnd | ✅ fixed |
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
 | HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | ✅ fixed (rig) |
-| HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🔲 **open — needs a decision** |
+| HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 (1) fixed; (2) deferred by decision |
 
 ---
 
@@ -47,22 +48,45 @@ rather than finishing the job.
 The Actions runner executes workflow code as `thpoll`, which is also the human operator's
 login. Two consequences survive HIL-8:
 
-1. **The sudo credential cache is shared.** This rig runs `Defaults timestamp_type=global`,
-   so one successful `sudo` authenticates the *user*, not the terminal, for
-   `timestamp_timeout` (15 min default). Any process running as `thpoll` during that
-   window — workflow code included — can `sudo` to root without knowing the password. The
-   operator working on the desktop opens the window; nothing on the CI side has to.
+1. ~~**The sudo credential cache is shared.**~~ **CLOSED 2026-08-03.** The rig ran
+   `Defaults timestamp_type=global` (its own stock file, `/etc/sudoers.d/010_global-tty`,
+   containing exactly that one line), so one successful `sudo` authenticated the *user*,
+   not the terminal, for `timestamp_timeout` (15 min default) — any process running as
+   `thpoll` in that window, workflow code included, could `sudo` to root without knowing
+   the password, with the operator opening the window just by working on the desktop.
+   Removed, reverting sudo to its upstream default `timestamp_type=tty`: the credential is
+   keyed to the authenticating terminal, and the runner service has no tty (a pty it
+   allocated would be a different one). See the verification below.
 2. **CI has write access to the station code.** `qmk-test.yml` force-syncs the checkout
    (`git checkout -q -f -B main origin/main`) and then runs
    `venv/bin/python -m station.test_runner` from it. So workflow code can modify station
    code that later runs as `thpoll` under systemd — an escalation that needs no sudo at
    all, just patience.
 
-Both are gated in practice by HIL-2 (fork PRs need approval), which is again doing more
-work than a settings toggle should have to.
+(2) remains, and is gated in practice by HIL-2 (fork PRs need approval) — which is again
+doing more work than a settings toggle should have to.
 
-**The fix is a dedicated unprivileged runner user**, separate from the login. Not
-attempted, because it is more than a `useradd` — anyone taking it on needs:
+**Partial mitigation applied 2026-08-03.** Chosen over `timestamp_timeout=0`, which buys
+the same thing but makes the operator retype a password on every single `sudo`; per-tty
+scoping keeps normal ergonomics within one terminal. Verified with two terminals:
+
+```console
+# terminal A
+$ sudo -k && sudo true      # authenticate A
+# terminal B
+$ sudo -n true
+sudo: a password is required
+```
+
+B failing is the proof — before the change it succeeded silently by borrowing A's
+credential, which is precisely what workflow code could do. Nothing on the rig depends on
+the shared cache: `self-update.sh` and the UI use `sudo -n` against NOPASSWD grants, and
+`flash.py`'s `uhubctl`/`picotool` are NOPASSWD too — none consult a timestamp. The only
+visible change is a password once per terminal instead of once per 15 minutes across all
+of them.
+
+**The full fix for (2) is a dedicated unprivileged runner user**, separate from the login.
+Not attempted, because it is more than a `useradd` — anyone taking it on needs:
 
 - group membership for the hardware the tests drive: `gpio` (RPi.GPIO in `flash.py`) and
   `plugdev` (hidraw, per `99-polykybd.rules`);
@@ -73,9 +97,12 @@ attempted, because it is more than a `useradd` — anyone taking it on needs:
   somewhere the runner cannot write to;
 - re-registration of the runner under the new account (`svc.sh install <user>`).
 
-Until then, a cheaper partial mitigation is dropping `timestamp_type=global` (or setting
-`timestamp_timeout=0`) so the operator's sudo cannot be borrowed by another process running
-as the same user. That closes consequence 1 and costs a password per sudo.
+**Decision 2026-08-03: (2) is deferred, not rejected.** The dedicated-runner-user work is
+recorded as a recommendation in the rig setup guide (`README.md` §5d) so a new rig build
+sees it at the point it would be cheapest to do — before the runner is registered — rather
+than only in this tracker. Revisit if the rig ever serves a repo taking outside
+contributions routinely; until then HIL-2's approval gate is what keeps untrusted code off
+the box.
 
 ⚠️ Like HIL-8 this is **rig state, not repo state** — re-check with `sudo -l` and
 `systemctl show -p User actions.runner.*.service` when re-auditing.
@@ -124,8 +151,8 @@ token on connect (required only when `allow_lan` is set) is the intended next st
 
 ⚠️ HIL-4 is also the **amplifier** for every station-user privilege: the UI runs as that
 user, so anything the station user can do without a password (see HIL-7, and HIL-8 for
-why that set was until 2026-08-03 *everything*) is reachable by whoever can reach the UI. Weigh new
-sudo grants with that in mind.
+why that set was, until 2026-08-03, *everything*) is reachable by whoever can reach the
+UI. Weigh new sudo grants with that in mind.
 
 ---
 
@@ -197,7 +224,7 @@ Both confirmed on the rig. The `status` run also exercised the HIL-7 wrapper end
 real hardware: sudo let it through on the password, and the wrapper itself rejected the
 action with its usage message and exit 2.
 
-``setup.sh` **warns** when it detects this (`warn_if_blanket_sudo`) rather than removing
+`setup.sh` **warns** when it detects this (`warn_if_blanket_sudo`) rather than removing
 it — pulling a distro file out from under an operator who may have no password set is not
 something an install script should do unasked. The warning is what stops the next person
 installing scoped grants and reasonably assuming they mean something.
@@ -356,25 +383,59 @@ was provisioned before this line and still carries the `0644` umask default, so 
 (faster than a full `setup.sh` re-run on a healthy rig), and the **PAT was rotated**. The
 rotation is the part that mattered: the file had been world-readable while HIL-2 still let
 returning contributors run code on the box, so tightening the mode afterwards would not
-have helped if the old token had been read. Any token predating 2026-08-03 is revoked. The initial `cp` also runs under `umask 077`, so
+have helped if the old token had been read. Any token predating 2026-08-03 is
+revoked. The initial `cp` also runs under `umask 077`, so
 the file is never briefly world-readable; note that the window it closes never contained a
 secret (a freshly-copied file is the example, whose `token` is empty) — the point is that
 the invariant should not depend on that remaining true.
 
 ---
 
-## ⚠️ FW-2 — firmware signing is warn-only until keys are provisioned
+## ⚠️ FW-2 — firmware signing is warn-only until enforcement is switched on
 
-The Ed25519 image-signature check ships **warn-only**: `base/fw_pubkey.h` is an all-zero
-placeholder and the verification result is logged, never enforced. To actually enforce
-authenticity, in this order:
+The Ed25519 image-signature check ships **warn-only**: the verification result is logged,
+never enforced. Progress toward enforcing authenticity, in the order the steps must happen:
 
-1. `python3 keyboards/polykybd/tools/gen_signing_key.py …` — writes `base/fw_pubkey.h`
-   (commit it) and a private key that must **not** enter the repo.
-2. Add that private key as the `FW_SIGNING_KEY` secret in `qmk_firmware`; release CI then
-   signs the `.bin` and ships a `.bin.sig` alongside it.
-3. Add `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` to `keyboards/polykybd/rules.mk`.
+1. ✅ **Done 2026-08-04** (qmk PR #183) — real keypair generated with
+   `tools/gen_signing_key.py`; `base/fw_pubkey.h` committed with the real public key (no
+   longer the all-zero placeholder). The private half was generated on the maintainer's
+   machine and never entered the repo or a transcript. Build + HIL both green with it.
+2. ✅ **Done 2026-08-04** — `FW_SIGNING_KEY` set; `PolyKybd-fw-v0.9.94` ships
+   `polykybd_split72_default.bin.sig` (64 B). Verified beyond "the asset exists": the
+   released `.bin` + `.sig` check out against the committed `fw_pubkey.h`, so the secret's
+   private key and the firmware's public key are a confirmed pair.
+   ⚠️ Two traps hit here, both costing a release run. The signing step fails **quietly**
+   when the secret is *absent* (`::notice::FW_SIGNING_KEY not set`, unsigned release, job
+   still green) — so check for the `.sig`, never a green run. And when the secret is
+   *malformed* the job fails **loudly but misleadingly**: `base64.b64decode` discards
+   non-alphabet characters while keeping letters, so a value short by one character (or
+   carrying the tool's label) raises `binascii.Error: Incorrect padding` with the trailing
+   `=` plainly present — which reads as a padding problem and sends you to the wrong place.
+   qmk PR #184 replaces that with the character count and a regeneration one-liner.
+3. ✅ **Done 2026-08-04** — flashed `PolyKybd-fw-v0.9.94` over HID; the console printed
+   `FW_UP: image signature OK`. That is the first moment the private key, the committed
+   public key and the firmware's Monocypher verifier were shown to agree on hardware.
+   ⚠️ **The verdict is invisible from the host log** — a flash runs under
+   `worker.exclusive()`, which suspends the console-read periodic, and QMK drops console
+   output nobody drains. Capture it with `PolyKybdHost/tools/poly_console.py` in a second
+   terminal (`qmk console` refuses to run outside MSYS2 MinGW64 on Windows). The verdict
+   prints at COMMIT, before APPLY reboots, so staging alone is enough — no need to apply.
+   ✅ **Negative case confirmed the same day**: a byte-flipped `.sig` produced
+   `FW_UP: image signature INVALID`. This is the test that matters — enforcement rejects
+   on `sig != 1`, so a verifier that returned OK for a bad signature would make step 4
+   pure theatre, and the passing case cannot distinguish the two. Verified OK *and*
+   INVALID, so the check genuinely discriminates. (`UNSIGNED`, the no-`.sig` case, is the
+   weaker third branch and was not separately exercised.)
+4. 🔲 Add `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` to `keyboards/polykybd/rules.mk`.
 
-⚠️ **Step 3 only after 1 and 2** — otherwise the firmware refuses to flash anything,
-including the image that would undo it. Full procedure:
+Note that after step 1 a keyboard logs `UNSIGNED` for every flash until releases are
+actually signed. That is expected, not a regression.
+
+⚠️ **Step 4 only after 1–3** — otherwise the firmware refuses to flash anything, including
+the image that would undo it. Full procedure:
 `qmk_firmware/keyboards/polykybd/tools/SIGNING.md`.
+
+Enforcement needs **no slave-side work**: verification is master-only by design, on the
+argument that reaching the slave requires a cable to the UART bridge, and anyone with that
+access can flash over BOOTSEL anyway — so slave verification would add
+split-transaction-window risk for no real threat reduction.

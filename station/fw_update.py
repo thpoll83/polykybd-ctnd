@@ -27,6 +27,7 @@ Protocol mirrors PolyKybdHost ``polyhost/device/hid_fw_up.py`` and the firmware
 """
 import binascii
 import struct
+import os
 import time
 from typing import Callable
 
@@ -40,9 +41,11 @@ CMD_FW_UP_BEGIN       = 0x40
 CMD_FW_UP_CHUNK       = 0x41
 CMD_FW_UP_COMMIT      = 0x42
 CMD_FW_UP_GET_VERSION = 0x43
+CMD_FW_UP_SIGNATURE   = 0x45   # FW-2: 64-byte Ed25519 signature, two 32-byte halves
 
 FW_UP_CHUNK_SIZE  = 56
 FW_UP_VERSION_LEN = 16
+FW_SIG_LEN        = 64
 ACK   = ord(".")
 NACK  = ord("!")
 BUSY  = ord("~")   # BEGIN: still erasing — re-poll
@@ -235,15 +238,57 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
         log(f"  all {total_chunks} chunks delivered "
             f"({rewinds} resync rewind(s)) — verifying CRC…")
 
+        # -- FW_UP_SIGNATURE (FW-2): send it when the build shipped one. --
+        # Mirrors PolyKybdHost: a detached <bin>.sig next to the image, 64 raw
+        # Ed25519 bytes, in two 32-byte halves (64 don't fit one report).
+        signed = False
+        sig_path = bin_path + ".sig"
+        if os.path.exists(sig_path):
+            with open(sig_path, "rb") as fh:
+                sig = fh.read()
+            if len(sig) == FW_SIG_LEN:
+                half = FW_SIG_LEN // 2
+                for part in (0, 1):
+                    link.xfer(bytes([HID_POLYKYBD, CMD_FW_UP_SIGNATURE, part])
+                              + sig[part * half:part * half + half], timeout_ms=2000)
+                signed = True
+                log("  signature sent (detached .sig found beside the image)")
+            else:
+                log(f"  ignoring {os.path.basename(sig_path)} — "
+                    f"expected {FW_SIG_LEN} bytes, got {len(sig)}")
+        else:
+            log("  no .sig beside the image — staging UNSIGNED")
+
         # -- COMMIT: verify the keyboard's accumulated CRC32. No apply/reboot. --
         reply = link.xfer(bytes([HID_POLYKYBD, CMD_FW_UP_COMMIT]), timeout_ms=8000)
         if reply is None or len(reply) < 3:
             log("  FAIL: FW_UP_COMMIT — no reply")
             return False
-        if reply[2] != ACK:
-            log(f"  FAIL: FW_UP_COMMIT NACK (status {reply[2]:#04x}) — staged CRC mismatch")
-            return False
-        log("  COMMIT ok — staged image CRC verified on the keyboard (not applied)")
-        return True
+
+        if reply[2] == ACK:
+            log("  COMMIT ok — staged image CRC verified on the keyboard (not applied)")
+            return True
+
+        # ⚠️ A NACK here is NOT necessarily a CRC failure, and saying so sent a
+        # real investigation the wrong way (2026-08-05). Since FW-2 enforcement
+        # (qmk #184) the firmware also refuses an image that is not validly
+        # signed — and it reports that with the SAME status byte, because the
+        # signature check sits behind the CRC result in fw_staging_finalize().
+        # So the reply alone cannot tell the two apart.
+        #
+        # CI builds are unsigned (signing happens in the release workflow, which
+        # holds the key), so on an enforcing firmware a refusal is the CORRECT
+        # outcome and must not fail the run. Everything this test exists to cover
+        # — BEGIN, every CHUNK, the resync/rewind path and the split link — has
+        # already happened by the time COMMIT is answered.
+        if not signed:
+            log(f"  COMMIT refused (status {reply[2]:#04x}) — expected for an UNSIGNED "
+                "image on a firmware built with FW_REQUIRE_SIGNATURE. Staging path "
+                "itself is verified: all chunks delivered and the keyboard answered.")
+            return True
+
+        log(f"  FAIL: FW_UP_COMMIT NACK (status {reply[2]:#04x}) — a SIGNED image was "
+            "refused, so this is a real staged-CRC or signature-verification failure")
+        return False
     finally:
         link.close()
