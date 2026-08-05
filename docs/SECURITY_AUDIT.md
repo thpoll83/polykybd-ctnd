@@ -4,11 +4,12 @@ Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` ho
 `HIL-*` rig/CI). It lives here because most of the still-open items are rig items, but it
 covers all four repos — check the **Where** column before going looking for code.
 
-Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.90`,
-`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-04**
-(HIL-2 confirmed set; HIL-6 remediated on the rig; HIL-7 raised and fixed;
-HIL-8 raised and remediated; HIL-9 raised and partly mitigated; FW-2 key
-provisioned).
+Status verified against: `polykybd-ctnd` @ `61e170c`, `qmk_firmware` @ `0.9.96`,
+`PolyKybdHost` @ `0.10.6`, `polykybd-docs` @ PR #28. Last review **2026-08-05**
+(FW-2 enforced, with the unsigned-build escape hatch moved to an on-keycap
+ACCEPT/REJECT prompt). Previous review 2026-08-04 (HIL-2 confirmed set; HIL-6
+remediated on the rig; HIL-7 raised and fixed; HIL-8 raised and remediated;
+HIL-9 raised and partly mitigated; FW-2 key provisioned).
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -19,7 +20,7 @@ provisioned).
 | ID | Title | Where | Status |
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
-| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ⚠️ warn-only — verified on hardware, only enforcement left |
+| FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ✅ enforced — key provisioned, both verdicts confirmed on hardware |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
 | FW-6 | (note only) | qmk | ✅ closed (PR #112) |
@@ -391,10 +392,10 @@ the invariant should not depend on that remaining true.
 
 ---
 
-## ⚠️ FW-2 — firmware signing is warn-only until enforcement is switched on
+## ✅ FW-2 — firmware signing is enforced
 
-The Ed25519 image-signature check ships **warn-only**: the verification result is logged,
-never enforced. Progress toward enforcing authenticity, in the order the steps must happen:
+The Ed25519 image-signature check is **enforced**: an image without a valid signature over
+the project key is not applied. The steps, in the order they had to happen:
 
 1. ✅ **Done 2026-08-04** (qmk PR #183) — real keypair generated with
    `tools/gen_signing_key.py`; `base/fw_pubkey.h` committed with the real public key (no
@@ -424,15 +425,39 @@ never enforced. Progress toward enforcing authenticity, in the order the steps m
    `FW_UP: image signature INVALID`. This is the test that matters — enforcement rejects
    on `sig != 1`, so a verifier that returned OK for a bad signature would make step 4
    pure theatre, and the passing case cannot distinguish the two. Verified OK *and*
-   INVALID, so the check genuinely discriminates. (`UNSIGNED`, the no-`.sig` case, is the
-   weaker third branch and was not separately exercised.)
-4. 🔲 Add `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` to `keyboards/polykybd/rules.mk`.
+   INVALID, so the check genuinely discriminates. ✅ **`UNSIGNED` exercised 2026-08-05**
+   as a side effect of testing the confirmation prompt — an unsigned developer build now
+   has its own path, so all three verifier branches have been seen on hardware.
+
+   ⚠️ **UNSIGNED and INVALID are not the same event and must not share a path.** No
+   signature is a developer build; a signature that fails to verify is an image that is
+   not what it claims to be. The physical confirmation is offered only for the first.
+   Offering it for the second would hand an attacker the one thing the gate exists to
+   withhold — a user who has been told to press A.
+4. ✅ **Done 2026-08-05** (qmk PR #186) — `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` in
+   `keyboards/polykybd/rules.mk`. Enabled only after step 3's *negative* case, since a
+   verifier that rubber-stamped would make enforcement theatre.
+
+   The escape hatch for unsigned developer builds is an **on-keycap confirmation**, not a
+   host dialog: at COMMIT the keyboard blanks every keycap except a big **A / ACCEPT** on
+   the left half's home-row index key and **R / REJECT** on the right's, and waits 60 s for
+   a press. COMMIT answers a new `?` status meanwhile and the host re-polls — it must not
+   block, because COMMIT runs on the same main loop that scans the matrix, so a busy-wait
+   would guarantee the keypress is never seen.
+
+   ⚠️ **Accepting must stay physical.** FW-2's threat model is *any process that can talk
+   the HID flash protocol*, so an acknowledgement carried over that channel is forgeable by
+   exactly the attacker it is meant to stop. Cancelling the prompt (COMMIT with `'x'` in
+   `data[2]`) *is* exposed over HID, because a cancel can only ever deny — the host's abort
+   path and the HIL rig use it rather than leaving the board modal for the full window.
+   Do not turn the accept side into a host-side checkbox.
 
 Note that after step 1 a keyboard logs `UNSIGNED` for every flash until releases are
 actually signed. That is expected, not a regression.
 
 ⚠️ **Step 4 only after 1–3** — otherwise the firmware refuses to flash anything, including
-the image that would undo it. Full procedure:
+the image that would undo it (BOOTSEL/UF2 remains the unconditional recovery path, since it
+bypasses `fw_staging` entirely). Full procedure:
 `qmk_firmware/keyboards/polykybd/tools/SIGNING.md`.
 
 Enforcement needs **no slave-side work**: verification is master-only by design, on the
