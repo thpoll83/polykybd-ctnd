@@ -420,10 +420,12 @@ never enforced. Progress toward enforcing authenticity, in the order the steps m
    output nobody drains. Capture it with `PolyKybdHost/tools/poly_console.py` in a second
    terminal (`qmk console` refuses to run outside MSYS2 MinGW64 on Windows). The verdict
    prints at COMMIT, before APPLY reboots, so staging alone is enough — no need to apply.
-   ⚠️ Before step 4, also confirm the **negative** cases the same way: no `.sig` →
-   `UNSIGNED`, and a byte-flipped `.sig` → `INVALID`. Enforcement rejects on `sig != 1`,
-   so a verifier that wrongly returned OK for a bad signature would make step 4 pure
-   theatre — and the passing case looks identical either way.
+   ✅ **Negative case confirmed the same day**: a byte-flipped `.sig` produced
+   `FW_UP: image signature INVALID`. This is the test that matters — enforcement rejects
+   on `sig != 1`, so a verifier that returned OK for a bad signature would make step 4
+   pure theatre, and the passing case cannot distinguish the two. Verified OK *and*
+   INVALID, so the check genuinely discriminates. (`UNSIGNED`, the no-`.sig` case, is the
+   weaker third branch and was not separately exercised.)
 4. 🔲 Add `OPT_DEFS += -DFW_REQUIRE_SIGNATURE` to `keyboards/polykybd/rules.mk`.
 
 Note that after step 1 a keyboard logs `UNSIGNED` for every flash until releases are
