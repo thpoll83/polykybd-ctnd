@@ -259,11 +259,22 @@ collector in `PolyKybdHost/telemetry-collector/`). Full payload + rationale in
   registered would invite someone to register it and collect the pings. Sending stays off until
   that string names a host we own.
 
-**Consent posture: on by default**, with a first-run dialog whose dismiss/Esc path turns it
-**off** (the ambiguous answer must never be the one that sends data), a settings checkbox, an
-INFO line on each start, and `polyctl telemetry preview` printing the exact bytes. This is a
-deliberate product decision — an opt-in buried in settings yields numbers too sparse to act on —
-made while the user base is a handful of known testers.
+**Consent posture: on by default, with NO in-app consent step.** ⚠️ This was originally
+shipped with a first-run dialog whose dismiss/Esc path turned telemetry *off* — a fail-safe
+where the ambiguous answer never sent data. That dialog was **removed** (2026-08-07) as an
+unwanted interruption on every upgrade, so the fail-safe is gone with it: an install reports
+unless someone deliberately turns it off.
+
+What carries the disclosure now, all of it passive: the **release notes** (which a user reads
+at download time, before the app runs — so the notes for any release that changes the payload
+are part of the disclosure, not marketing), the public *Usage Data & Privacy* page,
+`PolyKybdHost/docs/telemetry.md`, the `Settings → Telemetry` checkbox, an INFO line the core
+logs on every start, and `polyctl telemetry preview` printing the exact bytes.
+
+Still a deliberate product decision — an opt-in buried in settings yields numbers too sparse
+to act on — taken while the user base is a handful of known testers who were told directly.
+It is the weakest part of this entry, and the part to revisit first if the install base ever
+stops being people we know.
 
 **Accepted.** Revisit if the endpoint ever grows a read API (it has none by design — the Worker
 only accepts writes, so there is no route to leak the dataset), if the payload gains a field that
