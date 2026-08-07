@@ -5,7 +5,9 @@ Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` ho
 covers all four repos — check the **Where** column before going looking for code.
 
 Status verified against: `polykybd-ctnd` @ `0d1463a`, `qmk_firmware` @ `0.11.0`,
-`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. Last review **2026-08-05 (evening)** —
+`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. **2026-08-06**: HOST-3 added alongside
+the telemetry feature — a single new surface reviewed on its own, not a fresh sweep of the
+tracker, so the review scope below still stands. Last full review **2026-08-05 (evening)** —
 a *fresh* evaluation of the surfaces FW-2 changed, plus one never examined before. It
 raised **FW-9** (executable DOOM pack is unsigned — it bypasses FW-2 entirely), FW-10 and
 HOST-2. Earlier the same day: FW-2 enforced, with the unsigned-build escape hatch moved to
@@ -237,14 +239,18 @@ collector in `PolyKybdHost/telemetry-collector/`). Full payload + rationale in
 - **The collector endpoint is unauthenticated, deliberately.** Any credential shipped in an
   open-source client is a public credential, so pretending otherwise buys nothing. Consequences
   accepted: `install_id` is client-generated and spoofable, so the counts are a floor with noise,
-  not an audit. Abuse is bounded by `UNIQUE(install_id, day)` (a repeat ping is a no-op insert)
-  plus a WAF rate-limit rule, not by authentication. **Never treat a number out of this dataset
-  as attested.**
+  not an audit. Abuse is bounded by `UNIQUE(install_id, day)` — the Worker inserts with
+  `INSERT OR IGNORE`, so a same-day repeat is silently discarded rather than erroring — plus a
+  per-IP rate limit, not by authentication. **Never treat a number out of this dataset as
+  attested.** ⚠️ That rate limit is a **Workers rate-limit binding**, not a WAF rule: WAF rules
+  are zone-scoped and the endpoint is on `workers.dev`, which is Cloudflare's zone, not ours.
 - **The payload is allow-listed at BOTH ends, and that is load-bearing.** The host process sees
   active window titles, application names and (with daylight brightness) an approximate location.
-  `build_payload()` copies named fields only and never filters a dict, and the test suite pins the
-  payload to a frozen key set — that assertion is the actual privacy guarantee. The Worker
-  re-validates rather than trusting the client. Do not "simplify" either into a passthrough.
+  The guarantee is the pair of **runtime** checks: `build_payload()` copies named fields only and
+  never filters a dict, and the Worker re-validates rather than trusting the client. The test that
+  pins the payload to a frozen key set is the *regression guard* on the first of those — it is
+  what makes an accidental new field fail CI, not what stops one being sent. Do not "simplify"
+  either runtime check into a passthrough.
 - **The client IP reaches the collector** (it must — it is a TCP connection). The Worker derives a
   country from it and stores neither the IP nor anything derived beyond that. Cloudflare, as the
   operator, sees connections regardless; that is disclosed in the user-facing doc rather than
@@ -255,7 +261,7 @@ collector in `PolyKybdHost/telemetry-collector/`). Full payload + rationale in
 
 **Consent posture: on by default**, with a first-run dialog whose dismiss/Esc path turns it
 **off** (the ambiguous answer must never be the one that sends data), a settings checkbox, an
-INFO line each start, and `polyctl telemetry preview` printing the exact bytes. This is a
+INFO line on each start, and `polyctl telemetry preview` printing the exact bytes. This is a
 deliberate product decision — an opt-in buried in settings yields numbers too sparse to act on —
 made while the user base is a handful of known testers.
 
