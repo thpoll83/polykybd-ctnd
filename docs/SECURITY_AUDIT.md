@@ -5,7 +5,9 @@ Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` ho
 covers all four repos — check the **Where** column before going looking for code.
 
 Status verified against: `polykybd-ctnd` @ `0d1463a`, `qmk_firmware` @ `0.11.0`,
-`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. Last review **2026-08-05 (evening)** —
+`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. **2026-08-06**: HOST-3 added alongside
+the telemetry feature — a single new surface reviewed on its own, not a fresh sweep of the
+tracker, so the review scope below still stands. Last full review **2026-08-05 (evening)** —
 a *fresh* evaluation of the surfaces FW-2 changed, plus one never examined before. It
 raised **FW-9** (executable DOOM pack is unsigned — it bypasses FW-2 entirely), FW-10 and
 HOST-2. Earlier the same day: FW-2 enforced, with the unsigned-build escape hatch moved to
@@ -35,6 +37,7 @@ surface. It does not.**
 | FW-8 | RLE non-aligned OOB | qmk | ✅ fixed (PR #112) |
 | HOST-1 | Legacy plaintext window relay on by default | host | ✅ fixed (PR #133) |
 | HOST-2 | Confirmation polling holds `worker.exclusive()` for up to 75 s | host | 🟡 accepted + documented |
+| HOST-3 | Usage telemetry: new outbound surface, unauthenticated collector, on by default | host | 🟡 accepted + documented |
 | HIL-1 | Control UI bound to all interfaces | ctnd | ✅ fixed |
 | HIL-2 | Self-hosted runner reachable from fork PRs | qmk *(repo settings)* | ✅ fixed (settings) |
 | HIL-3 | Self-update pulls and runs `main` unverified | ctnd | 🔲 open (accepted risk, documented) |
@@ -225,6 +228,47 @@ the user's decision time, and the failure mode is an honest error rather than a 
 answer (see the `polyctl fw version` note in `PolyKybdHost/CLAUDE.md` — returning a cached
 value instead was the actual bug). Worth revisiting only if the daemon ever needs to serve
 something time-critical during a flash.
+
+
+### HOST-3 — usage telemetry is a new outbound surface, and it is on by default
+
+Raised **2026-08-06** with the telemetry feature (`PolyKybdHost/polyhost/services/telemetry.py`,
+collector in `PolyKybdHost/telemetry-collector/`). Full payload + rationale in
+`PolyKybdHost/docs/telemetry.md`. Four things a reviewer should know before touching it:
+
+- **The collector endpoint is unauthenticated, deliberately.** Any credential shipped in an
+  open-source client is a public credential, so pretending otherwise buys nothing. Consequences
+  accepted: `install_id` is client-generated and spoofable, so the counts are a floor with noise,
+  not an audit. Abuse is bounded by `UNIQUE(install_id, day)` — the Worker inserts with
+  `INSERT OR IGNORE`, so a same-day repeat is silently discarded rather than erroring — plus a
+  per-IP rate limit, not by authentication. **Never treat a number out of this dataset as
+  attested.** ⚠️ That rate limit is a **Workers rate-limit binding**, not a WAF rule: WAF rules
+  are zone-scoped and the endpoint is on `workers.dev`, which is Cloudflare's zone, not ours.
+- **The payload is allow-listed at BOTH ends, and that is load-bearing.** The host process sees
+  active window titles, application names and (with daylight brightness) an approximate location.
+  The guarantee is the pair of **runtime** checks: `build_payload()` copies named fields only and
+  never filters a dict, and the Worker re-validates rather than trusting the client. The test that
+  pins the payload to a frozen key set is the *regression guard* on the first of those — it is
+  what makes an accidental new field fail CI, not what stops one being sent. Do not "simplify"
+  either runtime check into a passthrough.
+- **The client IP reaches the collector** (it must — it is a TCP connection). The Worker derives a
+  country from it and stores neither the IP nor anything derived beyond that. Cloudflare, as the
+  operator, sees connections regardless; that is disclosed in the user-facing doc rather than
+  papered over.
+- **`TELEMETRY_ENDPOINT` ships empty** — a build that posted to a hostname we had not yet
+  registered would invite someone to register it and collect the pings. Sending stays off until
+  that string names a host we own.
+
+**Consent posture: on by default**, with a first-run dialog whose dismiss/Esc path turns it
+**off** (the ambiguous answer must never be the one that sends data), a settings checkbox, an
+INFO line on each start, and `polyctl telemetry preview` printing the exact bytes. This is a
+deliberate product decision — an opt-in buried in settings yields numbers too sparse to act on —
+made while the user base is a handful of known testers.
+
+**Accepted.** Revisit if the endpoint ever grows a read API (it has none by design — the Worker
+only accepts writes, so there is no route to leak the dataset), if the payload gains a field that
+is not obviously non-identifying, or when the install base is large enough that "anonymous" should
+mean an anonymity set rather than just an absence of identifiers.
 
 
 ### HIL-4 — the control UI has no authentication at all
