@@ -261,9 +261,9 @@ collector in `PolyKybdHost/telemetry-collector/`). Full payload + rationale in
 
 **Consent posture: on by default, with NO in-app consent step.** ⚠️ This was originally
 shipped with a first-run dialog whose dismiss/Esc path turned telemetry *off* — a fail-safe
-where the ambiguous answer never sent data. That dialog was **removed** (2026-08-07) as an
-unwanted interruption on every upgrade, so the fail-safe is gone with it: an install reports
-unless someone deliberately turns it off.
+where the ambiguous answer never sent data. That dialog was **removed** (2026-08-07,
+`PolyKybdHost#153`) as an unwanted interruption on every upgrade, so the fail-safe is gone
+with it: an install reports unless someone deliberately turns it off.
 
 What carries the disclosure now, all of it passive: the **release notes** (which a user reads
 at download time, before the app runs — so the notes for any release that changes the payload
