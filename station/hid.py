@@ -136,7 +136,17 @@ class RawHID:
 
         Safe because every command sent via send() is idempotent (a query, or a set
         to a fixed value), so re-issuing is harmless; a fresh handle is opened per
-        call so a stale late reply never bleeds into the next command. A genuine
+        call so a stale late reply never bleeds into the next command.
+
+        ⚠️ **GET_ID is the one exception, and callers that care must pass
+        ``attempts=1``.** It consumes the firmware's one-shot fresh-boot marker, so
+        a dropped reply leaves the marker already cleared and the retry returns a
+        correct-but-different answer ('.' instead of '*'). That turns a lost reply
+        into apparent *wrong data*, which reads as a real failure — it reddened
+        ``test_fresh_boot_marker`` on a slow boot until that call was pinned to a
+        single attempt. Do not "restore" the retry there.
+
+        A genuine
         hang still returns None (all attempts time out) — the runner's
         freeze-signature logic (consecutive misses) is what flags a real fault, so
         masking a single blip here does not hide a true regression."""

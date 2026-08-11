@@ -348,7 +348,14 @@ def test_fresh_boot_marker(raw: RawHID, log: Callable[[str], None]) -> bool:
     ACK. A first byte of '.' here means the master was already queried (or not
     actually reflashed) before the suite started.
     """
-    first = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    # ⚠️ attempts=1 — this is the ONE send() in the suite that must NOT retry.
+    # GET_ID is not idempotent: it consumes the one-shot fresh-boot marker. If
+    # the reply to the first write is dropped, the firmware has *already* cleared
+    # the marker, so send()'s retry re-issues GET_ID and gets a perfectly correct
+    # '.' — which this test would then report as wrong data, failing the run for
+    # a lost reply. Keeping it single-attempt leaves a dropped reply a *timeout*,
+    # which the runner classifies as a non-failing WARN (see test_runner.py).
+    first = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
     log(f"GET_ID #1: {first!r}")
     if not _resp_ok(first, CMD_GET_ID, log, expect_status=None):
         return False
