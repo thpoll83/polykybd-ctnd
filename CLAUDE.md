@@ -242,6 +242,29 @@ instead of going red.
 GET_LANG_LIST), and `write_reports()` (a burst with no reply — for the overlay upload
 commands, which the firmware does not ACK; follow with a `send(GET_ID)` liveness check).
 
+⚠️ **`send()` RETRIES by re-writing the request, and that is only safe because the
+commands are idempotent — `GET_ID` is the one exception.** It consumes the firmware's
+one-shot fresh-boot marker, so when a reply is dropped the firmware has *already*
+cleared the marker, the retry re-issues GET_ID and gets a perfectly correct `.`, and
+the test sees **wrong data** instead of a timeout. That matters because the runner
+grades a dropped reply as a non-failing **WARN** but wrong data as a **FAIL** — so the
+retry was silently converting a transient rig hiccup into a red HIL check
+(qmk_firmware#197, where every other test in the run passed). Fixed in #66 by pinning
+that one call to `attempts=1`; the regression test is `tests/hil_tests_test.py`, whose
+`FakeMarkerDevice` clears the marker on the **write**, as the firmware does.
+- The premise came from **#28**, which introduced the retry *and* the WARN status in
+  the same change and stated "all commands sent via `send()` are idempotent". The
+  retry it added is what kept the WARN path it added from ever seeing this failure.
+- ⚠️ **Do NOT "centralise" this by special-casing GET_ID inside `send()`** (both AI
+  reviewers on #66 suggested it). GET_ID is sent from **seven** places and **six
+  depend on the retry** — `_master_alive`, the sustained-settle loop, the GET_ID
+  stress burst, the identity test, the font-pack version read, and the second GET_ID
+  in the marker test itself. Auto-pinning by command id would strip the tolerance
+  from exactly the probes that run in the master's post-overlay deaf window, where
+  isolated misses are expected. The property is **"this read observes a one-shot side
+  effect"**, which belongs to the call site, not the command. If a *second*
+  non-idempotent command ever appears, promote it to an explicit `send_once()` then.
+
 The runner reports each test as its own line: a `[test] PASS/FAIL: <name>` log line, plus
 — under GitHub Actions — a ✅/❌ bullet per test in the job **Step Summary** and a
 `::error::` annotation for each failure, so it is obvious from the run page which test
