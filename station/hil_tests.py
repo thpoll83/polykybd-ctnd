@@ -86,6 +86,44 @@ POLY_OS_COUNT               = 8   # enum poly_os values 0..7 valid (UNKNOWN/WIN/
 CMD_FONTPACK_BEGIN          = 0x50  # data[2..5]=pack_size, [6..9]=pack_crc32, [10]=bundle_id
 CMD_FONTPACK_CHUNK          = 0x51  # data[2..5]=offset, [6..]=56 bytes
 CMD_FONTPACK_COMMIT         = 0x52  # verify staged CRC + reload (no reboot); reply[3..4]=content_version
+
+# FONTPACK_COMMIT status byte (firmware `hid_fontpack.h` FONTPACK_COMMIT_*).
+# ⚠️ Three-valued since qmk#209 — it is NOT ok-or-'!' any more, and the difference
+# is the whole point of that change: 'R' means the master's finalize REFUSED the
+# image (staged CRC / not a valid PlyF) and re-sending cannot help, while 'L' means
+# the master committed fine — its copy is live and reply[3..4] carries the real
+# content_version — and only the SLAVE's ack was lost on the split link, which is
+# retryable. Collapsing them is exactly the misdiagnosis #209 removed: the field
+# report that started it was "CRC mismatch or the font pack was rejected" for a pack
+# whose CRC was perfect and whose data was already on the keyboard.
+FONTPACK_COMMIT_OK       = ord('.')   # both halves finalized
+FONTPACK_COMMIT_REJECTED = ord('R')   # master refused the image -> data failure
+FONTPACK_COMMIT_NO_SLAVE = ord('L')   # master live, slave ack lost -> link failure
+FONTPACK_COMMIT_LEGACY   = ord('!')   # pre-#209 firmware: "one of the above"
+
+
+def describe_fontpack_commit(reply) -> str:
+    """Human-readable diagnosis of a FONTPACK_COMMIT reply, for the FAIL log.
+
+    Pure and total: any shape of reply gets a sentence, because this runs on the
+    failure path where the least useful thing to print is the raw bytes alone.
+    """
+    if not reply or len(reply) < 3:
+        return "no reply (the master never answered COMMIT)"
+    status = reply[2]
+    if status == FONTPACK_COMMIT_OK:
+        return "ok"
+    if status == FONTPACK_COMMIT_REJECTED:
+        return ("'R' — the MASTER refused the image (staged CRC mismatch, or not a "
+                "valid PlyF). A data failure: re-sending the same bytes cannot help")
+    if status == FONTPACK_COMMIT_NO_SLAVE:
+        return ("'L' — the master committed (its copy is LIVE) but the SLAVE did not "
+                "ack within the bridge retries. A split-LINK failure, not a data one; "
+                "COMMIT is safe to retry")
+    if status == FONTPACK_COMMIT_LEGACY:
+        return ("'!' — legacy pre-#209 firmware, which collapsed rejected and "
+                "slave-unconfirmed into one byte; flash a newer image to tell them apart")
+    return f"unknown status byte {status:#04x}"
 FONTPACK_CHUNK_SIZE         = 56    # payload bytes/chunk (matches firmware FW_UP_CHUNK_SIZE)
 # Doom easter egg pseudo bundles (same BEGIN/CHUNK/COMMIT transport, routed to the
 # game-data / engine-pack resource slots). Lockstep with qmk base/fw_staging.h
@@ -1412,11 +1450,14 @@ def test_fontpack_wipe_roundtrip(raw: RawHID, log: Callable[[str], None]) -> boo
         log(f"  FAIL: FONTPACK_CHUNK not ACKed: {reply!r}")
         return False
 
-    # -- FONTPACK_COMMIT: verifies the staged CRC and loads the slot. The '.' here is
-    #    the wipe-success gate that the field bug broke; '!' would be that regression.
+    # -- FONTPACK_COMMIT: verifies the staged CRC and loads the slot. '.' is the
+    #    wipe-success gate that the field bug broke, so only '.' passes — but say
+    #    WHICH failure it was, since 'R' (data) and 'L' (link) send an investigation
+    #    in opposite directions.
     reply = raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
-    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
-        log(f"  FAIL: FONTPACK_COMMIT rejected (the wipe-CRC success gate): {reply!r}")
+    if not (reply and len(reply) >= 3 and reply[2] == FONTPACK_COMMIT_OK):
+        log(f"  FAIL: FONTPACK_COMMIT did not succeed: {describe_fontpack_commit(reply)}")
+        log(f"        raw reply: {reply!r}")
         return False
     cver = struct.unpack_from("<H", reply, 3)[0] if len(reply) >= 5 else None
     log(f"  COMMIT ok — slot {SLOT} wiped (content_version={cver})")

@@ -31,8 +31,13 @@ if "hid" not in sys.modules:  # pragma: no cover - environment shim
 from station.hil_tests import (  # noqa: E402
     ACK,
     CMD_GET_ID,
+    FONTPACK_COMMIT_LEGACY,
+    FONTPACK_COMMIT_NO_SLAVE,
+    FONTPACK_COMMIT_OK,
+    FONTPACK_COMMIT_REJECTED,
     FRESH_BOOT,
     POLY_CHANNEL,
+    describe_fontpack_commit,
     test_fresh_boot_marker,
 )
 
@@ -114,6 +119,51 @@ class TestFreshBootMarker(unittest.TestCase):
         self.assertEqual(dev.timeouts_recovered, 1)
         self.assertEqual(reply[2], ACK)
         self.assertNotEqual(reply[2], FRESH_BOOT)
+
+
+class DescribeFontpackCommitTest(unittest.TestCase):
+    """The FONTPACK_COMMIT status byte is three-valued since qmk#209.
+
+    These pin the DIAGNOSIS, not the pass/fail gate — only '.' passes either way.
+    They matter because 'R' and 'L' send an investigation in opposite directions:
+    'R' is a data failure that re-sending cannot fix, 'L' is a split-link failure
+    where the master's copy is already live. Reporting one as the other is the
+    exact misdiagnosis #209 was raised to remove, and it cost two field rounds.
+    """
+
+    def _reply(self, status):
+        return bytes([POLY_CHANNEL, 0x52, status])
+
+    def test_the_three_statuses_read_differently(self):
+        said = {
+            s: describe_fontpack_commit(self._reply(s))
+            for s in (FONTPACK_COMMIT_OK, FONTPACK_COMMIT_REJECTED,
+                      FONTPACK_COMMIT_NO_SLAVE, FONTPACK_COMMIT_LEGACY)
+        }
+        self.assertEqual(len(set(said.values())), 4, f"not all distinct: {said}")
+
+    def test_a_rejection_is_not_described_as_retryable(self):
+        text = describe_fontpack_commit(self._reply(FONTPACK_COMMIT_REJECTED))
+        self.assertIn("MASTER refused", text)
+        self.assertNotIn("safe to retry", text)
+
+    def test_a_lost_slave_ack_is_not_described_as_a_data_failure(self):
+        text = describe_fontpack_commit(self._reply(FONTPACK_COMMIT_NO_SLAVE))
+        self.assertIn("LINK", text)
+        self.assertIn("retry", text)
+        # The master's copy IS live — saying "rejected" here is the bug.
+        self.assertNotIn("refused", text)
+
+    def test_no_reply_is_not_silently_read_as_a_status(self):
+        # An empty / short reply must not index past the end or read as byte 0.
+        for reply in (None, b"", b"P", b"P\x52"):
+            with self.subTest(reply=reply):
+                self.assertIn("no reply", describe_fontpack_commit(reply))
+
+    def test_an_unknown_byte_is_reported_rather_than_swallowed(self):
+        text = describe_fontpack_commit(self._reply(0x7A))
+        self.assertIn("unknown", text)
+        self.assertIn("0x7a", text)
 
 
 if __name__ == "__main__":
