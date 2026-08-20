@@ -232,10 +232,13 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
   **`hil-extended`** PR label, `[hil-extended]` in a commit message (push events
   only), a manual `workflow_dispatch`, or the touch UI's **Extended** toggle beside
   Run Tests. Three things worth knowing:
-  - ⚠️ **Adding the label does not start a run.** `hil-test` opts out of `labeled`
-    events (via `build`'s `if: github.event.action != 'labeled'`, and it `needs:
-    build`) so the auto-labeler cannot re-run the whole pipeline. Label first and
-    push, or re-run the workflow after labelling.
+  - ⚠️ **The label starts its own run, but a RE-RUN can never pick it up.** A
+    re-run replays the **original** event payload, so a label added afterwards is
+    invisible to `github.event.pull_request.labels` and the run silently repeats
+    the default tier. qmk's `build` job therefore excludes `labeled` events (so
+    the auto-labeler cannot re-run the pipeline) *except* for this one label,
+    matched on `github.event.label.name`. Label the PR — don't re-run an older
+    run and expect it to notice.
   - **The gate is fail-CLOSED**, the opposite of the version gates: a caps dict
     that never heard of tiers still skips, because the cost is the whole point.
     The version gates fail *open* for the opposite reason (better to run and see a
