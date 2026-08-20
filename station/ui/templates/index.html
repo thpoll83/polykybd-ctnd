@@ -45,6 +45,9 @@
         <button class="btn btn-blue"  id="btn-flash-left"  onclick="flashSide('left')">Flash Left</button>
         <button class="btn btn-blue"  id="btn-flash-right" onclick="flashSide('right')">Flash Right</button>
         <button class="btn btn-green" id="btn-run"         onclick="runTests()">Run Tests</button>
+        <label class="chk" title="Also run the slow EXTENDED checks: startup animation, idle engage + Eden screensaver, split-link soak, and a reboot power cycle (~1 min more)">
+          <input type="checkbox" id="extended-tests"> Extended
+        </label>
         <button class="btn btn-teal"  id="btn-perf"        onclick="runPerf()" title="Flash the selected PROFILING firmware pair and measure main-loop timing, overlay cost and HID latency">Measure Perf</button>
         <button class="btn btn-gray"  id="btn-copy"        onclick="copyLog()">Copy Log</button>
         <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>

@@ -11,6 +11,14 @@ When you implement one of these, move it out of this file, add it to `hil_tests.
 ## Conventions
 
 - A test is a dict `{"name": str, "fn": Callable[[RawHID, Callable[[str], None]], bool]}`.
+- **Cost tier.** `"tier": TIER_EXTENDED` marks a check that is slow or disruptive
+  (waits out a fade, plays an animation, soaks the link, power-cycles the board).
+  Those are skipped unless the run opts in — `test_runner --extended`,
+  `HIL_EXTENDED=1`, the `hil-extended` PR label, `[hil-extended]` in a pushed
+  commit message, a manual workflow run, or the touch UI's Extended toggle — so the
+  per-push gate stays fast. ⚠️ Tier is about **cost, not confidence**: a check that
+  is merely unproven belongs in this file until it is trustworthy, never in a tier
+  nobody runs.
 - `fn` returns `True` to pass, `False` to fail; raising is also treated as a failure.
 - Keep tests **independent and order-tolerant** where possible. If a test mutates
   persistent state (EEPROM, language, layer), restore it at the end (see

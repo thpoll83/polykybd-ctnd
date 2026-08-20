@@ -271,6 +271,30 @@ footer {
 .btn-gray  { background: #37474F; }
 .btn-gray:hover:not(:disabled)  { background: #455A64; }
 
+/* Extended-suite toggle: sits in the button row beside Run Tests, so it is sized
+   like a button (54 px tall, thumb-friendly on the 1024x600 panel) rather than a
+   stock 13 px checkbox nobody can hit. flex:0 keeps it from stealing width from
+   the buttons, which share the row equally. */
+.chk {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 54px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: #37474F;
+  color: #ECEFF1;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.chk:active { transform: scale(0.95); }
+.chk input { width: 22px; height: 22px; accent-color: #2E7D32; }
+.chk:has(input:checked) { background: #2E7D32; }
+
 .btn-icon {
   flex: 0;
   width: 36px;

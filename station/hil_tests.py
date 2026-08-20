@@ -153,6 +153,21 @@ VIA_DYNAMIC_KEYMAP_RESET    = 0x06
 
 ACK        = ord(".")
 NACK       = ord("!")
+
+# --- suite tiers --------------------------------------------------------------
+# Most checks are cheap (a report or two) and run on every PR. A few are slow by
+# nature — they wait out a 10 s idle fade, a 14 s animation, a 450-frame link
+# soak, or a power cycle — and together they add most of a minute to a run that
+# gates every push. Those carry ``"tier": TIER_EXTENDED`` and only run when the
+# run ASKS for them (``test_runner --extended``, the CI label, or the touch UI's
+# Extended toggle), so the default gate stays fast and the deep checks are there
+# for a release or a change big enough to want them.
+#
+# ⚠️ Tier is about COST, not importance: an extended test is one that is slow or
+# disruptive, never one that is flaky or unproven. Anything unreliable belongs in
+# ``docs/FUTURE_TESTS.md`` until it is trustworthy, not in a tier nobody runs.
+TIER_DEFAULT  = "default"
+TIER_EXTENDED = "extended"
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
 # Firmware facts (keyboards/polykybd/{config.h,base/com.h}).
@@ -290,6 +305,11 @@ def skip_reason(test: dict, caps: dict):
     # runner, a unit test) runs the test as before.
     if test.get("needs_console") and caps.get("console") is False:
         return "needs the QMK HID console, which did not come up this run"
+    # Cost gate (see TIER_EXTENDED). Unlike the version gates this one is
+    # fail-CLOSED: an extended test is skipped unless the run positively opted in,
+    # because the whole point is that the default PR gate does not pay for it.
+    if test.get("tier") == TIER_EXTENDED and not caps.get("extended"):
+        return "extended suite — re-run with --extended (or the hil-extended label)"
     return None
 
 
@@ -1952,13 +1972,14 @@ TESTS = [
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # Animation + idle. Both are slow by nature (the intro is ~14 s, the idle fade
-    # 10 s) so they sit after the quick round-trips. The Eden one needs the console
-    # to CONFIRM idle engaged — without it the test would assert nothing.
+    # 10 s), so they are EXTENDED-tier: they run when a release or a big change
+    # asks for them, not on every push. The Eden one needs the console to CONFIRM
+    # idle engaged — without it the test would assert nothing.
     {"name": "replay startup animation (cmd 31)", "fn": test_replay_animation,
-     "min_fw": EDEN_MIN_FW},
+     "min_fw": EDEN_MIN_FW, "tier": TIER_EXTENDED},
     {"name": "idle engages + Eden screensaver keeps HID alive (cmd 15/28)",
      "fn": test_idle_eden_screensaver, "min_protocol": 4, "min_fw": EDEN_MIN_FW,
-     "needs_console": True},
+     "needs_console": True, "tier": TIER_EXTENDED},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
     {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive, "min_protocol": 11},
@@ -1975,9 +1996,10 @@ TESTS = [
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
     # Deliberate bridged-traffic soak + the firmware's own link health counter.
     # After the stress burst (which wants a quiet master) and before the flash
-    # tests. Needs the console: the counter is only observable there.
+    # tests. Needs the console (the counter is only observable there) and ~5 s of
+    # deliberate traffic, so it is EXTENDED-tier.
     {"name": "split link health under a bridged soak (cmd 21)",
-     "fn": test_split_link_health, "needs_console": True},
+     "fn": test_split_link_health, "needs_console": True, "tier": TIER_EXTENDED},
     # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
     # to slot 0 — exercises the flash transport + the COMMIT slot-present success gate.
     # LAST: it empties the 'symbol' bundle (a host re-flashes it on the next connect).

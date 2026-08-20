@@ -974,11 +974,21 @@ def on_run_tests(data):
         emit_log("[ui] select a valid left and right firmware file first")
         return
 
+    # The Extended toggle adds the slow tier (see hil_tests.TIER_EXTENDED).
+    extended = bool(data.get("extended"))
+
     def _do():
+        # ⚠️ The test LIST has to be passed explicitly — `flash_and_test(tests=None)`
+        # flashes, blanks the displays and reports `{"passed": True, "results": []}`,
+        # i.e. a green run that asserted nothing. This button said "Run Tests" and
+        # did exactly that until 2026-08-20; the CLI has always passed TESTS, so the
+        # gap was invisible from CI.
+        from station.hil_tests import TESTS
         from station.test_runner import TestRunner
         runner = TestRunner(log=emit_log)
         try:
-            result = runner.flash_and_test(left_path, right_path)
+            result = runner.flash_and_test(left_path, right_path, tests=TESTS,
+                                           extended=extended)
             socketio.emit("test_result", result)
             set_status("idle")
         except Exception as exc:

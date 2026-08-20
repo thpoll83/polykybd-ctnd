@@ -326,5 +326,61 @@ class PercentileTest(unittest.TestCase):
         self.assertEqual(max(values), 900.0)
 
 
+class SuiteTierGateTest(unittest.TestCase):
+    """The extended tier is fail-CLOSED — the opposite of the version gates.
+
+    A version gate declines to skip when it cannot tell (better to run and see a
+    real failure than hide one). The tier gate must do the reverse: an extended
+    test costs a chunk of every push's gate time, so it runs only when the run
+    positively asked for it.
+    """
+
+    def test_extended_is_skipped_by_default(self):
+        reason = hil_tests.skip_reason({"tier": hil_tests.TIER_EXTENDED},
+                                       {"extended": False})
+        self.assertIn("extended", reason)
+
+    def test_extended_runs_when_requested(self):
+        self.assertIsNone(hil_tests.skip_reason({"tier": hil_tests.TIER_EXTENDED},
+                                                {"extended": True}))
+
+    def test_a_caps_dict_that_never_heard_of_tiers_still_skips(self):
+        # Fail-closed: an older runner that does not report the tier must not
+        # silently start paying for the slow checks on every push.
+        self.assertIn("extended",
+                      hil_tests.skip_reason({"tier": hil_tests.TIER_EXTENDED}, {}))
+
+    def test_default_tier_tests_are_unaffected(self):
+        for test in ({}, {"tier": hil_tests.TIER_DEFAULT}):
+            self.assertIsNone(hil_tests.skip_reason(test, {"extended": False}))
+
+    def test_a_version_gate_still_wins_over_the_tier(self):
+        # Order matters for the message: "your firmware is too old" is more
+        # actionable than "you did not ask for the slow suite".
+        reason = hil_tests.skip_reason(
+            {"tier": hil_tests.TIER_EXTENDED, "min_protocol": 12},
+            {"protocol": 4, "extended": True})
+        self.assertIn("protocol", reason)
+
+    def test_every_extended_test_is_actually_slow_by_nature(self):
+        # Tier is about COST, not confidence. This pins the membership so a test
+        # cannot be quietly demoted to a tier nobody runs to make it stop failing.
+        names = {t["name"] for t in hil_tests.TESTS
+                 if t.get("tier") == hil_tests.TIER_EXTENDED}
+        self.assertEqual(names, {
+            "replay startup animation (cmd 31)",
+            "idle engages + Eden screensaver keeps HID alive (cmd 15/28)",
+            "split link health under a bridged soak (cmd 21)",
+        })
+
+    def test_the_cheap_new_checks_stay_in_the_default_suite(self):
+        # The two-packet and ROI uploads cost a report each; making them opt-in
+        # would drop real coverage for no time saved.
+        for name in ("compressed overlay spans two packets (cmd 16+17)",
+                     "ROI overlay keeps master alive (cmd 18/19 + bounds clamp)"):
+            test = next(t for t in hil_tests.TESTS if t["name"] == name)
+            self.assertIsNone(test.get("tier"), name)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -225,6 +225,34 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
   same `FW_VERSION` and the UF2 filenames carry no version. ⚠️ Compare the
   **version string only**: the running image is the HIL build and the `--bin` is the
   plain one, so `fw_size`/`fw_crc` legitimately differ between them.
+- **The slow checks are OPT-IN — `TIER_EXTENDED`.** The animation, the idle-engage
+  + Eden screensaver, the split-link soak and the reboot power cycle add most of a
+  minute to a gate every push pays for, so they are skipped unless the run asks:
+  `python -m station.test_runner --extended` (or `HIL_EXTENDED=1`), the
+  **`hil-extended`** PR label, `[hil-extended]` in a commit message (push events
+  only), a manual `workflow_dispatch`, or the touch UI's **Extended** toggle beside
+  Run Tests. Three things worth knowing:
+  - ⚠️ **Adding the label does not start a run.** `hil-test` opts out of `labeled`
+    events (via `build`'s `if: github.event.action != 'labeled'`, and it `needs:
+    build`) so the auto-labeler cannot re-run the whole pipeline. Label first and
+    push, or re-run the workflow after labelling.
+  - **The gate is fail-CLOSED**, the opposite of the version gates: a caps dict
+    that never heard of tiers still skips, because the cost is the whole point.
+    The version gates fail *open* for the opposite reason (better to run and see a
+    real failure than to hide one behind an unverifiable gate).
+  - ⚠️ **Tier is about COST, never confidence.** An extended test is slow or
+    disruptive — never flaky or unproven. Anything unreliable belongs in
+    `docs/FUTURE_TESTS.md` until it is trustworthy, not in a tier nobody runs;
+    otherwise "extended" becomes where failing tests go to be forgotten. A unit
+    test pins the membership so a test cannot be quietly demoted to stop it failing.
+- ⚠️ **The touch UI's "Run Tests" button ran NO tests until 2026-08-20.**
+  `on_run_tests` called `flash_and_test(left, right)` without `tests=TESTS`, and
+  the default is `None` → `for test in (tests or [])`, so it flashed, blanked the
+  displays and returned `{"passed": True, "results": []}` — a green result from a
+  run that asserted nothing. The CLI has always passed `TESTS`, so CI never saw it
+  and the UI reported success the whole time. Generalise: **a "passed" with an
+  empty `results` list is not a pass**, and any new caller of `flash_and_test` has
+  to pass the suite explicitly.
 - ⚠️ **Two tests REPORT latency instead of asserting it, deliberately.**
   `test_replay_animation` and `test_idle_eden_screensaver` assert the freeze
   signature (no answers at all) and log the HID round-trip median/p95/max. A sliced

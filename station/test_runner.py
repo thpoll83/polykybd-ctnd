@@ -75,7 +75,14 @@ class TestRunner:
         self._flash.flash("left",  left_uf2,  self.log)
 
     def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
-                       bin_path: str = None) -> dict:
+                       bin_path: str = None, extended: bool = False) -> dict:
+        """Flash both halves and run ``tests`` against the master.
+
+        ``extended`` opts the run into the slow tier — the animation/idle checks,
+        the split-link soak and the reboot power cycle, together most of a minute
+        — which is otherwise skipped so the per-push gate stays fast. See
+        ``hil_tests.TIER_EXTENDED``.
+        """
         results = []
         try:
             self.flash_halves(left_uf2, right_uf2)
@@ -101,6 +108,11 @@ class TestRunner:
                 self.log(f"[runner] HID console unavailable (continuing without it): {exc}")
 
             self.status = "testing"
+            self.log("[runner] suite tier: "
+                     + ("EXTENDED (slow checks included: animation, idle, link "
+                        "soak, reboot power cycle)" if extended else
+                        "default (extended checks skipped — pass --extended to "
+                        "include them)"))
             # Wait out the post-cold-flash window during which the master blocks
             # its main loop on the initial 72-keycap render + split-sync and
             # times out HID reads, so the marker-sensitive GET_ID tests don't run
@@ -131,12 +143,13 @@ class TestRunner:
                 # reached) which is after test_fresh_boot_marker has consumed the
                 # one-shot '*' marker, so the gate's GET_ID doesn't disturb it.
                 if (test.get("min_protocol") is not None or test.get("min_fw")
-                        or test.get("needs_console")):
+                        or test.get("needs_console") or test.get("tier")):
                     caps = dict(self._device_caps())
                     # Console availability is a property of THIS RUN, not of the
                     # device, so it is merged in here rather than cached with the
                     # GET_ID caps.
                     caps["console"] = console_started
+                    caps["extended"] = extended
                     reason = skip_reason(test, caps)
                     if reason:
                         results.append({"name": name, "status": "skip", "reason": reason})
@@ -215,11 +228,20 @@ class TestRunner:
             # failed: a rig that is misbehaving should not also be power-cycled,
             # and the reboot's own diagnosis would be unreadable next to the
             # earlier failures.
-            if tests and not any(r.get("status") == "fail" for r in results):
-                results.append(self.reboot_persistence())
-            elif tests:
+            if not (tests and extended):
+                if tests:
+                    self.log("[runner] reboot-persistence check skipped — extended "
+                             "tier only (pass --extended)")
+                    results.append({
+                        "name": "reboot persistence (EEPROM survives a power cycle)",
+                        "status": "skip",
+                        "reason": "extended suite — re-run with --extended "
+                                  "(or the hil-extended label)"})
+            elif any(r.get("status") == "fail" for r in results):
                 self.log("[runner] skipping the reboot-persistence check — the suite "
                          "already has a failure to diagnose first")
+            else:
+                results.append(self.reboot_persistence())
 
             # Only a genuine FAIL fails the run; SKIP / XFAIL / XPASS do not.
             passed = not any(r.get("status") == "fail" for r in results)
@@ -666,11 +688,20 @@ if __name__ == "__main__":
                         help="Optional raw .bin image; after the suite, drives the "
                              "keyboard's HID firmware-update path (BEGIN/CHUNK/COMMIT, "
                              "stage+verify only — non-destructive, no apply/reboot)")
+    parser.add_argument("--extended", action="store_true",
+                        default=os.environ.get("HIL_EXTENDED", "").lower()
+                        in ("1", "true", "yes"),
+                        help="also run the slow EXTENDED-tier checks (animation, "
+                             "idle engage + Eden screensaver, split-link soak, "
+                             "reboot persistence). Adds roughly a minute; meant for "
+                             "a release or a change big enough to want them. Also "
+                             "settable with HIL_EXTENDED=1.")
     args = parser.parse_args()
     runner = TestRunner()
     try:
         result = runner.flash_and_test(args.left, args.right, tests=TESTS,
-                                       bin_path=args.bin_path)
+                                       bin_path=args.bin_path,
+                                       extended=args.extended)
     except Exception as exc:
         # A fatal flash/enumerate error still gets a summary line so the run page
         # shows *why* there are no per-test results, not just a red X.
