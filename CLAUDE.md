@@ -117,7 +117,7 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
 - [ ] Verify `USB_HUB_LOCATION`, `LEFT_USB_PORT`, `RIGHT_USB_PORT` by running `uhubctl` on the RPi4 and update `config/config.yaml`
 - [ ] Set EE_HANDS EEPROM marker on each half once (QMK Toolbox → "Set EEPROM Hand", or a keymap combo) before the first HIL run
 - [ ] Register (or re-register) the GitHub Actions self-hosted runner — see `scripts/register-runner.sh` and "Runner troubleshooting" below
-- [x] Write concrete test cases — `station/hil_tests.py` now covers every Raw HID command testable without side effects on the unattended rig (16 tests: identity/fresh-boot, language get/list/list-packed/round-trip, default layer, ACK/NACK error+bounds paths, overlay-flags round-trip, plain + core1-compressed overlay liveness, GET_ID stress), wired into the `test_runner.py` CLI. Remaining infra-dependent / camera-needing / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
+- [x] Write concrete test cases — `station/hil_tests.py` covers every Raw HID command testable without side effects on the unattended rig (identity/fresh-boot, language get/list/list-packed/round-trip, default layer, ACK/NACK error+bounds paths, idle-style / OS / glyph-script round-trips, overlay-flags round-trip, every overlay upload shape — plain, core1 RLE, the two-packet cmd-17 continuation, ROI + its bounds clamp, and both mapping commands — the animation and idle-screensaver paths, GET_ID stress, a bridged split-link soak, and the font-pack/doom flash transport), wired into the `test_runner.py` CLI, plus two runner-level checks that need hardware control (the firmware-update stage+verify and the reboot-persistence power cycle). ⚠️ Count the entries in `TESTS` rather than trusting a number written here — this line has been stale before. Remaining infra-dependent / camera-needing / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
   - The **packed language-list** test (cmd 27, protocol v2+) decodes the 2-byte ISO index pairs via `station/iso_lang_country.py` and validates the list **standalone** — staple locales present, every code well-formed `llCC`, decoded count matches the count byte, current language present. (It no longer cross-checks against the ASCII `GET_LANG_LIST`: that command is **retired** — a separate test asserts cmd 8 now NACKs.) ⚠️ `station/iso_lang_country.py` is the **frozen index table**, byte-identical to the copies in `qmk_firmware` (`keyboards/polykybd/lang/`) and `PolyKybdHost` (`polyhost/services/`); keep all three in sync (`cmp`) or the rig decodes wrong languages. cmd 27 is the only language-list command on v2+ firmware; on a pre-v2 board it NACKs — but the packed/legacy/round-trip tests now carry `"min_protocol": 2`, so a pre-v2 board **skips** them rather than failing (see "Tolerating not-yet-deployed changes" below).
   - The **`GET_ID stress`** test (`test_get_id_stress`) deliberately **tolerates isolated no-answers** and fails only on a *freeze signature* — decided by the pure `classify_get_id_stress(oks, n)`: FAIL if total misses `> max(2, n//10)` or there is a run of `>= STRESS_FREEZE_RUN` (3) consecutive misses; otherwise PASS. ⚠️ **Do not re-tighten it to fail on the first miss** — it runs right after the overlay-upload tests, which leave the master in its transient post-overlay **deaf window** (EEPROM write + full keycap refresh; `send_repeated` already retried the host-side USB hiccups internally). The qmk **split-sync re-fire fix** (#80, `sync_succeeded()`) can *lengthen* that window on the rig, where master→slave sync is flaky, so an occasional GET_ID times out and then recovers — that is not the core1 hang this test guards (a permanent hang answers nothing from the hang point on → a long consecutive run, which still fails). A retried `_master_alive` settle runs before the burst to drain the carried-over window and still catch a real hang.
   - The **`font-pack wipe round-trip`** test (`test_fontpack_wipe_roundtrip`, v6+) is the
@@ -171,6 +171,69 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     mirrors PolyKybdHost `bit_packing.pack_values` — verified byte-identical and
     round-tripped through its decoder at all four widths, per the standing
     "verify the packer through the decoder, not by eye" rule.
+- [x] **Assert on the firmware console, don't just echo it.** `split72/keyboard.json`
+  sets `"console": true`, so the rig has always received firmware diagnostics and
+  only ever logged them. `station/console_log.py` now taps them and two tests read
+  them back. Three things to know before writing another such check:
+  - ⚠️ **A console read is a report-sized FRAGMENT, not a line** — reassemble
+    across reads (`ConsoleTap.feed`) and classify only `\n`-terminated lines.
+    Matching a raw chunk drops every continuation and truncates what it keeps;
+    that shipped once in `perf_runner` (`ovltot wall=16ms bridg`).
+  - ⚠️ **Most diagnostics are gated on `debug_enable`, which defaults FALSE** —
+    `Failed to sync … for transaction X` and `Bridge sync retry` both are, so they
+    never appear on the rig. The `Split link:` summary is deliberately ungated ("a
+    passive wire-health diagnostic with no key content"), which is exactly why the
+    link check reads the *counter* and not the failure lines. Check the gate in
+    `bridge_helper.c` before designing around any console line.
+  - A console-reading test carries **`"needs_console": True`** and SKIPs when the
+    console did not come up. Without that gate it would assert nothing and report a
+    green it did not earn — the "reads as coverage" failure the version gates
+    already exist to avoid.
+- [x] **Split-link health is now a CI check, not just a log line.**
+  `test_split_link_health` bridges 450 cmd-21 mapping reports (one bridged frame
+  each — the cheapest way to generate measurable traffic) so the firmware's
+  200-frame `Split link:` summary fires at least twice, then asserts on the
+  **delta**. Two things that are load-bearing and easy to get backwards:
+  - **Absolutes are useless**: a healthy rig has a documented boot burst (crc_err
+    and giveup in the tens), so any check on the cumulative counters either fails
+    every run or is set so high it never fires.
+  - **`nack` is not an error, and neither is `giveup` on its own** —
+    `classify_link_health` counts only `crc_err + transport_fail`, matching the
+    firmware's own `err%`. `SYNC_BUSY` (a nack) arrives on *every* erase re-poll of
+    a flash, so counting nacks would redden a healthy run the moment the font-pack
+    test runs.
+  - The soak's `from` values are deliberately **off-screen** (>= 900): an on-screen
+    one would make each of the 450 reports request a display refresh and the test
+    would measure the renderer instead of the link.
+- [x] **`reboot_persistence` is the only check that survives a power cycle**, and it
+  is runner-level (it needs `FlashController.reset()` — which the rig had all along
+  and no test had ever used). It sets the idle style, flushes with **cmd 26**
+  (`save_all_dirty`), power-cycles the master over the RUN pin and reads it back.
+  Everything else in the suite asserts RAM state, so a value that is applied
+  correctly and never actually persisted passes every other test — which is the
+  shape of most of the firmware's EEPROM field bugs (brightness coming up 0, the
+  default layer not surviving, the latin map reading back all-zeros through wear
+  levelling). It runs **last** and only when the rest of the suite is green:
+  rebooting the master alone leaves the slave mid-session and the split link to
+  re-establish, and a rig that is already misbehaving should not also be
+  power-cycled. Staging a firmware image first is safe — `fw_staging_init()` clears
+  the apply/reboot flags at boot, so a staged-but-uncommitted image stays inert.
+- [x] **`FW_UP_GET_VERSION` (cmd 0x43) is asserted, not just logged.** The staged
+  `.bin` contains the same compile-time GET_ID literal the firmware answers with
+  (`caps_from_image`), so the two are compared. This is what catches a flash that
+  silently did not take — otherwise invisible, since every test build reports the
+  same `FW_VERSION` and the UF2 filenames carry no version. ⚠️ Compare the
+  **version string only**: the running image is the HIL build and the `--bin` is the
+  plain one, so `fw_size`/`fw_crc` legitimately differ between them.
+- ⚠️ **Two tests REPORT latency instead of asserting it, deliberately.**
+  `test_replay_animation` and `test_idle_eden_screensaver` assert the freeze
+  signature (no answers at all) and log the HID round-trip median/p95/max. A sliced
+  Eden frame should keep round-trips in the tens of ms and an unsliced one push them
+  toward the ~150 ms frame cost — so the median is what would catch the shipped
+  "Eden doesn't wake on the first keypress" regression — but the rig has never
+  published a baseline for it, and a threshold guessed from the source is how a
+  check becomes flaky and then ignored. Read the logged medians across a few runs,
+  then promote it (tracked in `docs/FUTURE_TESTS.md`).
 - [ ] **Provisioning-drift self-check.** Nothing compares the *installed*
   `/etc/systemd/system/polykybd-*.{service,timer}` + `/etc/sudoers.d/polykybd-*`
   against the repo's templates, so any unit or grant added after a rig was built

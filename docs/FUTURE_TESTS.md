@@ -63,6 +63,41 @@ unattended rig now has a test. Covered:
   guard for the `cpsid i` workaround in `multicore_exec.c`.
 - [x] **GET_ID stress** — 50 rapid GET_IDs all ACK, latency reported. Catches the master
   freezing under load.
+- [x] **compressed overlay spans two packets** (cmd 16 + **17**) — a blank overlay
+  compresses to 23 bytes and fits ONE packet, so the guard above never reached the
+  continuation opcode that every real image uses. An 86-byte stream forces cmd 17,
+  exercising fragment-context retention across reports and the second, differently-framed
+  core1 hand-off (62 bytes from `data[2]`, not 60 from `data[4]`).
+- [x] **ROI overlay keeps master alive** (cmd 18/19 + the bounds clamp) — a full-width
+  13-row region, large enough to need the cmd-19 continuation, then a deliberately
+  out-of-bounds header (x=200 y=60 xx=127 yy=63) which `set_fragment_context_from_buffer`
+  must clamp rather than index past the overlay pool. The ROI pair goes through its own
+  core1 command (`CORE1_CMD_ROI_UPDATE` after `RESET_BIT_IDX`), so the decompression guard
+  did not cover it.
+- [x] **split link health under a bridged soak** (cmd 21) — 450 mapping reports, each
+  costing exactly one bridged frame, so the firmware's `Split link:` health counter
+  (printed every 200 frames) yields at least two summaries; the **delta** between them
+  must show no `crc_err` / `transport_fail` growth. Deltas, not absolutes: a healthy rig
+  has a documented boot burst. `nack` is excluded, matching the firmware's own `err%`
+  (`SYNC_BUSY` arrives on every erase re-poll of a flash). This is also the only coverage
+  cmd 21 has — the fixed 10-bit mapping older hosts still send. Needs the console.
+- [x] **replay startup animation** (cmd 31) — the command ACKs, HID keeps being serviced
+  between the (deliberately unsliced) intro frames, and the animation **ends by itself**
+  with the master back to fast replies inside a bounded window.
+- [x] **idle engages + Eden screensaver keeps HID alive** (cmd 15 start + cmd 28) — the
+  first coverage of cmd 15 with a non-zero payload, whose backdate underflowed for the
+  first FADE_OUT_TIME ms of uptime (idle silently never started — the exact window the rig
+  runs in). Confirmed from the console's `Transition to idle [style=eden]` line rather than
+  assumed, then a HID burst while the time-sliced screensaver owns the keycaps. Needs the
+  console.
+- [x] **reboot persistence** (runner-level) — set the idle style, flush it with **cmd 26**
+  (`save_all_dirty`, previously untested), power-cycle the master over the RUN pin, and read
+  it back. The only check in the suite that survives a reboot, and the only one that can
+  see the suspend-only EEPROM model failing.
+- [x] **firmware version cross-check** (cmd 0x43) — `FW_UP_GET_VERSION` was read and thrown
+  away; the staged `.bin` carries the same GET_ID literal the firmware answers with, so the
+  two are compared. Catches a flash that silently did not take, which is otherwise invisible
+  (every test build reports the same `FW_VERSION`, and the UF2 filenames carry no version).
 
 ## Backlog
 
@@ -95,17 +130,10 @@ unattended rig now has a test. Covered:
 
 ### Display / overlay pipeline (render verification needs a camera or firmware read-back)
 
-- [ ] **ROI overlay keeps master alive** (cmd 18/19) — the ROI sibling of the compressed-overlay
-  core1 guard. Recipe: build the 4-byte ROI header with `compose_roi_header`-equivalent packing
-  (top/bottom/left/right region + RLE bit), send cmd 18 (start) then cmd 19 (continue) for a
-  small region, then GET_ID for liveness. Deferred only because the ROI geometry framing is
-  fiddlier than the full-overlay path already covered.
-- [ ] **overlay mapping ACK** (cmd 21) — `SEND_OVERLAY_MAPPING` is the one overlay command that
-  ACKs per chunk (`P\x15.`) and is the exact path of the "slave doesn't show overlays after MRU
-  switch" bug. Recipe: 10-bit-pack a few `{display_idx: pool_slot}` pairs (see
-  `polyhost/device/bit_packing.pack_dict_10_bit`), send cmd 21, expect the ACK, then reset the
-  mapping to identity (cmd 11 with `MAPPING_RESET` 0x80) to restore. Deferred to avoid shipping
-  an unverified 10-bit packer.
+- [ ] **compressed ROI** (cmd 18 with the 0x80 flag) — the ROI test sends an *uncompressed*
+  region; the compressed variant takes a different core1 route again. Cheap to add now that
+  `_roi_header` exists (it already takes `compressed=`), it just needs an RLE stream sized to
+  the region rather than to a whole overlay.
 - [ ] **MRU program-switch refresh** — replay a multi-chunk overlay mapping (>24 pairs, so ESC
   lands in a later chunk) and confirm the final rendered state syncs (the `DISPLAY_OVERLAYS` /
   `OVERLAY_SYNCED_STATE_FLAGS` fix). Hard to assert purely over HID — needs a firmware debug
@@ -117,6 +145,17 @@ unattended rig now has a test. Covered:
   `brightness_save_if_pending()` flush (the RP2040 wear-levelling consolidation window), then
   confirm the slave is still responsive. The valid-set + immediate-liveness half is already in
   `test_set_brightness`; this adds the timed wait that targets the slave-unresponsive regression.
+- [ ] **more state through the reboot** — `reboot_persistence` carries exactly one value (the
+  idle style). Language, glyph script and the default layer ride different EEPROM blocks and
+  different flush paths; each is a small extension of the same runner-level test, and the
+  brightness one needs a read-back command that does not exist yet.
+- [ ] **promote the animation/idle latency to an assertion** — `test_replay_animation` and
+  `test_idle_eden_screensaver` *report* HID round-trip latency and assert only the freeze
+  signature, because the rig has no published baseline for either. A sliced Eden frame should
+  keep round-trips in the tens of ms and an unsliced one push them toward the ~150 ms frame
+  cost, so once a few runs have logged real medians, turn the median into a threshold — that
+  is what would actually catch a slice regression (the shipped "Eden doesn't wake on the first
+  keypress" bug) rather than merely a total wedge.
 - [ ] **reflash idempotency** — flash → test → reflash same UF2 → test again, several cycles,
   confirm stable enumeration (no descriptor/handedness drift across reflashes). Runner-level
   (needs `FlashController` access), not a `(raw, log)` test.
@@ -137,6 +176,12 @@ unattended rig now has a test. Covered:
   split-link and per-half tests don't need a human. Tracked in `CLAUDE.md` → "What still needs doing".
 - [ ] **EEPROM read-back / flash-time handedness set** — needed for the handedness tests and to make
   language/layer round-trips deterministic.
-- [ ] **HID console (CONSOLE_ENABLE)** — currently off in the PolyKybd build, so the runner treats it
-  as best-effort. Several soak tests would be far easier to assert with the debug log available;
-  decide whether to ship a console-enabled HIL build variant.
+- [x] **HID console (CONSOLE_ENABLE)** — ⚠️ this said "currently off in the PolyKybd build", and
+  that has been stale for a while: `split72/keyboard.json` sets `"console": true`, so the rig has
+  been receiving firmware diagnostics all along and merely echoing them. `station/console_log.py`
+  now taps them (reassembling the report-sized fragments into lines) and tests read them back via
+  a `"needs_console": True` gate that SKIPs when the console did not come up.
+  ⚠️ Most firmware diagnostics are gated on `debug_enable`, which defaults **false** — including
+  `Failed to sync … for transaction X` and `Bridge sync retry`. Do not design a check around
+  those lines; the `Split link:` summary is deliberately ungated, which is why the link health
+  test reads the counter and not the failures.

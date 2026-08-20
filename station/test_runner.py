@@ -4,6 +4,7 @@ import sys
 import time
 from typing import Callable
 
+from .console_log import TAP, console_sink
 from .flash import FlashController
 from .hid import HIDConsole, RawHID
 from .fw_update import stage_and_verify
@@ -16,6 +17,9 @@ POLY_CHANNEL     = 0x50  # 'P'
 CMD_GET_ID       = 0x06  # device identity string — advertises fw + protocol version
 CMD_GET_LANG     = 0x07  # read current language — readiness probe (no side effects)
 CMD_DISPLAY_OFF  = 0x18
+CMD_IDLE_STYLE   = 0x1C  # 28: get (0xFF) / set the idle anti-burn-in style (v4+)
+CMD_SAVE_EEPROM  = 0x1A  # 26: flush every dirty user-state block to EEPROM
+IDLE_STYLE_MIN_PROTOCOL = 4   # FEATURE_MIN_PROTOCOL entry for cmd 28
 ACK              = ord(".")
 
 # VIA-style "reset dynamic keymap" report. Unlike the 'P'-channel commands above,
@@ -87,7 +91,11 @@ class TestRunner:
             # why HIDConsole.stop() must join it before closing the handle.)
             console_started = False
             try:
-                self._console.start(lambda msg: self.log(f"[qmk] {msg}"))
+                # Echo every chunk into the run log AND into the shared tap, so a
+                # test can assert on what the firmware printed while it ran (the
+                # split-link counter, the idle transition). Reassembly of the
+                # report-sized fragments into lines happens inside the tap.
+                self._console.start(console_sink(lambda msg: self.log(f"[qmk] {msg}")))
                 console_started = True
             except Exception as exc:
                 self.log(f"[runner] HID console unavailable (continuing without it): {exc}")
@@ -122,8 +130,14 @@ class TestRunner:
                 # flashed. Caps are read lazily (only when a gated test is first
                 # reached) which is after test_fresh_boot_marker has consumed the
                 # one-shot '*' marker, so the gate's GET_ID doesn't disturb it.
-                if test.get("min_protocol") is not None or test.get("min_fw"):
-                    reason = skip_reason(test, self._device_caps())
+                if (test.get("min_protocol") is not None or test.get("min_fw")
+                        or test.get("needs_console")):
+                    caps = dict(self._device_caps())
+                    # Console availability is a property of THIS RUN, not of the
+                    # device, so it is merged in here rather than cached with the
+                    # GET_ID caps.
+                    caps["console"] = console_started
+                    reason = skip_reason(test, caps)
                     if reason:
                         results.append({"name": name, "status": "skip", "reason": reason})
                         self.log(f"[test] SKIP: {name} ({reason})")
@@ -172,6 +186,9 @@ class TestRunner:
 
             if console_started:
                 self._console.stop()
+                # Release a trailing fragment the firmware never newline-terminated
+                # — the last line is usually the interesting one.
+                TAP.flush()
 
             # Firmware-update coverage: drive the keyboard's own HID update path
             # (BEGIN -> CHUNK -> COMMIT) with the built .bin. This is the one
@@ -193,6 +210,17 @@ class TestRunner:
                 self.log(f"[test] {'PASS' if fw_ok else 'FAIL'}: "
                          f"firmware update (stage+verify .bin)")
 
+            # Persistence across a power cycle — LAST, because it reboots the
+            # master (see reboot_persistence). Skipped when the suite already
+            # failed: a rig that is misbehaving should not also be power-cycled,
+            # and the reboot's own diagnosis would be unreadable next to the
+            # earlier failures.
+            if tests and not any(r.get("status") == "fail" for r in results):
+                results.append(self.reboot_persistence())
+            elif tests:
+                self.log("[runner] skipping the reboot-persistence check — the suite "
+                         "already has a failure to diagnose first")
+
             # Only a genuine FAIL fails the run; SKIP / XFAIL / XPASS do not.
             passed = not any(r.get("status") == "fail" for r in results)
             if passed:
@@ -209,6 +237,119 @@ class TestRunner:
             raise
         finally:
             self._flash.cleanup()
+
+    def reboot_persistence(self) -> dict:
+        """Set a persisted setting, flush it, POWER-CYCLE the master, read it back.
+
+        This is the only check in the suite that survives a reboot, and it covers
+        the subsystem with the longest field-bug list in the firmware: the
+        suspend-only dirty-flag EEPROM model. Everything else the rig asserts is
+        RAM state, so a value that is applied correctly and then never actually
+        persisted (or persisted and then read back wrong on the next boot) passes
+        every other test. The shipped bugs of exactly that shape include brightness
+        coming up 0 after a reboot, the default layer not surviving, the latin
+        assignment map reading back all-zeros through QMK's wear levelling (whose
+        recovery needed a *second* fix because a stale-but-stamped-valid EEPROM
+        had already shipped), and auto-brightness losing its mode.
+
+        Three commands are exercised, two of them for the first time:
+
+        * **cmd 28** (idle style) as the carrier — one byte in ``poly_eeconf_t``,
+          restored afterwards, and PULSE/JITTER keep the display quiet (unlike
+          IDDQD/EDEN, which would start an animation).
+        * **cmd 26** (``save_all_dirty``) — the host's "flush now" signal, on the
+          path the whole persistence model funnels through, previously untested.
+        * the RUN-pin power cycle via :class:`FlashController` — the rig has always
+          had ``reset()`` and no test had ever used it.
+
+        Runner-level (it needs the GPIO), so it is not in ``TESTS``, and it runs
+        LAST: rebooting the master alone leaves the slave mid-session and the split
+        link to re-establish, which nothing after it should have to absorb.
+        """
+        caps = self._device_caps()
+        proto = caps.get("protocol")
+        if proto is not None and proto < IDLE_STYLE_MIN_PROTOCOL:
+            reason = (f"needs protocol >= {IDLE_STYLE_MIN_PROTOCOL} for cmd 28, "
+                      f"device reports P{proto}")
+            self.log(f"[test] SKIP: reboot persistence ({reason})")
+            return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                    "status": "skip", "reason": reason}
+
+        original = self._idle_style()
+        if original is None:
+            self.log("[test] FAIL: reboot persistence: could not read the idle style "
+                     "before the reboot")
+            return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                    "status": "fail", "error": "idle style unreadable"}
+        target = 1 if original != 1 else 0
+        self.log(f"[runner] reboot persistence: idle style {original} -> {target}, "
+                 "flushing to EEPROM, then power-cycling the master")
+
+        try:
+            if not self._set_idle_style(target):
+                raise RuntimeError(f"the keyboard refused idle style {target}")
+            if not self._save_eeprom():
+                raise RuntimeError("cmd 26 (save_all_dirty) was not ACKed")
+
+            self._flash.reset("left", self.log)
+            time.sleep(2)
+            self.wait_for_master_ready()
+            self.settle_master()
+
+            after = self._idle_style()
+            if after is None:
+                raise RuntimeError("the idle style could not be read after the reboot")
+            if after != target:
+                raise RuntimeError(
+                    f"idle style read back as {after}, expected {target} — the value "
+                    "did not survive the power cycle. Either cmd 26 did not flush it, "
+                    "or the boot-time load lost it (a poly_eeconf_t layout/version "
+                    "change resets user state; QMK's wear levelling reads a cleared "
+                    "byte back as 0x00, not 0xFF)")
+            self.log(f"[test] PASS: reboot persistence — idle style {target} survived "
+                     "the power cycle")
+            return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                    "status": "pass"}
+        except Exception as exc:
+            self.log(f"[test] FAIL: reboot persistence: {exc}")
+            return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                    "status": "fail", "error": str(exc)}
+        finally:
+            # Put the rig back the way it was, whichever branch we left by — and
+            # flush again, or the restore itself would only live in RAM.
+            if self._idle_style() != original:
+                restored = self._set_idle_style(original) and self._save_eeprom()
+                self.log(f"[runner] restore idle style {original}: "
+                         + ("ok" if restored else "FAILED — the rig keeps the test "
+                            "value until someone sets it back"))
+
+    def _idle_style(self):
+        """Current idle style (cmd 28 with the 0xFF query byte), or None."""
+        try:
+            resp = self._raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, 0xFF]))
+        except Exception as exc:
+            self.log(f"[runner] idle-style read error: {exc}")
+            return None
+        if (resp and len(resp) >= 4 and resp[0] == POLY_CHANNEL
+                and resp[1] == CMD_IDLE_STYLE and resp[2] == ACK):
+            return resp[3]
+        return None
+
+    def _set_idle_style(self, style: int) -> bool:
+        resp = self._raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, style]))
+        return bool(resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL
+                    and resp[1] == CMD_IDLE_STYLE and resp[2] == ACK)
+
+    def _save_eeprom(self) -> bool:
+        """cmd 26 — flush every dirty user-state block to EEPROM now.
+
+        The persistence model is suspend-only by design (a per-housekeeping write
+        is what the "slave goes unresponsive" bug was about), so without this the
+        setting above would still be RAM-only at the reset and the test would fail
+        for the wrong reason."""
+        resp = self._raw.send(bytes([POLY_CHANNEL, CMD_SAVE_EEPROM]))
+        return bool(resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL
+                    and resp[1] == CMD_SAVE_EEPROM and resp[2] == ACK)
 
     def wait_for_master_ready(self, need: int = 3, timeout: float = 30.0,
                                probe_timeout_ms: int = 800, spacing: float = 0.3) -> bool:

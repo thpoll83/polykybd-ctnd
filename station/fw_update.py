@@ -26,6 +26,7 @@ Protocol mirrors PolyKybdHost ``polyhost/device/hid_fw_up.py`` and the firmware
 ``keyboards/polykybd/hid_fw_up.c``.
 """
 import binascii
+import re
 import struct
 import os
 import time
@@ -114,6 +115,34 @@ class _FwLink:
             return None
 
 
+# The firmware builds its GET_ID reply from one compile-time literal
+# (hid_com.c: "P\x06." POLY_KB_NAME " " FW_VERSION " P" PROTOCOL_VERSION " HW" ...),
+# so that whole string is sitting in the .bin we are about to stage. Reading it
+# back out is what lets the rig ask "is the keyboard running the build this image
+# came from?" — see the check in stage_and_verify.
+_IMAGE_CAPS_RE = re.compile(rb"(Split\d+) (\d+(?:\.\d+)*[\w.\-]*) P(\d+) HW(\d+)")
+
+
+def caps_from_image(image: bytes) -> dict | None:
+    """Extract ``{'board','fw','protocol'}`` from the GET_ID literal inside a .bin.
+
+    Returns ``None`` when the literal isn't found — a renamed board, a stripped
+    image, some future format — so the caller can skip the comparison rather than
+    fail a run over a parsing miss.
+
+    >>> caps_from_image(b"junk...Split72 0.15.5 P12 HW1 ...more")
+    {'board': 'Split72', 'fw': '0.15.5', 'protocol': 12}
+    >>> caps_from_image(b"nothing to see here") is None
+    True
+    """
+    m = _IMAGE_CAPS_RE.search(image or b"")
+    if not m:
+        return None
+    return {"board": m.group(1).decode("ascii", "replace"),
+            "fw": m.group(2).decode("ascii", "replace"),
+            "protocol": int(m.group(3))}
+
+
 def _get_version(link: _FwLink, log: Callable[[str], None]) -> dict | None:
     reply = link.xfer(bytes([HID_POLYKYBD, CMD_FW_UP_GET_VERSION]), timeout_ms=5000)
     if (reply is None or len(reply) < 3 + FW_UP_VERSION_LEN + 8
@@ -159,6 +188,34 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
         if running:
             log(f"  running firmware: {running['version']!r} "
                 f"(size {running['size']}, crc 0x{running['crc']:08X})")
+        else:
+            log("  FW_UP_GET_VERSION (cmd 0x43) did not answer — the host's "
+                "`polyctl fw version` reads exactly this")
+            return False
+
+        # Cross-check the RUNNING version against the version compiled into the
+        # image we are about to stage. Both come from the same build, so a
+        # mismatch means the rig is not running the firmware this run built —
+        # the "wrong/stale build flashed" failure, which is otherwise invisible
+        # (every test build reports the same FW_VERSION and the UF2 filenames
+        # carry no version, so a flash that silently did not take looks exactly
+        # like one that did). The reply was previously read and thrown away.
+        # ⚠️ The running image is the *HIL* build and this .bin is the plain one:
+        # same commit, so same FW_VERSION — do NOT compare fw_size/fw_crc, those
+        # legitimately differ between the two flavours.
+        image_caps = caps_from_image(fw)
+        if image_caps is None:
+            log("  (no GET_ID literal in the image — skipping the version "
+                "cross-check)")
+        elif image_caps["fw"] != running["version"]:
+            log(f"  FAIL: the keyboard is running {running['version']!r} but this "
+                f"image is {image_caps['fw']!r} ({image_caps['board']}, "
+                f"P{image_caps['protocol']}). The rig is not running the build "
+                "under test — a flash that did not take, or the wrong artifact")
+            return False
+        else:
+            log(f"  version cross-check ok — device and image both "
+                f"{running['version']} (P{image_caps['protocol']})")
 
         # -- BEGIN: erase staging on both halves. '.' ready / '~' erasing / '!'
         #    error / no reply (master tore USB down during its erase -> reopen). --
