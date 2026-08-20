@@ -95,6 +95,8 @@ CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (p
 CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7+)
 CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (v9+ tengwar; v10 adds 9 more scripts)
 GLYPH_SCRIPT_MAX            = 10  # highest valid poly_glyph_script value (BRAILLE) as of protocol v10
+CMD_GLYPH_SIZE              = 34  # get/set the keycap legend size (protocol v13+)
+GLYPH_SIZE_MAX              = 2   # highest valid poly_glyph_size value (LARGE)
 POLY_OS_COUNT               = 8   # enum poly_os values 0..7 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS-reserved/LINUX_GNOME/LINUX_KDE); firmware SET_OS accepts arg < POLY_OS_COUNT
 # Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
 # firmware update, reused per-bundle). Reply status byte is reply[2] ('.'/'!'/'~').
@@ -1003,6 +1005,68 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
 
     restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, original]))
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
+
+
+def test_glyph_size_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """GLYPH_SIZE (cmd 34, protocol v13+) get/set round-trip + out-of-range NACK.
+
+    The keycap legend size selects how large a key's MAIN legend is drawn (0 small
+    = the original face, 1 medium, 2 large); the shift/AltGr previews are
+    unaffected. Query byte is 0xFF. The write is deferred to the EEPROM flush, so
+    the live state is what reads back here.
+
+    ⚠️ The NACK check is the POINT of this test, not a bounds nicety. This range is
+    CLOSED where the glyph SCRIPT next door is open-ended: an unknown script index
+    is accepted and degrades to the normal legend, but an unknown SIZE would be
+    stored, synced and persisted while still rendering small — a setting that
+    silently does nothing. If a firmware change ever makes cmd 34 accept anything,
+    this is what catches it. test_glyph_script_expansion asserts the OPPOSITE for
+    cmd 30; the two together pin the deliberate asymmetry.
+
+    Pack-agnostic: selecting a bigger size with no `latinbig` bundle flashed just
+    renders the small face, so the get/set state round-trips regardless.
+    """
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, 0xFF]))
+    log(f"glyph-size query -> {cur!r}")
+    if not _resp_ok(cur, CMD_GLYPH_SIZE, log, expect_status=ACK):
+        return False
+    if len(cur) < 4:
+        log("  FAIL: glyph-size query reply has no value byte")
+        return False
+    original = cur[3]
+    log(f"  current glyph size = {original}")
+
+    for target in range(GLYPH_SIZE_MAX + 1):
+        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, target]))
+        log(f"glyph-size set {target} -> {set_resp!r}")
+        if not _resp_ok(set_resp, CMD_GLYPH_SIZE, log, expect_status=ACK):
+            return False
+        back = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, 0xFF]))
+        if not _resp_ok(back, CMD_GLYPH_SIZE, log, expect_status=ACK) or len(back) < 4:
+            return False
+        if back[3] != target:
+            log(f"  FAIL: read back {back[3]} != set {target}")
+            return False
+        log(f"  size {target} round-tripped")
+
+    # An index past the enum must be REFUSED (see the docstring).
+    bad = GLYPH_SIZE_MAX + 1
+    nack = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, bad]))
+    log(f"glyph-size set {bad} (out of range) -> {nack!r}")
+    if not _resp_ok(nack, CMD_GLYPH_SIZE, log, expect_status=NACK):
+        log("  FAIL: an out-of-range glyph size was accepted — cmd 34 must stay a CLOSED range")
+        return False
+
+    # ...and must not have changed the live value.
+    still = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, 0xFF]))
+    if not _resp_ok(still, CMD_GLYPH_SIZE, log, expect_status=ACK) or len(still) < 4:
+        return False
+    if still[3] != GLYPH_SIZE_MAX:
+        log(f"  FAIL: refused size still moved the state to {still[3]}")
+        return False
+
+    restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, original]))
+    return _resp_ok(restore, CMD_GLYPH_SIZE, log, expect_status=ACK)
 
 
 def test_os_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -1970,6 +2034,7 @@ TESTS = [
     {"name": "OS round-trip (v7)",              "fn": test_os_round_trip, "min_protocol": 7},
     {"name": "glyph script round-trip (v9)",    "fn": test_glyph_script_round_trip, "min_protocol": 9},
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
+    {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # Animation + idle. Both are slow by nature (the intro is ~14 s, the idle fade
     # 10 s), so they are EXTENDED-tier: they run when a release or a big change
