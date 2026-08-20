@@ -101,11 +101,17 @@ function flashSide(side) {
   socket.emit('flash', { side, uf2: sel.value });
 }
 
+/* The Extended toggle adds the slow tier (animation, idle engage + Eden
+   screensaver, split-link soak, reboot power cycle) — roughly a minute more, for
+   a release or a change big enough to want it. Off by default, like CI. */
 function runTests() {
   const left  = document.getElementById('left-fw').value;
   const right = document.getElementById('right-fw').value;
   if (!left || !right) { appendLog('[ui] select both left and right firmware files first'); return; }
-  socket.emit('run_tests', { left_uf2: left, right_uf2: right });
+  const extended = document.getElementById('extended-tests').checked;
+  appendLog(extended ? '[ui] running the EXTENDED suite (slow checks included)…'
+                     : '[ui] running the default suite…');
+  socket.emit('run_tests', { left_uf2: left, right_uf2: right, extended });
 }
 
 /* Performance measurement. Needs a PROFILING firmware pair (built with

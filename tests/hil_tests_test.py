@@ -28,6 +28,7 @@ if "hid" not in sys.modules:  # pragma: no cover - environment shim
     _hid.Device = object
     sys.modules["hid"] = _hid
 
+from station import hil_tests  # noqa: E402
 from station.hil_tests import (  # noqa: E402
     ACK,
     CMD_GET_ID,
@@ -164,6 +165,221 @@ class DescribeFontpackCommitTest(unittest.TestCase):
         text = describe_fontpack_commit(self._reply(0x7A))
         self.assertIn("unknown", text)
         self.assertIn("0x7a", text)
+
+
+# --- the packers/encoders the new upload tests build reports with ------------
+# Every one of these is verified THROUGH a re-implementation of the firmware's
+# own decoder rather than by eye — the standing rule in this project after a
+# hand-checked bit layout shipped wrong. The decoders below are transcribed from
+# keyboards/polykybd/base/overlay.c (set_fragment_context_from_buffer) and
+# fill_overlay.c (set_packed_overlay_mapping).
+
+def decode_roi_header(buf: bytes) -> dict:
+    """Firmware-side read of the 5-byte ROI header (base/overlay.c)."""
+    return {
+        "keycode": buf[0],
+        "modifier": buf[1] & 0x0F,
+        "y": (buf[2] & 0x03) | ((buf[1] >> 2) & 0x3C),
+        "yy": buf[2] >> 2,
+        "x": buf[3],
+        "xx": buf[4] & 0x7F,
+        "compressed": bool(buf[4] & 0x80),
+    }
+
+
+def unpack_mapping_values(buf: bytes, width: int, count: int) -> list:
+    """Firmware-side read of `width`-bit packed mapping values (fill_overlay.c)."""
+    out = []
+    mask = (1 << width) - 1
+    for i in range(count):
+        b, s = divmod(i * width, 8)
+        raw = buf[b]
+        if b + 1 < len(buf):
+            raw |= buf[b + 1] << 8
+        if b + 2 < len(buf):
+            raw |= buf[b + 2] << 16
+        out.append((raw >> s) & mask)
+    return out
+
+
+def rle_decode_bits(stream: bytes) -> list:
+    """Firmware-side read of the RLE stream: high bit = value, low 7 = run length."""
+    bits = []
+    for byte in stream:
+        bits.extend([(byte >> 7) & 1] * (byte & 0x7F))
+    return bits
+
+
+class RoiHeaderTest(unittest.TestCase):
+    """The ROI header packs a 6-bit y across two bytes; verify via the decoder."""
+
+    def test_round_trips_through_the_firmware_decoder(self):
+        for x, y, xx, yy in ((0, 0, 72, 13), (7, 5, 40, 39), (0, 39, 1, 40),
+                             (71, 38, 72, 40)):
+            got = decode_roi_header(hil_tests._roi_header(hil_tests.KC_A, 0, x, y, xx, yy))
+            self.assertEqual((got["x"], got["y"], got["xx"], got["yy"]),
+                             (x, y, xx, yy), f"region {(x, y, xx, yy)}")
+
+    def test_the_y_split_across_two_bytes_does_not_corrupt_the_modifier(self):
+        # y bits 2..5 ride in the same byte as the modifier nibble.
+        for y in range(0, 64):
+            got = decode_roi_header(hil_tests._roi_header(hil_tests.KC_A, 0x0F, 0, y, 72, 40))
+            self.assertEqual(got["modifier"], 0x0F, f"y={y}")
+            self.assertEqual(got["y"], y)
+
+    def test_the_compressed_flag_is_separate_from_xx(self):
+        plain = decode_roi_header(hil_tests._roi_header(hil_tests.KC_A, 0, 0, 0, 72, 40))
+        comp = decode_roi_header(
+            hil_tests._roi_header(hil_tests.KC_A, 0, 0, 0, 72, 40, compressed=True))
+        self.assertFalse(plain["compressed"])
+        self.assertTrue(comp["compressed"])
+        self.assertEqual(plain["xx"], comp["xx"])
+
+    def test_the_out_of_bounds_header_really_is_out_of_bounds(self):
+        # If this ever encoded to something the firmware considers in-range, the
+        # clamp branch it is meant to exercise would never run — a test that
+        # passes without reaching the code it names.
+        got = decode_roi_header(hil_tests._roi_header(hil_tests.KC_A, 0, 200, 60, 127, 63))
+        self.assertGreater(got["x"], hil_tests.SCREEN_WIDTH)
+        self.assertGreater(got["y"], hil_tests.SCREEN_HEIGHT)
+        self.assertGreater(got["xx"], hil_tests.SCREEN_WIDTH)
+        self.assertGreater(got["yy"], hil_tests.SCREEN_HEIGHT)
+
+
+class TwoPacketOverlayTest(unittest.TestCase):
+    """The compressed-overlay stream must genuinely need the cmd-17 continuation."""
+
+    def test_the_stream_spans_exactly_two_packets(self):
+        n = len(hil_tests._TWO_PACKET_OVERLAY_RLE)
+        self.assertGreater(n, hil_tests.COMPRESSED_START,
+                           "fits one packet — cmd 17 would never be exercised")
+        self.assertLessEqual(n, hil_tests.COMPRESSED_START + hil_tests.COMPRESSED_MAX,
+                             "needs a third packet the test does not send")
+
+    def test_it_decodes_to_a_whole_overlay(self):
+        bits = rle_decode_bits(hil_tests._TWO_PACKET_OVERLAY_RLE)
+        self.assertEqual(len(bits), hil_tests.OVERLAY_BYTES * 8)
+
+    def test_no_zero_length_run_is_emitted(self):
+        # A 0 run byte would be a decoder hazard, and the encoder documents that
+        # it never emits one.
+        self.assertTrue(all(b & 0x7F for b in hil_tests._TWO_PACKET_OVERLAY_RLE))
+
+
+class LinkSoakReportTest(unittest.TestCase):
+    """The soak's mapping report must be in-range and OFF-SCREEN.
+
+    In range because an out-of-pool ``to`` is an OOB read in the firmware's
+    render path; off-screen because an on-screen ``from`` would make every one of
+    the 450 reports request a display refresh, and the soak would then measure the
+    renderer instead of the link.
+    """
+
+    def setUp(self):
+        report = hil_tests._link_soak_report()
+        self.assertEqual(len(report), 64)
+        count = (hil_tests.HID_DATA_MAX * 8) // hil_tests.OVERLAY_MAP_IDX_BITS
+        self.values = unpack_mapping_values(report[2:], hil_tests.OVERLAY_MAP_IDX_BITS,
+                                            count)
+
+    def test_every_from_is_addressable_and_off_screen(self):
+        for v in self.values[0::2]:
+            self.assertLess(v, hil_tests.OVERLAY_MAP_IDX_CNT)
+            # >= 90 * 10: past the modifier variants a session can actually hold.
+            self.assertGreaterEqual(v, 900)
+
+    def test_every_to_is_inside_the_overlay_pool(self):
+        for v in self.values[1::2]:
+            self.assertLess(v, 600)   # NUM_OVERLAY_SLOTS
+
+
+class SkipReasonConsoleGateTest(unittest.TestCase):
+    def test_a_console_test_skips_when_the_console_did_not_come_up(self):
+        reason = hil_tests.skip_reason({"needs_console": True}, {"console": False})
+        self.assertIn("console", reason)
+
+    def test_it_runs_when_the_console_is_up(self):
+        self.assertIsNone(hil_tests.skip_reason({"needs_console": True},
+                                                {"console": True}))
+
+    def test_an_unknowing_caps_dict_runs_the_test_rather_than_skipping_it(self):
+        # Same fail-open principle as the version gates: only a POSITIVE "not
+        # available" skips, so an older runner (or a unit test) that never
+        # reported console state does not silently drop coverage.
+        self.assertIsNone(hil_tests.skip_reason({"needs_console": True}, {}))
+
+    def test_it_composes_with_the_version_gates(self):
+        reason = hil_tests.skip_reason({"needs_console": True, "min_protocol": 12},
+                                       {"protocol": 4, "console": True})
+        self.assertIn("protocol", reason)
+
+
+class PercentileTest(unittest.TestCase):
+    def test_median_and_edges(self):
+        self.assertEqual(hil_tests._percentile([5, 1, 3], 50), 3)
+        self.assertEqual(hil_tests._percentile([1, 2, 3, 4], 100), 4)
+        self.assertEqual(hil_tests._percentile([9], 95), 9)
+
+    def test_p95_is_not_dragged_down_by_the_bulk(self):
+        values = [10.0] * 99 + [900.0]
+        self.assertGreaterEqual(hil_tests._percentile(values, 95), 10.0)
+        self.assertEqual(max(values), 900.0)
+
+
+class SuiteTierGateTest(unittest.TestCase):
+    """The extended tier is fail-CLOSED — the opposite of the version gates.
+
+    A version gate declines to skip when it cannot tell (better to run and see a
+    real failure than hide one). The tier gate must do the reverse: an extended
+    test costs a chunk of every push's gate time, so it runs only when the run
+    positively asked for it.
+    """
+
+    def test_extended_is_skipped_by_default(self):
+        reason = hil_tests.skip_reason({"tier": hil_tests.TIER_EXTENDED},
+                                       {"extended": False})
+        self.assertIn("extended", reason)
+
+    def test_extended_runs_when_requested(self):
+        self.assertIsNone(hil_tests.skip_reason({"tier": hil_tests.TIER_EXTENDED},
+                                                {"extended": True}))
+
+    def test_a_caps_dict_that_never_heard_of_tiers_still_skips(self):
+        # Fail-closed: an older runner that does not report the tier must not
+        # silently start paying for the slow checks on every push.
+        self.assertIn("extended",
+                      hil_tests.skip_reason({"tier": hil_tests.TIER_EXTENDED}, {}))
+
+    def test_default_tier_tests_are_unaffected(self):
+        for test in ({}, {"tier": hil_tests.TIER_DEFAULT}):
+            self.assertIsNone(hil_tests.skip_reason(test, {"extended": False}))
+
+    def test_a_version_gate_still_wins_over_the_tier(self):
+        # Order matters for the message: "your firmware is too old" is more
+        # actionable than "you did not ask for the slow suite".
+        reason = hil_tests.skip_reason(
+            {"tier": hil_tests.TIER_EXTENDED, "min_protocol": 12},
+            {"protocol": 4, "extended": True})
+        self.assertIn("protocol", reason)
+
+    def test_every_extended_test_is_actually_slow_by_nature(self):
+        # Tier is about COST, not confidence. This pins the membership so a test
+        # cannot be quietly demoted to a tier nobody runs to make it stop failing.
+        names = {t["name"] for t in hil_tests.TESTS
+                 if t.get("tier") == hil_tests.TIER_EXTENDED}
+        self.assertEqual(names, {
+            "replay startup animation (cmd 31)",
+            "idle engages + Eden screensaver keeps HID alive (cmd 15/28)",
+            "split link health under a bridged soak (cmd 21)",
+        })
+
+    def test_the_cheap_new_checks_stay_in_the_default_suite(self):
+        # The two-packet and ROI uploads cost a report each; making them opt-in
+        # would drop real coverage for no time saved.
+        for name in ("compressed overlay spans two packets (cmd 16+17)",
+                     "ROI overlay keeps master alive (cmd 18/19 + bounds clamp)"):
+            test = next(t for t in hil_tests.TESTS if t["name"] == name)
+            self.assertIsNone(test.get("tier"), name)
 
 
 if __name__ == "__main__":

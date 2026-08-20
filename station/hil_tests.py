@@ -26,20 +26,29 @@ device's advertised protocol/fw version is parsed from GET_ID via
 unit-testable); the runner reads the caps lazily, after the fresh-boot test has
 consumed the one-shot ``*`` marker.
 
+A test dict may also carry ``"needs_console": True`` when it asserts on what the
+firmware *printed* (``station/console_log.py`` taps the QMK HID console). That is
+a property of the RUN, not of the device, so the runner merges it into the caps
+dict; a run whose console never came up SKIPs those tests rather than letting them
+assert nothing and report a green they did not earn.
+
 The suite exercises every Raw HID command that can be checked in a meaningful,
 side-effect-free way on the unattended rig (no human at the keys, no camera, no
-GPIO key-matrix injection, HID console off): the read-only identity/state
+GPIO key-matrix injection): the read-only identity/state
 queries (GET_ID/GET_LANG/GET_LANG_LIST_PACKED/GET_DEFAULT_LAYER), the ACK/NACK
 error and bounds paths (unknown command, the retired ASCII GET_LANG_LIST which
 must now NACK, out-of-range brightness, invalid unicode mode), the state commands
 with a clean round-trip + restore (language, overlay
 flags), and the upload + soak paths that guard documented firmware regressions
-(overlay upload — plain and core1 RLE — keeping the master alive; rapid GET_ID
-stress). Commands that can't be asserted without side effects or extra
-infrastructure are catalogued in ``docs/FUTURE_TESTS.md`` (host-driven KEYPRESS
-injects real keystrokes; ENTER_BOOTLOADER ends the session; ROI/mapping render
-checks need a camera or firmware read-back; handedness/idempotency need flash
-control).
+(overlay upload — plain, core1 RLE, the two-packet continuation and ROI — keeping
+the master alive; rapid GET_ID stress; a bridged soak read against the firmware's
+own split-link health counter). Commands that can't be asserted without side
+effects or extra infrastructure are catalogued in ``docs/FUTURE_TESTS.md``
+(host-driven KEYPRESS injects real keystrokes; ENTER_BOOTLOADER ends the session;
+overlay *render* checks need a camera or firmware read-back; handedness needs
+flash control). Two checks live in the runner rather than here because they need
+the GPIO or the flashed image: the reboot-persistence power cycle and the
+firmware-update stage+verify.
 
 Run them via the CLI::
 
@@ -51,6 +60,7 @@ import re
 import time
 from typing import Callable
 
+from .console_log import TAP, classify_link_health, link_delta
 from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
 
@@ -74,6 +84,11 @@ CMD_OVERLAY_FLAGS_OFF       = 12  # clear overlay flag bits
 CMD_SET_BRIGHTNESS          = 13  # set OLED contrast (0..FULL_BRIGHT)
 CMD_IDLE_STATE              = 15  # start (1) / stop (0) display idle
 CMD_START_COMPRESSED_OVERLAY = 16 # first RLE-compressed overlay packet (core1)
+CMD_CONT_COMPRESSED_OVERLAY = 17  # continuation RLE packet (same fragment context)
+CMD_START_ROI_OVERLAY       = 18  # first ROI packet: 5-byte ROI header then data
+CMD_CONT_ROI_OVERLAY        = 19  # continuation ROI packet (same fragment context)
+CMD_SEND_OVERLAY_MAPPING    = 21  # overlay mapping, fixed 10-bit values (no ACK)
+CMD_REPLAY_ANIM             = 31  # replay the one-shot startup ("Eden") animation
 CMD_SET_UNICODE_MODE        = 20  # unicode input mode (0..4)
 CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
@@ -138,6 +153,21 @@ VIA_DYNAMIC_KEYMAP_RESET    = 0x06
 
 ACK        = ord(".")
 NACK       = ord("!")
+
+# --- suite tiers --------------------------------------------------------------
+# Most checks are cheap (a report or two) and run on every PR. A few are slow by
+# nature — they wait out a 10 s idle fade, a 14 s animation, a 450-frame link
+# soak, or a power cycle — and together they add most of a minute to a run that
+# gates every push. Those carry ``"tier": TIER_EXTENDED`` and only run when the
+# run ASKS for them (``test_runner --extended``, the CI label, or the touch UI's
+# Extended toggle), so the default gate stays fast and the deep checks are there
+# for a release or a change big enough to want them.
+#
+# ⚠️ Tier is about COST, not importance: an extended test is one that is slow or
+# disruptive, never one that is flaky or unproven. Anything unreliable belongs in
+# ``docs/FUTURE_TESTS.md`` until it is trustworthy, not in a tier nobody runs.
+TIER_DEFAULT  = "default"
+TIER_EXTENDED = "extended"
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
 # Firmware facts (keyboards/polykybd/{config.h,base/com.h}).
@@ -170,6 +200,48 @@ OVERLAY_MAP_BAD_WIDTHS  = (7, 17)
 # re-establishes the identity mapping, USAGE_RESET (1<<6) clears the "this
 # display position has an overlay" bits (base/com.h). Both self-clear.
 OVERLAY_MAPPING_RESET_BITS = (1 << 7) | (1 << 6)
+
+# Compressed-overlay packet framing (config.h COMPRESSED_START / COMPRESSED_MAX).
+# The first packet (cmd 16) carries keycode+modifier after the 2-byte header, so
+# only 60 payload bytes fit; a continuation (cmd 17) has no such prefix and
+# carries 62. A stream longer than COMPRESSED_START is what forces cmd 17 to be
+# used at all — see test_compressed_overlay_two_packets.
+COMPRESSED_START     = 60
+COMPRESSED_MAX       = 62
+# ROI packet framing (config.h ROI_START / ROI_MAX). The first packet (cmd 18)
+# carries the 5-byte ROI header, leaving 57 payload bytes; cmd 19 carries 62.
+ROI_HDR_BYTES        = 5
+ROI_START            = 64 - 2 - ROI_HDR_BYTES   # 57
+ROI_MAX              = 64 - 2                   # 62
+SCREEN_WIDTH         = 72    # keycap OLED, px
+SCREEN_HEIGHT        = 40
+IDLE_STYLE_EDEN      = 3     # enum poly_idle_style (state.h): pulse/jitter/iddqd/eden
+# Firmware version that introduced the Eden animation + IDLE_STYLE_EDEN, for the
+# min_fw gate (the feature bumps no PROTOCOL_VERSION, so GET_ID's P<n> can't gate it).
+EDEN_MIN_FW          = "0.11.0"
+# One-shot intro length (anim/startup_anim.c SA_TOTAL_MS = 5000+5000+3200+1000).
+ANIM_TOTAL_S         = 14.2
+OVERLAY_MAP_IDX_BITS = 10    # cmd 21's fixed value width
+HID_DATA_MAX         = 62    # payload bytes in a cmd-21 mapping report
+# Split-link soak: every cmd-21 report costs exactly one bridged frame, and the
+# firmware prints its health summary every LINK_STATS_LOG_EVERY (200) frames — so
+# ~450 reports guarantees at least two summaries, i.e. one full measurable window.
+LINK_SOAK_REPORTS    = 450
+LINK_SOAK_BATCH      = 50    # written per open handle, with a breath in between
+# Animation / idle timing. The intro is ~14.2 s, so recovery is given a wide
+# margin; "recovered" is a short streak of fast replies, the same shape as the
+# runner's settle gate (one fast reply can land between two frames).
+ANIM_BURST_SENDS      = 20
+ANIM_RECOVERED_MS     = 200    # a reply this fast means no frame is being rendered
+ANIM_RECOVERED_STREAK = 3
+ANIM_RECOVER_MARGIN_S = 20.0
+EDEN_BURST_SENDS      = 30
+# The idle fade runs for FADE_TRANSITION_TIME (10 s) after the backdated start
+# before the transition fires; wait comfortably past it.
+IDLE_ENGAGE_TIMEOUT_S = 25.0
+# The soak's frames are sent in a few hundred ms, but the firmware prints its
+# summary from send_to_bridge, i.e. as it drains them.
+LINK_SUMMARY_TIMEOUT_S = 30.0
 
 
 # --- device capability gate ---------------------------------------------------
@@ -224,6 +296,20 @@ def skip_reason(test: dict, caps: dict):
     dev_fw = caps.get("fw")
     if min_fw and dev_fw and _ver_tuple(dev_fw) < _ver_tuple(min_fw):
         return f"needs firmware >= {min_fw}, device reports {dev_fw}"
+    # A test that asserts on firmware console output can only do so when the
+    # console actually came up (CONSOLE_ENABLE in the build, and the interface
+    # opened this run). SKIP rather than run it: without console lines such a test
+    # would assert nothing and report a green it did not earn — the "reads as
+    # coverage" failure this whole gate mechanism exists to avoid. Only skip on a
+    # POSITIVE False, so a caps dict that never learned about the console (an older
+    # runner, a unit test) runs the test as before.
+    if test.get("needs_console") and caps.get("console") is False:
+        return "needs the QMK HID console, which did not come up this run"
+    # Cost gate (see TIER_EXTENDED). Unlike the version gates this one is
+    # fail-CLOSED: an extended test is skipped unless the run positively opted in,
+    # because the whole point is that the default PR gate does not pay for it.
+    if test.get("tier") == TIER_EXTENDED and not caps.get("extended"):
+        return "extended suite — re-run with --extended (or the hil-extended label)"
     return None
 
 
@@ -1104,6 +1190,124 @@ def test_compressed_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str],
     return True
 
 
+# --- overlay upload: the packet shapes the single-packet tests never reach -----
+
+# A stream that CANNOT fit one packet: 8 bytes of alternating bits (64 one-bit
+# runs) followed by a blank tail. ~86 bytes, so it spans cmd 16 (60) + cmd 17.
+_TWO_PACKET_OVERLAY_RLE = _rle_compress(bytes([0xAA] * 8) + bytes(OVERLAY_BYTES - 8))
+
+
+def test_compressed_overlay_two_packets(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A compressed overlay that spans TWO packets (cmd 16 then cmd 17).
+
+    ⚠️ The existing single-packet guard never reaches cmd 17 at all: a fully blank
+    overlay compresses to 23 bytes, which fits the 60-byte cmd-16 payload, so the
+    continuation opcode — the one every *real* (non-blank) image uses — had zero
+    coverage. The two packets take different firmware paths on purpose:
+
+    * cmd 16 resets the fragment context, reads keycode+modifier out of the report
+      and hands 60 bytes from ``&data[4]`` to the decompressor as ``first``;
+    * cmd 17 falls through with the *retained* context and hands 62 bytes from
+      ``&data[2]`` as a continuation, with ``core1_bit_index`` deciding the length.
+
+    So this exercises fragment-context retention across reports and the second,
+    differently-framed core1 hand-off, on top of the decompression itself. Silent
+    like every overlay upload, so success is the master still answering GET_ID.
+    """
+    stream = _TWO_PACKET_OVERLAY_RLE
+    if not (COMPRESSED_START < len(stream) <= COMPRESSED_START + COMPRESSED_MAX):
+        log(f"  FAIL: test builder drift — the RLE stream is {len(stream)} bytes, "
+            f"which does not span exactly two packets "
+            f"({COMPRESSED_START + 1}..{COMPRESSED_START + COMPRESSED_MAX})")
+        return False
+    first = (bytes([POLY_CHANNEL, CMD_START_COMPRESSED_OVERLAY, KC_A, 0x00])
+             + stream[:COMPRESSED_START])
+    cont = bytes([POLY_CHANNEL, CMD_CONT_COMPRESSED_OVERLAY]) + stream[COMPRESSED_START:]
+    raw.write_reports([first, cont])
+    log(f"uploaded a {len(stream)}-byte RLE stream to KC_A as cmd 16 "
+        f"({COMPRESSED_START} bytes) + cmd 17 ({len(stream) - COMPRESSED_START} bytes)")
+    if not _master_alive(raw, log):
+        log("  FAIL: master unresponsive after a two-packet compressed overlay — "
+            "the cmd-17 continuation path (retained fragment context / second "
+            "core1 hand-off) is the new surface here")
+        return False
+    log("  master still answering GET_ID after the two-packet upload")
+    return True
+
+
+def _roi_header(keycode: int, modifier: int, x: int, y: int, xx: int, yy: int,
+                compressed: bool = False) -> bytes:
+    """Build the 5-byte ROI header cmd 18 carries.
+
+    The inverse of the firmware's ``set_fragment_context_from_buffer``
+    (base/overlay.c), which packs the 6-bit ``y`` across two bytes to keep the
+    header at five bytes::
+
+        [0] keycode
+        [1] modifier (low nibble) | (y & 0x3c) << 2      -- y bits 2..5
+        [2] (y & 0x03) | yy << 2                          -- y bits 0..1, then yy
+        [3] x
+        [4] (xx & 0x7f) | 0x80 if the payload is RLE-compressed
+
+    ``x``/``y`` are inclusive start pixels, ``xx``/``yy`` exclusive ends.
+    """
+    return bytes([
+        keycode & 0xFF,
+        (modifier & 0x0F) | ((y & 0x3C) << 2),
+        (y & 0x03) | ((yy & 0x3F) << 2),
+        x & 0xFF,
+        (xx & 0x7F) | (0x80 if compressed else 0x00),
+    ])
+
+
+def test_roi_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Partial-region overlay updates (cmd 18/19) don't wedge the master.
+
+    The ROI pair was the last overlay path with **no** liveness guard at all,
+    despite going through the same core1 hand-off as the compressed one — a
+    *different* command though (``CORE1_CMD_ROI_UPDATE``, preceded by
+    ``core1_roi_start()``'s ``CORE1_CMD_RESET_BIT_IDX``), so the existing
+    decompression guard does not cover it.
+
+    Two shapes, both silent (success = the master still answers GET_ID):
+
+    1. A well-formed full-width strip large enough to need a **continuation**
+       (cmd 19), so the ``first``/continue framing split (57 vs 62 payload bytes)
+       is exercised the way a real partial refresh does it.
+    2. A deliberately **out-of-bounds** header (x/xx/yy past the 72x40 keycap).
+       ``set_fragment_context_from_buffer`` clamps those — an OOB write into the
+       adjacent overlay pool is the documented hazard — and logs
+       ``ROI overlay: … clamped``. This is the ROI twin of the cmd-33
+       bad-width case: assert the guard holds rather than that the pixels landed.
+    """
+    rows = 13                                   # 72 x 13 px = 117 payload bytes
+    payload = bytes((SCREEN_WIDTH * rows) // 8)  # blank region — harmless to render
+    hdr = _roi_header(KC_A, 0x00, x=0, y=0, xx=SCREEN_WIDTH, yy=rows)
+    first = bytes([POLY_CHANNEL, CMD_START_ROI_OVERLAY]) + hdr + payload[:ROI_START]
+    cont = bytes([POLY_CHANNEL, CMD_CONT_ROI_OVERLAY]) + payload[ROI_START:]
+    raw.write_reports([first, cont])
+    log(f"sent a {SCREEN_WIDTH}x{rows} ROI to KC_A: cmd 18 ({ROI_START} bytes) "
+        f"+ cmd 19 ({len(payload) - ROI_START} bytes)")
+    if not _master_alive(raw, log):
+        log("  FAIL: master unresponsive after a two-packet ROI upload "
+            "(core1 ROI path: RESET_BIT_IDX + ROI_UPDATE)")
+        return False
+
+    # Out-of-bounds region: y/yy up to 63, x up to 255, xx up to 127 all fit the
+    # wire format but not the 72x40 panel. The firmware must clamp, not index out.
+    bad = _roi_header(KC_A, 0x00, x=200, y=60, xx=127, yy=63)
+    raw.write_reports([bytes([POLY_CHANNEL, CMD_START_ROI_OVERLAY]) + bad
+                       + bytes(ROI_START)])
+    log("sent an out-of-bounds ROI header (x=200 y=60 xx=127 yy=63) — expect the "
+        "firmware to clamp it and log 'ROI overlay: … clamped'")
+    if not _master_alive(raw, log):
+        log("  FAIL: master unresponsive after an out-of-bounds ROI header — the "
+            "bounds clamp in set_fragment_context_from_buffer did not hold")
+        return False
+    log("  master still answering GET_ID after both ROI shapes")
+    return True
+
+
 def _pack_mapping_values(values: list[int], data_bytes: int, width: int) -> bytes:
     """Pack ``values`` LSB-first at ``width`` bits into ``data_bytes`` bytes.
 
@@ -1285,6 +1489,268 @@ def test_get_id_stress(raw: RawHID, log: Callable[[str], None], n: int = 50) -> 
         f"min/avg/max = {min(latencies):.0f}/{sum(latencies) / len(latencies):.0f}"
         f"/{max(latencies):.0f} ms")
     return True
+
+
+def _percentile(values: list, pct: float) -> float:
+    """Nearest-rank percentile of a non-empty list (no numpy on the rig)."""
+    ordered = sorted(values)
+    k = max(0, min(len(ordered) - 1, int(round(pct / 100.0 * len(ordered) + 0.5)) - 1))
+    return ordered[k]
+
+
+def _hid_burst(raw: RawHID, log: Callable[[str], None], n: int, what: str,
+               timeout_ms: int = 3000) -> tuple:
+    """``n`` GET_IDs on one handle while ``what`` is happening; classify + report.
+
+    Returns ``(passed, median_ms)``. Pass/fail uses the same freeze signature as
+    the GET_ID stress test — isolated misses are tolerated, a run of consecutive
+    no-answers is not — because that is the difference between "the main loop is
+    busy" (expected while an animation owns the CPU) and "the main loop is gone".
+    The latency numbers are *reported*, not asserted, since the rig has no
+    published baseline for them yet; see the note in test_idle_eden_screensaver.
+    """
+    responses, latencies, transient = raw.send_repeated(
+        bytes([POLY_CHANNEL, CMD_GET_ID]), n, timeout_ms=timeout_ms)
+    oks = [_resp_ok(r, CMD_GET_ID, lambda *_a: None, expect_status=None)
+           for r in responses]
+    passed, misses, longest = classify_get_id_stress(oks)
+    median = _percentile(latencies, 50) if latencies else 0.0
+    log(f"  {n - misses}/{n} GET_IDs answered while {what} "
+        f"({transient} transient HID retries) — latency "
+        f"median/p95/max = {median:.0f}/{_percentile(latencies, 95):.0f}"
+        f"/{max(latencies):.0f} ms")
+    if not passed:
+        log(f"  FAIL: freeze signature while {what} — {misses}/{n} no-answer, "
+            f"longest consecutive run {longest}")
+    return passed, median
+
+
+def test_replay_animation(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """The startup animation replays on demand (cmd 31), and the keyboard survives it.
+
+    Cmd 31 had no coverage at all, and it is not merely an ACK to tick off: while
+    the one-shot intro runs it owns the keycaps and renders a frame per
+    housekeeping pass, deliberately **unsliced** (unlike the looping idle
+    screensaver — see test_idle_eden_screensaver). So the properties worth
+    asserting are the ones a wedged or non-terminating animation would break:
+
+    1. the command ACKs;
+    2. HID keeps being serviced *between* frames — a burst that goes entirely
+       unanswered means the render never hands the main loop back, which is a
+       hang, not a slow frame;
+    3. the animation **ends by itself** and the master returns to normal
+       responsiveness within a bounded time.
+
+    The measured HID latency during the animation is logged rather than asserted:
+    it is the number that would move if the frame cost changed, and nobody has a
+    rig baseline for it yet.
+    """
+    resp = raw.send(bytes([POLY_CHANNEL, CMD_REPLAY_ANIM]))
+    if not _resp_ok(resp, CMD_REPLAY_ANIM, log, expect_status=ACK):
+        return False
+    log("cmd 31 ACKed — the one-shot Eden intro is now playing on both halves")
+    started = time.monotonic()
+    passed, _median = _hid_burst(raw, log, ANIM_BURST_SENDS, "the intro animation runs")
+    if not passed:
+        log("  FAIL: the animation starved the main loop of HID entirely — "
+            "startup_anim_tick() is not returning between frames")
+        return False
+
+    # It must finish on its own. "Finished" = back to answering fast, which is the
+    # only observable the host has (nothing reports startup_anim_active()).
+    deadline = started + ANIM_TOTAL_S + ANIM_RECOVER_MARGIN_S
+    streak = 0
+    while time.monotonic() < deadline:
+        t0 = time.monotonic()
+        ok = _resp_ok(raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]),
+                               timeout_ms=1000, attempts=1),
+                      CMD_GET_ID, lambda *_a: None, expect_status=None)
+        fast = ok and (time.monotonic() - t0) * 1000.0 <= ANIM_RECOVERED_MS
+        streak = streak + 1 if fast else 0
+        if streak >= ANIM_RECOVERED_STREAK:
+            log(f"  animation finished and the master is responsive again after "
+                f"{time.monotonic() - started:.1f}s "
+                f"(expected ~{ANIM_TOTAL_S:.0f}s of animation)")
+            return True
+        time.sleep(0.2)
+    log(f"  FAIL: the master never returned to <= {ANIM_RECOVERED_MS} ms replies "
+        f"within {ANIM_TOTAL_S + ANIM_RECOVER_MARGIN_S:.0f}s — the animation did "
+        "not end, or it left the display path stuck")
+    return False
+
+
+def test_idle_eden_screensaver(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Idle actually ENGAGES on demand (cmd 15 start), and the Eden screensaver
+    keeps servicing HID while it owns the keycaps.
+
+    Three things had no coverage before this and all three have a bug history:
+
+    * **cmd 15 with a non-zero payload** (start idle). Only *stop* was tested. The
+      start path backdates the activity timestamp by a full fade-out interval, and
+      the old signed arithmetic **underflowed for the first FADE_OUT_TIME ms of
+      uptime** — clamped to 0, so idle silently never started. The rig fires its
+      commands within seconds of boot, i.e. inside exactly that window, which
+      makes it the natural place to catch a regression of it.
+    * **the idle transition itself**, confirmed from the firmware console
+      (``Transition to idle [style=…]``) rather than assumed. Without that line the
+      test would pass whether or not anything happened — hence ``needs_console``.
+    * **the sliced Eden render**. The looping screensaver renders keycaps until
+      ``EDEN_IDLE_SLICE_MS`` is spent and then *returns*, resuming mid-frame next
+      pass. Rendered whole instead, a frame is ~150 ms during which the matrix is
+      not scanned — the shipped "Eden doesn't wake on the first keypress" bug. We
+      cannot inject a keypress, so HID round-trip time is the proxy.
+
+    ⚠️ The latency is **reported, not asserted**. A sliced frame should keep
+    round-trips in the tens of ms and an unsliced one push them toward the ~150 ms
+    frame cost, so the median is the number to watch — but the rig has never
+    published a baseline for it, and shipping a threshold guessed from the source
+    is how a check becomes flaky and then ignored. Read the logged median across a
+    few runs, then promote it to an assertion. The freeze signature (no answers at
+    all) IS asserted, because that needs no baseline.
+    """
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, 0xFF]))
+    if not _resp_ok(cur, CMD_IDLE_STYLE, log, expect_status=ACK) or len(cur) < 4:
+        return False
+    original = cur[3]
+    log(f"current idle style: {original}")
+    try:
+        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, IDLE_STYLE_EDEN]))
+        if not _resp_ok(set_resp, CMD_IDLE_STYLE, log, expect_status=ACK):
+            log("  FAIL: the firmware rejected IDLE_STYLE_EDEN although it reports a "
+                f"version >= {EDEN_MIN_FW}")
+            return False
+
+        mark = TAP.mark()
+        start = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 1]))
+        if not _resp_ok(start, CMD_IDLE_STATE, log, expect_status=ACK):
+            return False
+        log(f"start-idle ACKed — waiting up to {IDLE_ENGAGE_TIMEOUT_S:.0f}s for the "
+            "fade to complete and the transition to be logged")
+        line = TAP.wait_for("Transition to idle", mark, timeout=IDLE_ENGAGE_TIMEOUT_S)
+        if line is None:
+            log("  FAIL: idle never engaged — no 'Transition to idle' line within "
+                f"{IDLE_ENGAGE_TIMEOUT_S:.0f}s. Either the start-idle backdate did not "
+                "take (the documented near-boot underflow) or the fade never reached "
+                "MIN_BRIGHT")
+            return False
+        log(f"  firmware: {line}")
+        if "style=eden" not in line:
+            log("  FAIL: idle engaged with the wrong style — the style set over cmd 28 "
+                "did not reach the idle state machine")
+            return False
+
+        passed, _median = _hid_burst(raw, log, EDEN_BURST_SENDS,
+                                     "the Eden screensaver renders")
+        if not passed:
+            log("  FAIL: the Eden idle loop starved HID completely — the time-sliced "
+                "render (EDEN_IDLE_SLICE_MS) is not handing the main loop back")
+            return False
+        return True
+    finally:
+        stop = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
+        log("  stop-idle: " + ("ok" if _resp_ok(stop, CMD_IDLE_STATE, lambda *_a: None,
+                                                expect_status=ACK) else f"unexpected {stop!r}"))
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, original]))
+        log(f"  restored idle style {original}: "
+            + ("ok" if _resp_ok(restore, CMD_IDLE_STYLE, lambda *_a: None,
+                                expect_status=ACK) else f"unexpected {restore!r}"))
+
+
+def _link_soak_report() -> bytes:
+    """One cmd-21 mapping report whose pairs are all OFF-SCREEN.
+
+    Every cmd-21 report costs exactly one bridged frame, which is what makes it
+    the cheapest way to generate measurable split-link traffic. The ``from``
+    values are drawn from the high modifier-variant band (>= 90*10), which
+    ``overlay_from_index_visible`` reports as off-screen, so the firmware stages
+    them silently instead of requesting a display refresh per report — the soak
+    then measures the *link*, not the renderer.
+    """
+    per_report = (HID_DATA_MAX * 8) // OVERLAY_MAP_IDX_BITS   # 49 values
+    values = []
+    for i in range(per_report):
+        if i % 2 == 0:
+            values.append(900 + (i % 400))    # from: an off-screen variant slot
+        else:
+            values.append(0)                  # to:   pool slot 0, always in range
+    data = _pack_mapping_values(values, HID_DATA_MAX, OVERLAY_MAP_IDX_BITS)
+    return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING]) + data
+
+
+def test_split_link_health(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """The master↔slave link carries a burst of real traffic with no wire errors.
+
+    The split link is the subsystem with the worst field record in this project
+    (the stuck-idle slave, the missing overlay after an MRU switch, the discarded
+    ``send_to_bridge`` ack) and until now **CI never looked at it**: the firmware
+    prints a health counter and the rig only echoed it into the log.
+
+    Mechanism: cmd 21 bridges exactly one frame per report, and the firmware
+    prints ``Split link: N tx crc_err=… nack=… transport_fail=… giveup=…`` every
+    200 frames. So sending ~450 of them guarantees at least two summaries, i.e.
+    one fully-measured window, and the delta between them is the error rate of
+    traffic *this test caused* — which is the only honest way to read it:
+
+    ⚠️ **Absolutes are useless here.** A healthy rig has a documented BOOT burst
+    (crc_err/giveup in the tens) from the window before the link settles, so any
+    check on the cumulative counters would either fail every run or be set so high
+    it never fires. The delta excludes it by construction.
+
+    ⚠️ **``nack`` is not an error** — a ``SYNC_BUSY``/``SYNC_NACK_REFUSED`` reply
+    means the wire worked and the slave said something other than yes. ``SYNC_BUSY``
+    arrives on every erase re-poll of a flash. The firmware's own ``err%`` excludes
+    it for exactly this reason, and so does ``classify_link_health``.
+
+    This also happens to be the only coverage cmd 21 (the fixed 10-bit mapping
+    older hosts still send) has — cmd 33 got a test at v12 and its predecessor
+    never did.
+    """
+    report = _link_soak_report()
+    mark = TAP.mark()
+    try:
+        sent = 0
+        while sent < LINK_SOAK_REPORTS:
+            batch = min(LINK_SOAK_BATCH, LINK_SOAK_REPORTS - sent)
+            raw.write_reports([report] * batch)
+            sent += batch
+            time.sleep(0.05)   # let the firmware drain rather than fill the endpoint
+        log(f"bridged {sent} mapping reports (cmd 21) to generate measurable "
+            "split-link traffic")
+        if not _master_alive(raw, log):
+            log("  FAIL: master unresponsive after the mapping soak")
+            return False
+
+        deadline = time.monotonic() + LINK_SUMMARY_TIMEOUT_S
+        stats = TAP.link_stats(mark)
+        while len(stats) < 2 and time.monotonic() < deadline:
+            time.sleep(0.25)
+            stats = TAP.link_stats(mark)
+        if len(stats) < 2:
+            log(f"  FAIL: only {len(stats)} 'Split link:' summary line(s) after "
+                f"{sent} bridged reports. Either the reports never reached the "
+                "firmware, or the summary cadence (LINK_STATS_LOG_EVERY) changed "
+                "and this test's arithmetic is stale")
+            return False
+
+        delta = link_delta(stats[0], stats[-1])
+        ok, errors, tolerance = classify_link_health(delta)
+        log(f"  link over {delta['tx']} bridged frames: crc_err +{delta['crc_err']}, "
+            f"transport_fail +{delta['transport_fail']}, nack +{delta['nack']} "
+            f"(not an error), giveup +{delta['giveup']}")
+        if not ok:
+            log(f"  FAIL: {errors} link fault(s) in that window, tolerance "
+                f"{tolerance}. Steady state on the full-duplex link is ZERO ongoing "
+                "errors — a non-zero crc_err means frames are arriving corrupted, a "
+                "non-zero transport_fail means they are not arriving at all")
+            return False
+        log(f"  {errors} link fault(s), tolerance {tolerance} — link healthy")
+        return True
+    finally:
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON,
+                                  OVERLAY_MAPPING_RESET_BITS]))
+        ok = _resp_ok(restore, CMD_OVERLAY_FLAGS_ON, lambda *_a: None, expect_status=ACK)
+        log("  reset mapping + usage bits to identity: "
+            + ("ok" if ok else "FAILED — rig left with the soak mappings until next boot"))
 
 
 def _build_empty_fontpack() -> bytes:
@@ -1505,13 +1971,35 @@ TESTS = [
     {"name": "glyph script round-trip (v9)",    "fn": test_glyph_script_round_trip, "min_protocol": 9},
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
+    # Animation + idle. Both are slow by nature (the intro is ~14 s, the idle fade
+    # 10 s), so they are EXTENDED-tier: they run when a release or a big change
+    # asks for them, not on every push. The Eden one needs the console to CONFIRM
+    # idle engaged — without it the test would assert nothing.
+    {"name": "replay startup animation (cmd 31)", "fn": test_replay_animation,
+     "min_fw": EDEN_MIN_FW, "tier": TIER_EXTENDED},
+    {"name": "idle engages + Eden screensaver keeps HID alive (cmd 15/28)",
+     "fn": test_idle_eden_screensaver, "min_protocol": 4, "min_fw": EDEN_MIN_FW,
+     "needs_console": True, "tier": TIER_EXTENDED},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
     {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive, "min_protocol": 11},
     {"name": "compressed overlay keeps master alive (core1)", "fn": test_compressed_overlay_keeps_master_alive},
+    # The packet shapes the single-packet guards above never reach: the cmd-17
+    # continuation (every non-blank image uses it) and the ROI pair (cmd 18/19),
+    # which had no liveness guard at all despite its own core1 hand-off.
+    {"name": "compressed overlay spans two packets (cmd 16+17)",
+     "fn": test_compressed_overlay_two_packets},
+    {"name": "ROI overlay keeps master alive (cmd 18/19 + bounds clamp)",
+     "fn": test_roi_overlay_keeps_master_alive},
     {"name": "overlay mapping widths 8/9/10/11 (v12 cmd 33)", "fn": test_overlay_mapping_widths,
      "min_protocol": 12},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
+    # Deliberate bridged-traffic soak + the firmware's own link health counter.
+    # After the stress burst (which wants a quiet master) and before the flash
+    # tests. Needs the console (the counter is only observable there) and ~5 s of
+    # deliberate traffic, so it is EXTENDED-tier.
+    {"name": "split link health under a bridged soak (cmd 21)",
+     "fn": test_split_link_health, "needs_console": True, "tier": TIER_EXTENDED},
     # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
     # to slot 0 — exercises the flash transport + the COMMIT slot-present success gate.
     # LAST: it empties the 'symbol' bundle (a host re-flashes it on the next connect).
