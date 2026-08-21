@@ -1036,17 +1036,22 @@ def test_glyph_size_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     original = cur[3]
     log(f"  current glyph size = {original}")
 
+    last_set = original
     for target in range(GLYPH_SIZE_MAX + 1):
         set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, target]))
         log(f"glyph-size set {target} -> {set_resp!r}")
         if not _resp_ok(set_resp, CMD_GLYPH_SIZE, log, expect_status=ACK):
             return False
         back = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, 0xFF]))
-        if not _resp_ok(back, CMD_GLYPH_SIZE, log, expect_status=ACK) or len(back) < 4:
+        if not _resp_ok(back, CMD_GLYPH_SIZE, log, expect_status=ACK):
+            return False
+        if len(back) < 4:
+            log("  FAIL: glyph-size read-back reply has no value byte")
             return False
         if back[3] != target:
             log(f"  FAIL: read back {back[3]} != set {target}")
             return False
+        last_set = target
         log(f"  size {target} round-tripped")
 
     # An index past the enum must be REFUSED (see the docstring).
@@ -1061,8 +1066,11 @@ def test_glyph_size_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     still = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, 0xFF]))
     if not _resp_ok(still, CMD_GLYPH_SIZE, log, expect_status=ACK) or len(still) < 4:
         return False
-    if still[3] != GLYPH_SIZE_MAX:
-        log(f"  FAIL: refused size still moved the state to {still[3]}")
+    # Against what the loop actually last set, not against GLYPH_SIZE_MAX: the two
+    # are equal today, but only because the loop happens to end there — a coupling
+    # a later edit to the loop would silently break.
+    if still[3] != last_set:
+        log(f"  FAIL: refused size moved the state {last_set} -> {still[3]}")
         return False
 
     restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SIZE, original]))
