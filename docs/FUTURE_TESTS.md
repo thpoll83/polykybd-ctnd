@@ -158,13 +158,39 @@ unattended rig now has a test. Covered:
   idle style). Language, glyph script and the default layer ride different EEPROM blocks and
   different flush paths; each is a small extension of the same runner-level test, and the
   brightness one needs a read-back command that does not exist yet.
-- [ ] **promote the animation/idle latency to an assertion** — `test_replay_animation` and
-  `test_idle_eden_screensaver` *report* HID round-trip latency and assert only the freeze
-  signature, because the rig has no published baseline for either. A sliced Eden frame should
-  keep round-trips in the tens of ms and an unsliced one push them toward the ~150 ms frame
-  cost, so once a few runs have logged real medians, turn the median into a threshold — that
-  is what would actually catch a slice regression (the shipped "Eden doesn't wake on the first
-  keypress" bug) rather than merely a total wedge.
+- [ ] **promote the animation/idle latency to an assertion — THERE IS NOW A BASELINE, and
+  taking it revealed that `test_replay_animation`'s third assertion is currently inert.**
+  Both tests *report* HID round-trip latency and assert only the freeze signature. The first
+  extended run (qmk run #805, `workflow_dispatch`, 2026-08-20, FW 0.15.7) published these,
+  and the two populations are an order of magnitude apart:
+
+  | window | GET_IDs | median | p95 | max |
+  |---|---|---|---|---|
+  | intro animation (cmd 31, deliberately **unsliced**) | 20/20 | **96 ms** | 97 | 97 |
+  | Eden screensaver (idle, **sliced**) | 30/30 | **4 ms** | 7 | 10 |
+  | idle, no animation (the stress burst's floor) | 50/50 | ~3 ms | — | — |
+
+  The firmware's own line for the same frame was `Eden idle 177ms (frame 109ms, worst slice
+  5ms)`, i.e. the ~3 ms slice budget is being honoured and the host sees it.
+
+  ⚠️ **`ANIM_RECOVERED_MS` (200) sits ABOVE the in-animation latency (96 ms), so the
+  "the animation ends by itself" assertion cannot fail.** The test declares the intro
+  finished after 3 consecutive replies under 200 ms — but the animation *itself* answers in
+  ~96 ms, so the streak is satisfied while it is still running. On run #805 the test logged
+  *"animation finished and the master is responsive again after 2.6s (expected ~14s)"* while
+  the firmware logged `Eden done (14218ms)` **eleven seconds later**; the intro was in fact
+  still playing when the next test started. A non-terminating animation that stayed
+  responsive would pass this identically — which is the "reads as coverage" failure the
+  version gates exist to avoid, in the one assertion whose whole point is non-termination.
+  The fix is now cheap because the populations are separated: drop `ANIM_RECOVERED_MS` to
+  ~30 ms (well above the ~3 ms idle floor, well below the ~96 ms animation cost). Do that
+  first; only then is the median worth turning into a threshold, which is what would catch a
+  slice regression (the shipped "Eden doesn't wake on the first keypress" bug) rather than a
+  total wedge.
+
+  ⚠️ Take any *new* baseline from a run whose burst reports **0 transient HID retries** — see
+  the retry-accounting note in `CLAUDE.md`, or the max is the harness's timeout, not the
+  device's latency.
 - [ ] **reflash idempotency** — flash → test → reflash same UF2 → test again, several cycles,
   confirm stable enumeration (no descriptor/handedness drift across reflashes). Runner-level
   (needs `FlashController` access), not a `(raw, log)` test.
