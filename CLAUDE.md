@@ -161,6 +161,18 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     Same pack-agnostic, mutate+restore shape; a pre-v10 board SKIPs it. `GLYPH_SCRIPT_MAX`
     (=10) tracks the highest *known* `poly_glyph_script`; higher indices are valid on the
     wire and just render the normal legend.
+  - The **`glyph size round-trip (v13)`** test (`test_glyph_size_round_trip`,
+    `min_protocol: 13`) covers HID cmd 34 (`GLYPH_SIZE`) — the keycap legend size, 0
+    small / 1 medium / 2 large. It round-trips all three and restores the original,
+    same pack-agnostic mutate+restore shape as the two above. ⚠️ **Its out-of-range
+    NACK check is the POINT of the test, not a bounds nicety, and it asserts the exact
+    OPPOSITE of `test_glyph_script_expansion` one command over.** cmd 30's range is
+    open-ended (an unknown script is accepted and degrades to the normal legend, which
+    is what decouples new faces from the protocol); cmd 34's is CLOSED, because an
+    unknown size would be stored, synced and persisted while still rendering small — a
+    setting that silently does nothing. The pair is what pins that asymmetry as
+    deliberate, so neither should be "made consistent" with the other. It also re-reads
+    the size after the refusal: a NACK that still moved the state would otherwise pass.
   - The **`overlay mapping widths (v12)`** test (`test_overlay_mapping_widths`,
     `min_protocol: 12`) covers HID cmd 33 (`SEND_OVERLAY_MAPPING_W`), the
     variable-width mapping command. ⚠️ **It is a liveness guard, not a
