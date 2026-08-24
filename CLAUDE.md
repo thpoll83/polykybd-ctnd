@@ -510,6 +510,19 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
 > `git checkout main` in the same sitting.** Anything installed *outside* the
 > checkout (systemd units, sudoers) survives the switch back — that is what makes
 > the round trip safe.
+>
+> ⚠️ **Corollary that bites the OTHER repo: a green HIL board on a firmware PR does
+> NOT mean that PR's own new rig test ran.** Because the rig runs `main`, a test added
+> in an *unmerged* ctnd PR does not exist on the rig — the suite happily goes green
+> having never executed it, and the firmware PR's checklist claims coverage nothing
+> produced. Seen 2026-08-22: qmk#227 (keycap legend size) listed
+> `test_glyph_size_round_trip` as tested while the test lived only in the still-open
+> ctnd#71; the HIL log names every test it ran, and that one appears nowhere in it.
+> **So a paired firmware+rig change has a merge ORDER: land the ctnd PR first, then
+> re-run HIL on the firmware PR** — otherwise the firmware merges on a board that
+> never checked the thing the rig PR was written to check. Verify rather than assume:
+> grep the HIL job log for the test's own name (each prints `[test] PASS: <name>`),
+> not just the job's conclusion.
 
 ### Self-update mechanism
 
