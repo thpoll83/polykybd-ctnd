@@ -229,6 +229,67 @@ class RoundTripTest(unittest.TestCase):
 
         self.assertFalse(test_macro_round_trip(NoTruncate(), _quiet))
 
+    def test_a_device_that_keeps_undrawable_label_bytes_is_caught(self):
+        """The firmware's label_store() drops anything outside 0x20..0x7E, because a
+        codepoint the _Nano_ face cannot draw is indistinguishable from a bug once it
+        is on a keycap. A device that stores the raw bytes must not pass."""
+        class KeepsRaw(FakeMacroDevice):
+            def send(self, data, timeout_ms=3000, attempts=3):
+                if data[1] == CMD_MACRO_LABEL and data[3] != 0xFF:
+                    raw = bytes(data[4:4 + data[3]])[:self.LABEL_LEN]
+                    self.labels[data[2]] = raw.decode("latin-1")
+                    return (bytes([POLY_CHANNEL, CMD_MACRO_LABEL, ACK, len(raw)]) + raw
+                            ).ljust(REPORT, b"\0")
+                return super().send(data, timeout_ms, attempts)
+
+        self.assertFalse(test_macro_round_trip(KeepsRaw(), _quiet))
+
+    def test_a_failed_body_restore_fails_the_test(self):
+        """The rig writes to real persistent macro storage. A restore that is refused
+        after the assertions passed leaves someone's macros overwritten, so it has to
+        turn the verdict red rather than be logged as cleanup."""
+        class RefusesRestore(FakeMacroDevice):
+            def __init__(self):
+                super().__init__()
+                self.starts = 0
+
+            def send(self, data, timeout_ms=3000, attempts=3):
+                if data[1] == CMD_MACRO_BODY and data[2] == 1:
+                    # A write run starts at offset 0 and walks forward in windows.
+                    # Run 1 is the test's own pattern and must go through in FULL --
+                    # refusing its second window would fail the test for the wrong
+                    # reason and this case would pass vacuously. Run 2 is the restore.
+                    if data[3] == 0 and data[4] == 0:
+                        self.starts += 1
+                    if self.starts >= 2:
+                        return bytes([POLY_CHANNEL, CMD_MACRO_BODY, NACK]).ljust(REPORT, b"\0")
+                return super().send(data, timeout_ms, attempts)
+
+        dev = RefusesRestore()
+        self.assertFalse(test_macro_round_trip(dev, _quiet))
+        self.assertGreaterEqual(dev.starts, 2, "the restore never ran; test is vacuous")
+
+    def test_a_failed_label_restore_fails_the_test(self):
+        class RefusesLabelRestore(FakeMacroDevice):
+            def __init__(self):
+                super().__init__()
+                self.restores = 0
+
+            def send(self, data, timeout_ms=3000, attempts=3):
+                # Discriminate on CONTENT, not on a call count: a fresh fake's saved
+                # label is empty, so the zero-length set IS the restore, while every
+                # set the test itself makes carries text. Counting calls would make
+                # this case fail for the wrong reason the moment a label assertion is
+                # added or removed -- which is exactly what happened to its sibling.
+                if data[1] == CMD_MACRO_LABEL and data[3] == 0:
+                    self.restores += 1
+                    return bytes([POLY_CHANNEL, CMD_MACRO_LABEL, NACK]).ljust(REPORT, b"\0")
+                return super().send(data, timeout_ms, attempts)
+
+        dev = RefusesLabelRestore()
+        self.assertFalse(test_macro_round_trip(dev, _quiet))
+        self.assertEqual(dev.restores, 1, "the label restore never ran; test is vacuous")
+
 
 if __name__ == "__main__":
     unittest.main()

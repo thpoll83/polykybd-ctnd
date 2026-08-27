@@ -1038,10 +1038,13 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
       actually stored -- which is how an over-long label proves it was truncated rather
       than rejected.
 
-    ⚠️ MUTATE AND RESTORE. This rewrites the whole macro buffer, which on a rig with
-    real macros would otherwise destroy them. The original buffer and the probed
-    label are read first and put back in the ``finally``, so a failure mid-test still
-    leaves the keyboard as it was found.
+    ⚠️ MUTATE AND RESTORE, over a PROBE PREFIX -- not the whole buffer. It rewrites
+    the first ``probe_len`` bytes (enough to span more than one window) and macro 0's
+    label; everything past the prefix is never read or written. That prefix and the
+    label are saved first and put back in the ``finally``, so a failure mid-test still
+    leaves the keyboard as it was found -- and the restore is CHECKED, because a
+    silent restore failure would leave a rig with real macros quietly corrupted while
+    the test reported a pass.
     """
     # ---- info header --------------------------------------------------------
     info = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_INFO]))
@@ -1073,6 +1076,8 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
 
     original = None
     original_label = None
+    passed = False
+    restored = True
     try:
         # ---- save what is there --------------------------------------------
         original = _macro_read(raw, log, probe_len, chunk)
@@ -1113,6 +1118,24 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
                 return False
             log(f"  label {text!r} round-tripped")
 
+        # Bytes the _Nano_ face cannot draw are DROPPED, not stored: the firmware's
+        # label_store() keeps only 0x20..0x7E, because a codepoint that draws nothing
+        # is indistinguishable from a bug once it is on a keycap. Without this the
+        # firmware could store the raw bytes and still pass everything above.
+        mixed = b"caf\xc3\xa9 \xe2\x82\xac"
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, len(mixed)]) + mixed)
+        if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK) or len(resp) < 4:
+            log("  FAIL: a label with non-ASCII bytes should store the printable part")
+            return False
+        got = bytes(resp[4:4 + resp[3]])
+        if any(b < 0x20 or b > 0x7E for b in got):
+            log(f"  FAIL: label kept undrawable bytes {got!r}")
+            return False
+        if got != bytes(b for b in mixed if 0x20 <= b <= 0x7E):
+            log(f"  FAIL: label {got!r} is not the printable part of {mixed!r}")
+            return False
+        log(f"  non-ASCII label stripped to {got!r}")
+
         # An over-long label is TRUNCATED to the advertised stride, not refused --
         # the firmware cuts what the nano face cannot fit on the panel anyway.
         long_label = b"X" * (label_len + 8)
@@ -1132,14 +1155,25 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         if not _resp_ok(bad, CMD_MACRO_LABEL, log, expect_status=NACK):
             return False
         log("  out-of-range macro id refused")
-        return True
+        passed = True
     finally:
-        if original is not None:
-            _macro_write(raw, log, 0, original, chunk)
+        # The restore is part of the test, not cleanup after it. This rig writes to a
+        # real keyboard's persistent macro storage, so a restore that times out or is
+        # NACKed leaves someone's macros overwritten -- and a pass logged over that is
+        # the worst of both, because nothing afterwards would look wrong. Report it.
+        if original is not None and not _macro_write(raw, log, 0, original, chunk):
+            log("  FAIL: could not restore the macro body -- the keyboard still holds "
+                "the test pattern in its first bytes")
+            restored = False
         if original_label is not None:
-            raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0,
-                            len(original_label)]) + original_label)
-        log("  restored the original macro buffer and label")
+            resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0,
+                                   len(original_label)]) + original_label)
+            if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK):
+                log(f"  FAIL: could not restore macro 0's label {original_label!r}")
+                restored = False
+        if restored:
+            log("  restored the original macro body prefix and label")
+    return passed and restored
 
 
 def _macro_read(raw: RawHID, log: Callable[[str], None], size: int, chunk: int):
