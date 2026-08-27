@@ -96,10 +96,14 @@ CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7
 CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (v9+ tengwar; v10 adds 9 more scripts)
 GLYPH_SCRIPT_MAX            = 10  # highest valid poly_glyph_script value (BRAILLE) as of protocol v10
 CMD_GLYPH_SIZE              = 34  # get/set the keycap legend size (protocol v13+)
-CMD_MACRO_INFO              = 35  # count, label stride, capacity, bytes used (v14+)
-CMD_MACRO_BODY              = 36  # windowed read/write of the shared body buffer (v14+)
-CMD_MACRO_LABEL             = 37  # get/set one macro's keycap label (v14+)
+CMD_MACRO_INFO              = 36  # count, label stride, capacity, bytes used (v15+)
+CMD_MACRO_BODY              = 37  # windowed read/write of the shared body buffer (v15+)
+CMD_MACRO_LABEL             = 38  # get/set one macro's keycap label (v15+)
 GLYPH_SIZE_MAX              = 2   # highest valid poly_glyph_size value (LARGE)
+CMD_GET_LAYER_NAMES         = 35  # read the remappable layers' names (protocol v14+)
+LAYER_NAME_MAX              = 8   # firmware POLY_LAYER_NAME_MAX: longest name, sans NUL
+LAYER_NAMES_HEADER          = 2   # the total byte and the count byte
+VIA_DYNAMIC_KEYMAP_GET_LAYER_COUNT = 0x11  # QMK id_dynamic_keymap_get_layer_count
 POLY_OS_COUNT               = 8   # enum poly_os values 0..7 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS-reserved/LINUX_GNOME/LINUX_KDE); firmware SET_OS accepts arg < POLY_OS_COUNT
 # Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
 # firmware update, reused per-bundle). Reply status byte is reply[2] ('.'/'!'/'~').
@@ -183,7 +187,10 @@ FULL_BRIGHT          = 50    # max OLED contrast; > this is rejected (NACK)
 BR_FLAG_VOLATILE     = 1 << 0
 BR_FLAG_AUTO_ON      = 1 << 1
 BR_FLAG_AUTO_OFF     = 1 << 2
-MAX_LAYERS           = 14    # DYNAMIC_KEYMAP_LAYER_COUNT (split72/config.h)
+MAX_LAYERS           = 12    # DYNAMIC_KEYMAP_LAYER_COUNT (split72/config.h). Was
+                             # 14 here long after the firmware dropped to 12 — a
+                             # loose sanity bound, so nothing failed. Same drift
+                             # class as the host's layer_names.yaml.
 DISPLAY_OVERLAYS_BIT = 0x01  # overlay_flag DISPLAY_OVERLAYS (base/com.h)
 KC_A                 = 0x04  # QMK keycode for 'A'; A..Z = 0x04..0x1D
 NUM_SEGMENTS         = 6     # NUM_SEGMENTS_PER_OVERLAY
@@ -1011,7 +1018,7 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
 
 
 def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """Macros (cmds 35/36/37, protocol v14+): the info header, a windowed body
+    """Macros (cmds 36/37/38, protocol v15+): the info header, a windowed body
     read/write round-trip, and a label round-trip.
 
     Unlike the overlay uploads next door these commands ALL reply, so this is a real
@@ -2174,6 +2181,90 @@ def test_fontpack_wipe_roundtrip(raw: RawHID, log: Callable[[str], None]) -> boo
     return True
 
 
+def test_layer_names(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """GET_LAYER_NAMES (cmd 35, protocol v14+): the layers the host may remap, named.
+
+    The host layout editor labels its layer tabs from this. It used to label them
+    from a file generated out of the firmware's layers.h at build time, which went
+    stale silently and described an enum the firmware no longer had — so the point
+    of the command is that a name the keyboard states itself cannot drift.
+
+    ⚠️ The cross-check against id_dynamic_keymap_get_layer_count is the POINT of this
+    test. The firmware answers both from the same constant precisely so the editor
+    cannot size its tab strip from one and label it from the other; if the two ever
+    disagree, the editor draws a tab it has no name for. Nothing else would catch a
+    change that made cmd 35 report DYNAMIC_KEYMAP_LAYER_COUNT instead of the write cap.
+
+    The payload is [total][count] then count NUL-terminated names. The total is
+    read first and bounds everything after it, so the report's zero fill is never
+    examined and an unnamed layer stays expressible.
+
+    Read-only, so there is nothing to restore.
+    """
+    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LAYER_NAMES]))
+    if not packets:
+        log("  FAIL: no reply to GET_LAYER_NAMES")
+        return False
+    log(f"layer-names reply: {len(packets)} report(s)")
+
+    payload = bytearray()
+    for i, pkt in enumerate(packets):
+        if len(pkt) < 4 or pkt[0] != POLY_CHANNEL or pkt[1] != CMD_GET_LAYER_NAMES:
+            log(f"  FAIL: report {i} is not a GET_LAYER_NAMES reply: {pkt[:4]!r}")
+            return False
+        if pkt[2] != ACK:
+            log(f"  FAIL: report {i} status {pkt[2]!r} != ACK")
+            return False
+        payload += pkt[3:]
+
+    if len(payload) < LAYER_NAMES_HEADER:
+        log("  FAIL: reply too short to carry a header")
+        return False
+    total, count = payload[0], payload[1]
+    if total < LAYER_NAMES_HEADER + 1 or total > 255:
+        log(f"  FAIL: implausible total length {total}")
+        return False
+    if count == 0 or count > MAX_LAYERS:
+        log(f"  FAIL: implausible layer count {count} (expected 1..{MAX_LAYERS})")
+        return False
+    if len(payload) < total:
+        log(f"  FAIL: truncated — {len(payload)} bytes for a {total}-byte payload")
+        return False
+
+    # The total is what bounds this slice, so the report's zero fill is never read
+    # as a name separator — and an UNNAMED layer (a bare terminator) stays
+    # distinguishable from that fill.
+    names = [n.decode("ascii", "replace")
+             for n in bytes(payload[LAYER_NAMES_HEADER:total]).split(b"\x00")[:count]]
+    if len(names) < count:
+        log(f"  FAIL: total {total} carries {len(names)} names, count says {count}")
+        return False
+    log(f"  total={total} count={count}: {', '.join(repr(n) for n in names)}")
+
+    for idx, name in enumerate(names):
+        if not name:
+            log(f"  note: layer {idx} is unnamed")
+            continue
+        if not all(0x20 <= ord(c) < 0x7F for c in name):
+            log(f"  FAIL: layer {idx} name {name!r} is not printable ASCII")
+            return False
+        if len(name) > LAYER_NAME_MAX:
+            log(f"  FAIL: layer {idx} name {name!r} exceeds {LAYER_NAME_MAX} chars")
+            return False
+
+    reply = raw.send(bytes([VIA_DYNAMIC_KEYMAP_GET_LAYER_COUNT]))
+    if not reply or len(reply) < 2 or reply[0] != VIA_DYNAMIC_KEYMAP_GET_LAYER_COUNT:
+        log(f"  FAIL: could not read the dynamic layer count back: {reply!r}")
+        return False
+    if reply[1] != count:
+        log(f"  FAIL: cmd 35 names {count} layers but the layer count reports "
+            f"{reply[1]} — the editor would draw a tab it has no name for")
+        return False
+    log(f"  layer count agrees ({reply[1]})")
+    return True
+
+
+
 # Ordered cheap → expensive and dependency-aware:
 #   * the structural enumerate check first (no HID traffic);
 #   * fresh-boot BEFORE any other GET_ID — it must see and consume the one-shot
@@ -2205,7 +2296,8 @@ TESTS = [
     {"name": "glyph script round-trip (v9)",    "fn": test_glyph_script_round_trip, "min_protocol": 9},
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
-    {"name": "macro round-trip (v14)",          "fn": test_macro_round_trip,        "min_protocol": 14},
+    {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
+    {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # Animation + idle. Both are slow by nature (the intro is ~14 s, the idle fade
     # 10 s), so they are EXTENDED-tier: they run when a release or a big change
