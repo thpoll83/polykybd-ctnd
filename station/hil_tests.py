@@ -98,7 +98,13 @@ GLYPH_SCRIPT_MAX            = 10  # highest valid poly_glyph_script value (BRAIL
 CMD_GLYPH_SIZE              = 34  # get/set the keycap legend size (protocol v13+)
 CMD_MACRO_INFO              = 36  # count, label stride, capacity, bytes used (v15+)
 CMD_MACRO_BODY              = 37  # windowed read/write of the shared body buffer (v15+)
-CMD_MACRO_LABEL             = 38  # get/set one macro's keycap label (v15+)
+CMD_MACRO_LOOK              = 38  # get/set one macro's whole keycap look (v15+)
+MACRO_LOOK_HEADER           = 9   # id, caption length, style, 4 little-endian icon bytes
+MACRO_STYLE_INDEX           = 0   # "M3" above the caption -- the default
+MACRO_STYLE_ICON            = 1   # a chosen glyph above the caption
+MACRO_STYLE_TEXT            = 2   # the caption alone, at the largest face that fits
+MACRO_STYLE_UNKNOWN         = 200 # far past any plausible POLY_MACRO_STYLE_COUNT
+MACRO_ICON_PROBE            = 0x1F4E7  # an emoji-plane codepoint: three non-zero bytes
 GLYPH_SIZE_MAX              = 2   # highest valid poly_glyph_size value (LARGE)
 CMD_GET_LAYER_NAMES         = 35  # read the remappable layers' names (protocol v14+)
 LAYER_NAME_MAX              = 8   # firmware POLY_LAYER_NAME_MAX: longest name, sans NUL
@@ -1017,9 +1023,40 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
 
 
+def _look_request(macro_id: int, text=None, style: int = MACRO_STYLE_INDEX,
+                  icon: int = 0) -> bytes:
+    """Build a MACRO_LOOK report -- a query when `text` is None, else a set.
+
+    All four fields travel in ONE command because a keycap composes them together:
+    a host that could set a caption without also naming a style would leave the key
+    drawing a combination nobody asked for until the next write landed.
+    """
+    n = 0xFF if text is None else len(text)
+    header = bytes([POLY_CHANNEL, CMD_MACRO_LOOK, macro_id, n, style,
+                    icon & 0xFF, (icon >> 8) & 0xFF,
+                    (icon >> 16) & 0xFF, (icon >> 24) & 0xFF])
+    return header if text is None else header + text
+
+
+def _look_reply(response):
+    """Decode a MACRO_LOOK reply into (caption, style, icon), or None if malformed.
+
+    The reply mirrors the request's layout, so this is also what pins the icon's
+    byte order: a swap turns U+1F4E7 into U+E7D40100 and the equality check fails.
+    """
+    if response is None or len(response) < MACRO_LOOK_HEADER:
+        return None
+    n = response[3]
+    if MACRO_LOOK_HEADER + n > len(response):
+        return None
+    icon = (response[5] | (response[6] << 8)
+            | (response[7] << 16) | (response[8] << 24))
+    return bytes(response[MACRO_LOOK_HEADER:MACRO_LOOK_HEADER + n]), response[4], icon
+
+
 def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     """Macros (cmds 36/37/38, protocol v15+): the info header, a windowed body
-    read/write round-trip, and a label round-trip.
+    read/write round-trip, and a keycap-look round-trip (caption, style, icon).
 
     Unlike the overlay uploads next door these commands ALL reply, so this is a real
     round-trip rather than a liveness guard: what is written to the shared body buffer
@@ -1036,7 +1073,16 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
       window for exactly that reason;
     * a label is cut to the stride the header advertises, and the reply echoes what was
       actually stored -- which is how an over-long label proves it was truncated rather
-      than rejected.
+      than rejected;
+    * the look's icon is a 4-byte little-endian codepoint beside a 1-byte style, so a
+      byte-order or offset slip lands the style in the icon's low byte and back.
+
+    ⚠️ An UNKNOWN STYLE is ACCEPTED and stored as INDEX -- this range is OPEN, the
+    deliberate opposite of the glyph SIZE two tests down. A style names how the keycap
+    composes itself, and INDEX always draws something (it needs neither a font pack nor
+    a chosen icon), so a keyboard that does not know a style a newer host offers still
+    shows the macro. A size instead names a rendering tier the firmware must know, so an
+    unknown one is refused. The two assert opposite things on purpose.
 
     ⚠️ MUTATE AND RESTORE, over a PROBE PREFIX -- not the whole buffer. It rewrites
     the first ``probe_len`` bytes (enough to span more than one window) and macro 0's
@@ -1057,7 +1103,14 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     count, label_len = info[3], info[4]
     capacity = info[5] | (info[6] << 8)
     used = info[7] | (info[8] << 8)
-    log(f"  {count} macros, {label_len}-byte labels, {used}/{capacity} bytes used")
+    # data[9] is how many keycap styles this firmware can DRAW -- the host offers
+    # exactly that many in its picker, so a zero would leave it with no style at all.
+    styles = info[9] if len(info) > 9 else 1
+    log(f"  {count} macros, {label_len}-byte labels, {used}/{capacity} bytes used, "
+        f"{styles} keycap style(s)")
+    if styles == 0:
+        log("  FAIL: a keyboard advertising macros must be able to draw at least one style")
+        return False
     if count == 0 or label_len == 0:
         log("  FAIL: a keyboard advertising macros must have a non-zero count and stride")
         return False
@@ -1075,7 +1128,7 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         return False
 
     original = None
-    original_label = None
+    original_look = None
     passed = False
     restored = True
     try:
@@ -1083,12 +1136,15 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         original = _macro_read(raw, log, probe_len, chunk)
         if original is None:
             return False
-        lab = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, 0xFF]))
-        if not _resp_ok(lab, CMD_MACRO_LABEL, log, expect_status=ACK) or len(lab) < 4:
-            log("  FAIL: could not read macro 0's label")
+        lab = raw.send(_look_request(0))
+        if not _resp_ok(lab, CMD_MACRO_LOOK, log, expect_status=ACK):
+            log("  FAIL: could not read macro 0's look")
             return False
-        original_label = bytes(lab[4:4 + lab[3]])
-        log(f"  saved {len(original)} body bytes and label {original_label!r}")
+        original_look = _look_reply(lab)
+        if original_look is None:
+            log(f"  FAIL: malformed look reply {lab!r}")
+            return False
+        log(f"  saved {len(original)} body bytes and look {original_look!r}")
 
         # ---- body round-trip ------------------------------------------------
         # A recognisable, non-repeating pattern: a window-boundary slip that returned
@@ -1106,28 +1162,67 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             return False
         log(f"  {probe_len} bytes round-tripped across {-(-probe_len // chunk)} windows")
 
-        # ---- label round-trip -----------------------------------------------
+        # ---- caption round-trip ----------------------------------------------
         for text in (b"rig", b"work mail"):
-            resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, len(text)]) + text)
-            if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK) or len(resp) < 4:
-                log(f"  FAIL: setting label {text!r} was refused")
+            resp = raw.send(_look_request(0, text))
+            if not _resp_ok(resp, CMD_MACRO_LOOK, log, expect_status=ACK):
+                log(f"  FAIL: setting caption {text!r} was refused")
                 return False
-            got = bytes(resp[4:4 + resp[3]])
-            if got != text:
-                log(f"  FAIL: label read back {got!r} != {text!r}")
+            got = _look_reply(resp)
+            if got is None or got[0] != text:
+                log(f"  FAIL: caption read back {got!r} != {text!r}")
                 return False
-            log(f"  label {text!r} round-tripped")
+            log(f"  caption {text!r} round-tripped")
+
+        # ---- style + icon ------------------------------------------------------
+        # A macro owns its whole keycap -- it cannot ride a modifier, because QMK
+        # carries the wrapped key in one byte and a macro keycode does not fit -- so
+        # the cell is free to be more than a legend. The three fields ride one
+        # command, and this is what proves one write does not clobber another's field.
+        for style in (MACRO_STYLE_ICON, MACRO_STYLE_TEXT):
+            if style >= styles:
+                log(f"  style {style} not drawable by this firmware ({styles}) — skipped")
+                continue
+            icon = MACRO_ICON_PROBE if style == MACRO_STYLE_ICON else 0
+            resp = raw.send(_look_request(0, b"rig", style, icon))
+            if not _resp_ok(resp, CMD_MACRO_LOOK, log, expect_status=ACK):
+                log(f"  FAIL: setting style {style} was refused")
+                return False
+            got = _look_reply(resp)
+            if got != (b"rig", style, icon):
+                log(f"  FAIL: look read back {got!r} != {(b'rig', style, icon)!r}")
+                return False
+            log(f"  style {style} with icon U+{icon:04X} round-tripped")
+
+        # An UNKNOWN style is ACCEPTED and stored as INDEX -- see the docstring. A
+        # NACK here would mean a keyboard refusing a style a newer host offers, which
+        # is the failure the open range exists to avoid.
+        resp = raw.send(_look_request(0, b"rig", MACRO_STYLE_UNKNOWN, 0))
+        if not _resp_ok(resp, CMD_MACRO_LOOK, log, expect_status=ACK):
+            log(f"  FAIL: style {MACRO_STYLE_UNKNOWN} was refused — this range is OPEN, "
+                "an unknown style must degrade to the index style")
+            return False
+        got = _look_reply(resp)
+        if got is None or got[1] != MACRO_STYLE_INDEX:
+            log(f"  FAIL: unknown style stored as {got!r}, want style "
+                f"{MACRO_STYLE_INDEX} (index)")
+            return False
+        log(f"  unknown style {MACRO_STYLE_UNKNOWN} degraded to index")
 
         # Bytes the _Nano_ face cannot draw are DROPPED, not stored: the firmware's
         # label_store() keeps only 0x20..0x7E, because a codepoint that draws nothing
         # is indistinguishable from a bug once it is on a keycap. Without this the
         # firmware could store the raw bytes and still pass everything above.
         mixed = b"caf\xc3\xa9 \xe2\x82\xac"
-        resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, len(mixed)]) + mixed)
-        if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK) or len(resp) < 4:
+        resp = raw.send(_look_request(0, mixed))
+        if not _resp_ok(resp, CMD_MACRO_LOOK, log, expect_status=ACK):
             log("  FAIL: a label with non-ASCII bytes should store the printable part")
             return False
-        got = bytes(resp[4:4 + resp[3]])
+        decoded = _look_reply(resp)
+        if decoded is None:
+            log(f"  FAIL: malformed look reply {resp!r}")
+            return False
+        got = decoded[0]
         if any(b < 0x20 or b > 0x7E for b in got):
             log(f"  FAIL: label kept undrawable bytes {got!r}")
             return False
@@ -1139,8 +1234,8 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         # An over-long label is TRUNCATED to the advertised stride, not refused --
         # the firmware cuts what the nano face cannot fit on the panel anyway.
         long_label = b"X" * (label_len + 8)
-        resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, len(long_label)]) + long_label)
-        if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK) or len(resp) < 4:
+        resp = raw.send(_look_request(0, long_label))
+        if not _resp_ok(resp, CMD_MACRO_LOOK, log, expect_status=ACK) or len(resp) < 4:
             log("  FAIL: an over-long label should truncate, not fail")
             return False
         if resp[3] > label_len:
@@ -1150,9 +1245,9 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
 
         # An id past the count must be REFUSED. The count is what the host lays its
         # editor out from, so a keyboard accepting id 200 would be storing somewhere.
-        bad = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, count, 0xFF]))
-        log(f"macro label id {count} (out of range) -> {bad!r}")
-        if not _resp_ok(bad, CMD_MACRO_LABEL, log, expect_status=NACK):
+        bad = raw.send(_look_request(count))
+        log(f"macro look id {count} (out of range) -> {bad!r}")
+        if not _resp_ok(bad, CMD_MACRO_LOOK, log, expect_status=NACK):
             return False
         log("  out-of-range macro id refused")
         passed = True
@@ -1165,11 +1260,11 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             log("  FAIL: could not restore the macro body -- the keyboard still holds "
                 "the test pattern in its first bytes")
             restored = False
-        if original_label is not None:
-            resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0,
-                                   len(original_label)]) + original_label)
-            if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK):
-                log(f"  FAIL: could not restore macro 0's label {original_label!r}")
+        if original_look is not None:
+            text, style, icon = original_look
+            resp = raw.send(_look_request(0, text, style, icon))
+            if not _resp_ok(resp, CMD_MACRO_LOOK, log, expect_status=ACK):
+                log(f"  FAIL: could not restore macro 0's look {original_look!r}")
                 restored = False
         # ⚠️ LAST, and the order is load-bearing: the firmware invalidates the buffer's
         # FINAL byte on any window that does not carry it, so the prefix restore above
@@ -1180,7 +1275,7 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             log("  FAIL: could not clear the macro buffer's incomplete marker")
             restored = False
         if restored:
-            log("  restored the original macro body prefix and label")
+            log("  restored the original macro body prefix and keycap look")
     return passed and restored
 
 
