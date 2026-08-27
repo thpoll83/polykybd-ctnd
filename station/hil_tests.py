@@ -103,6 +103,7 @@ MACRO_LOOK_HEADER           = 9   # id, caption length, style, 4 little-endian i
 MACRO_STYLE_INDEX           = 0   # "M3" above the caption -- the default
 MACRO_STYLE_ICON            = 1   # a chosen glyph above the caption
 MACRO_STYLE_TEXT            = 2   # the caption alone, at the largest face that fits
+MACRO_STYLE_ICON_ONLY       = 3   # the icon alone, filling the whole key
 MACRO_STYLE_UNKNOWN         = 200 # far past any plausible POLY_MACRO_STYLE_COUNT
 MACRO_ICON_PROBE            = 0x1F4E7  # an emoji-plane codepoint: three non-zero bytes
 GLYPH_SIZE_MAX              = 2   # highest valid poly_glyph_size value (LARGE)
@@ -1179,11 +1180,11 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         # carries the wrapped key in one byte and a macro keycode does not fit -- so
         # the cell is free to be more than a legend. The three fields ride one
         # command, and this is what proves one write does not clobber another's field.
-        for style in (MACRO_STYLE_ICON, MACRO_STYLE_TEXT):
+        for style in (MACRO_STYLE_ICON, MACRO_STYLE_TEXT, MACRO_STYLE_ICON_ONLY):
             if style >= styles:
                 log(f"  style {style} not drawable by this firmware ({styles}) — skipped")
                 continue
-            icon = MACRO_ICON_PROBE if style == MACRO_STYLE_ICON else 0
+            icon = MACRO_ICON_PROBE if style != MACRO_STYLE_TEXT else 0
             resp = raw.send(_look_request(0, b"rig", style, icon))
             if not _resp_ok(resp, CMD_MACRO_LOOK, log, expect_status=ACK):
                 log(f"  FAIL: setting style {style} was refused")

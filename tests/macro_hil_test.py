@@ -56,7 +56,7 @@ class FakeMacroDevice:
     COUNT = 16
     LABEL_LEN = 12
     CAPACITY = 2267
-    STYLES = 3          # POLY_MACRO_STYLE_COUNT
+    STYLES = 4          # POLY_MACRO_STYLE_COUNT
 
     def __init__(self):
         self.buf = bytearray(self.CAPACITY)
