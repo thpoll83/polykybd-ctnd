@@ -96,6 +96,9 @@ CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7
 CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (v9+ tengwar; v10 adds 9 more scripts)
 GLYPH_SCRIPT_MAX            = 10  # highest valid poly_glyph_script value (BRAILLE) as of protocol v10
 CMD_GLYPH_SIZE              = 34  # get/set the keycap legend size (protocol v13+)
+CMD_MACRO_INFO              = 35  # count, label stride, capacity, bytes used (v14+)
+CMD_MACRO_BODY              = 36  # windowed read/write of the shared body buffer (v14+)
+CMD_MACRO_LABEL             = 37  # get/set one macro's keycap label (v14+)
 GLYPH_SIZE_MAX              = 2   # highest valid poly_glyph_size value (LARGE)
 POLY_OS_COUNT               = 8   # enum poly_os values 0..7 valid (UNKNOWN/WIN/MAC/LINUX/ANDROID/IOS-reserved/LINUX_GNOME/LINUX_KDE); firmware SET_OS accepts arg < POLY_OS_COUNT
 # Font-pack flash transport (protocol v6+; same BEGIN/CHUNK/COMMIT staging as the
@@ -1005,6 +1008,165 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
 
     restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, original]))
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
+
+
+def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Macros (cmds 35/36/37, protocol v14+): the info header, a windowed body
+    read/write round-trip, and a label round-trip.
+
+    Unlike the overlay uploads next door these commands ALL reply, so this is a real
+    round-trip rather than a liveness guard: what is written to the shared body buffer
+    is read straight back out of it.
+
+    Three things it is specifically shaped to catch, all of which are arithmetic:
+
+    * the info header is four fields packed little-endian across five bytes, so a
+      byte-order slip reads a 2267-byte capacity as 56066 and the editor sizes its
+      storage bar from that number;
+    * the body is written and read in report-sized WINDOWS, so an offset that fails to
+      advance re-reads window 0 forever and a body longer than one window silently
+      comes back as its own first 58 bytes. The probe is deliberately longer than one
+      window for exactly that reason;
+    * a label is cut to the stride the header advertises, and the reply echoes what was
+      actually stored -- which is how an over-long label proves it was truncated rather
+      than rejected.
+
+    ⚠️ MUTATE AND RESTORE. This rewrites the whole macro buffer, which on a rig with
+    real macros would otherwise destroy them. The original buffer and the probed
+    label are read first and put back in the ``finally``, so a failure mid-test still
+    leaves the keyboard as it was found.
+    """
+    # ---- info header --------------------------------------------------------
+    info = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_INFO]))
+    log(f"macro info -> {info!r}")
+    if not _resp_ok(info, CMD_MACRO_INFO, log, expect_status=ACK):
+        return False
+    if len(info) < 9:
+        log("  FAIL: macro info reply is too short to carry the header")
+        return False
+    count, label_len = info[3], info[4]
+    capacity = info[5] | (info[6] << 8)
+    used = info[7] | (info[8] << 8)
+    log(f"  {count} macros, {label_len}-byte labels, {used}/{capacity} bytes used")
+    if count == 0 or label_len == 0:
+        log("  FAIL: a keyboard advertising macros must have a non-zero count and stride")
+        return False
+    if capacity < 256 or capacity > 0x8000:
+        log(f"  FAIL: implausible capacity {capacity} -- byte order?")
+        return False
+    if used > capacity:
+        log(f"  FAIL: {used} bytes used of {capacity} -- more than exists")
+        return False
+
+    chunk = 58                      # 64-byte report minus the 6-byte header
+    probe_len = chunk + 20          # deliberately spans two windows (see the docstring)
+    if probe_len > capacity:
+        log("  FAIL: capacity too small to probe a multi-window write")
+        return False
+
+    original = None
+    original_label = None
+    try:
+        # ---- save what is there --------------------------------------------
+        original = _macro_read(raw, log, probe_len, chunk)
+        if original is None:
+            return False
+        lab = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, 0xFF]))
+        if not _resp_ok(lab, CMD_MACRO_LABEL, log, expect_status=ACK) or len(lab) < 4:
+            log("  FAIL: could not read macro 0's label")
+            return False
+        original_label = bytes(lab[4:4 + lab[3]])
+        log(f"  saved {len(original)} body bytes and label {original_label!r}")
+
+        # ---- body round-trip ------------------------------------------------
+        # A recognisable, non-repeating pattern: a window-boundary slip that returned
+        # the first window twice would still match a constant fill.
+        pattern = bytes((0x41 + (i % 26)) for i in range(probe_len - 1)) + b"\x00"
+        if not _macro_write(raw, log, 0, pattern, chunk):
+            return False
+        back = _macro_read(raw, log, probe_len, chunk)
+        if back is None:
+            return False
+        if back != pattern:
+            first = next((i for i in range(len(pattern)) if back[i] != pattern[i]), -1)
+            log(f"  FAIL: body mismatch at offset {first} "
+                f"(wrote {pattern[first]:#04x}, read {back[first]:#04x})")
+            return False
+        log(f"  {probe_len} bytes round-tripped across {-(-probe_len // chunk)} windows")
+
+        # ---- label round-trip -----------------------------------------------
+        for text in (b"rig", b"work mail"):
+            resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, len(text)]) + text)
+            if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK) or len(resp) < 4:
+                log(f"  FAIL: setting label {text!r} was refused")
+                return False
+            got = bytes(resp[4:4 + resp[3]])
+            if got != text:
+                log(f"  FAIL: label read back {got!r} != {text!r}")
+                return False
+            log(f"  label {text!r} round-tripped")
+
+        # An over-long label is TRUNCATED to the advertised stride, not refused --
+        # the firmware cuts what the nano face cannot fit on the panel anyway.
+        long_label = b"X" * (label_len + 8)
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0, len(long_label)]) + long_label)
+        if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK) or len(resp) < 4:
+            log("  FAIL: an over-long label should truncate, not fail")
+            return False
+        if resp[3] > label_len:
+            log(f"  FAIL: stored {resp[3]} label bytes, stride is {label_len}")
+            return False
+        log(f"  over-long label cut to {resp[3]} bytes (stride {label_len})")
+
+        # An id past the count must be REFUSED. The count is what the host lays its
+        # editor out from, so a keyboard accepting id 200 would be storing somewhere.
+        bad = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, count, 0xFF]))
+        log(f"macro label id {count} (out of range) -> {bad!r}")
+        if not _resp_ok(bad, CMD_MACRO_LABEL, log, expect_status=NACK):
+            return False
+        log("  out-of-range macro id refused")
+        return True
+    finally:
+        if original is not None:
+            _macro_write(raw, log, 0, original, chunk)
+        if original_label is not None:
+            raw.send(bytes([POLY_CHANNEL, CMD_MACRO_LABEL, 0,
+                            len(original_label)]) + original_label)
+        log("  restored the original macro buffer and label")
+
+
+def _macro_read(raw: RawHID, log: Callable[[str], None], size: int, chunk: int):
+    """Read `size` bytes of the macro body buffer in report-sized windows."""
+    out = bytearray()
+    while len(out) < size:
+        want = min(chunk, size - len(out))
+        off = len(out)
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_BODY, 0,
+                               off & 0xFF, (off >> 8) & 0xFF, want]))
+        if not _resp_ok(resp, CMD_MACRO_BODY, log, expect_status=ACK) or len(resp) < 6:
+            log(f"  FAIL: macro body read failed at offset {off}")
+            return None
+        got = resp[3]
+        if got == 0:
+            # Would leave the offset where it was; a naive loop would spin here.
+            log(f"  FAIL: macro body read returned 0 bytes at offset {off}")
+            return None
+        out += bytes(resp[6:6 + got])
+    return bytes(out[:size])
+
+
+def _macro_write(raw: RawHID, log: Callable[[str], None], offset: int,
+                 data: bytes, chunk: int) -> bool:
+    """Write `data` into the macro body buffer in report-sized windows."""
+    for i in range(0, len(data), chunk):
+        piece = data[i:i + chunk]
+        off = offset + i
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_MACRO_BODY, 1,
+                               off & 0xFF, (off >> 8) & 0xFF, len(piece)]) + piece)
+        if not _resp_ok(resp, CMD_MACRO_BODY, log, expect_status=ACK):
+            log(f"  FAIL: macro body write failed at offset {off}")
+            return False
+    return True
 
 
 def test_glyph_size_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -2043,6 +2205,7 @@ TESTS = [
     {"name": "glyph script round-trip (v9)",    "fn": test_glyph_script_round_trip, "min_protocol": 9},
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
+    {"name": "macro round-trip (v14)",          "fn": test_macro_round_trip,        "min_protocol": 14},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
     # Animation + idle. Both are slow by nature (the intro is ~14 s, the idle fade
     # 10 s), so they are EXTENDED-tier: they run when a release or a big change
