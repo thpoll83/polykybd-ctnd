@@ -189,6 +189,23 @@ class RoundTripTest(unittest.TestCase):
     def test_it_passes_against_a_correct_device(self):
         self.assertTrue(test_macro_round_trip(FakeMacroDevice(), _quiet))
 
+    def test_a_device_that_mangles_the_escape_byte_is_caught(self):
+        """0x01 is the byte a body-buffer implementation is most likely to treat as
+        special, and it is what every chord and pause is built out of.
+
+        The printable probe pattern next door cannot catch this: it is the one body
+        shape that carries no escape at all, so it proves the windows and nothing about
+        the encoding. Nothing on either side produced an escaped body until the host's
+        step editor landed, so nothing here had ever stored one.
+        """
+        class Mangles(FakeMacroDevice):
+            def send(self, data, timeout_ms=3000, attempts=3):
+                if data[1] == CMD_MACRO_BODY and data[2] == 1:
+                    data = bytes(data[:6]) + bytes(
+                        0x20 if b == 0x01 else b for b in data[6:])
+                return super().send(data, timeout_ms, attempts)
+        self.assertFalse(test_macro_round_trip(Mangles(), _quiet))
+
     def test_it_restores_what_it_found(self):
         dev = FakeMacroDevice()
         dev.buf[0:5] = b"hello"

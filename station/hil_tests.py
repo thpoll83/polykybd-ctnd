@@ -1163,6 +1163,37 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             return False
         log(f"  {probe_len} bytes round-tripped across {-(-probe_len // chunk)} windows")
 
+        # ---- an ESCAPED body round-trips too -----------------------------------
+        # The pattern above is printable ASCII, i.e. the one body shape that carries no
+        # 0x01 escape byte -- so it proves the windows and nothing about the encoding.
+        # A chord is `01 02 <kc>` / `01 03 <kc>` and a pause is `01 04 <ascii digits>`,
+        # and 0x01 is exactly the byte a buffer implementation is most likely to treat
+        # as special. The host has written these since the step editor landed; before
+        # that nothing on either side produced one, so nothing here had ever stored one.
+        #
+        # ⚠️ This asserts STORAGE, not playback. Playing it needs a keypress the rig
+        # has no fingers for; `make test:polykybd_macro_decode` covers the decoding.
+        chord = bytes([
+            0x01, 0x02, 0xE0,       # hold  KC_LEFT_CTRL
+            0x01, 0x02, 0xE1,       # hold  KC_LEFT_SHIFT
+            0x01, 0x01, 0x13,       # tap   KC_P
+            0x01, 0x03, 0xE1,       # release KC_LEFT_SHIFT
+            0x01, 0x03, 0xE0,       # release KC_LEFT_CTRL
+            0x01, 0x04,             # wait…
+        ]) + b"250" + b"ok" + b"\x00"
+        chord = chord.ljust(probe_len, b"\x00")
+        if not _macro_write(raw, log, 0, chord, chunk):
+            return False
+        back = _macro_read(raw, log, probe_len, chunk)
+        if back is None:
+            return False
+        if back != chord:
+            first = next((i for i in range(len(chord)) if back[i] != chord[i]), -1)
+            log(f"  FAIL: escaped body mismatch at offset {first} "
+                f"(wrote {chord[first]:#04x}, read {back[first]:#04x})")
+            return False
+        log("  escaped body (chord + pause + text) round-tripped byte for byte")
+
         # ---- caption round-trip ----------------------------------------------
         for text in (b"rig", b"work mail"):
             resp = raw.send(_look_request(0, text))
