@@ -173,6 +173,22 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     setting that silently does nothing. The pair is what pins that asymmetry as
     deliberate, so neither should be "made consistent" with the other. It also re-reads
     the size after the refusal: a NACK that still moved the state would otherwise pass.
+  - The **`layer names (v14)`** test (`test_layer_names`, `min_protocol: 14`) reads
+    HID cmd 35 — the names the host layout editor puts on its layer tabs. ⚠️ **Its
+    cross-check against `id_dynamic_keymap_get_layer_count` is the POINT of the test,
+    not a bounds nicety.** The firmware answers both from the same constant precisely
+    so the editor cannot size its tab strip from one command and label it from the
+    other; a change that made cmd 35 report `DYNAMIC_KEYMAP_LAYER_COUNT` (12) instead
+    of the write cap (8) would leave the editor drawing tabs it has no names for, and
+    nothing else on the rig would notice. Read-only, so nothing to restore. The
+    payload is `[total][count]` then NUL-terminated names; the test reads the total
+    first and bounds every later slice by it, so the report's zero fill is never read
+    as a separator and an **unnamed layer** stays distinguishable from padding (it is
+    logged as a note, not a failure).
+    - ⚠️ Fixing this also corrected **`MAX_LAYERS`**, which had sat at **14** here
+      long after the firmware dropped to 12. It is only a sanity bound on the
+      default-layer read, so nothing failed — the same silent-staleness class as the
+      host's `layer_names.yaml`, and the reason that file is now only a fallback.
   - The **`overlay mapping widths (v12)`** test (`test_overlay_mapping_widths`,
     `min_protocol: 12`) covers HID cmd 33 (`SEND_OVERLAY_MAPPING_W`), the
     variable-width mapping command. ⚠️ **It is a liveness guard, not a
