@@ -1171,6 +1171,14 @@ def test_macro_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             if not _resp_ok(resp, CMD_MACRO_LABEL, log, expect_status=ACK):
                 log(f"  FAIL: could not restore macro 0's label {original_label!r}")
                 restored = False
+        # ⚠️ LAST, and the order is load-bearing: the firmware invalidates the buffer's
+        # FINAL byte on any window that does not carry it, so the prefix restore above
+        # re-marks it. Clearing the byte first and restoring the prefix after leaves the
+        # board with macros that silently refuse to play -- which is exactly what the
+        # first version of this did, caught by the offline fake mirroring the firmware.
+        if capacity > 0 and not _macro_write(raw, log, capacity - 1, b"\x00", chunk):
+            log("  FAIL: could not clear the macro buffer's incomplete marker")
+            restored = False
         if restored:
             log("  restored the original macro body prefix and label")
     return passed and restored

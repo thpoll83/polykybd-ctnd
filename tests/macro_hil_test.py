@@ -79,6 +79,12 @@ class FakeMacroDevice:
                         ).ljust(REPORT, b"\0")
             self.writes += 1
             payload = data[6:6 + want]
+            # Mirror the firmware: a window that does not carry the buffer's final byte
+            # invalidates it first, so an interrupted stream reads as not-intact. A fake
+            # that skipped this would let the restore test pass while the real board was
+            # left unplayable.
+            if off + len(payload) < self.CAPACITY:
+                self.buf[self.CAPACITY - 1] = 0xFF
             self.buf[off:off + len(payload)] = payload
             return bytes([POLY_CHANNEL, cmd, ACK]).ljust(REPORT, b"\0")
 
@@ -289,6 +295,15 @@ class RoundTripTest(unittest.TestCase):
         dev = RefusesLabelRestore()
         self.assertFalse(test_macro_round_trip(dev, _quiet))
         self.assertEqual(dev.restores, 1, "the label restore never ran; test is vacuous")
+
+    def test_it_leaves_the_buffer_playable(self):
+        """The firmware invalidates the final byte on a prefix write, so restoring the
+        prefix alone would leave a rig whose macros silently refuse to play. The test
+        has to put the terminating NUL back too."""
+        dev = FakeMacroDevice()
+        self.assertTrue(test_macro_round_trip(dev, _quiet))
+        self.assertEqual(dev.buf[dev.CAPACITY - 1], 0,
+                         "the buffer is left marked incomplete -- macros will not play")
 
 
 if __name__ == "__main__":
