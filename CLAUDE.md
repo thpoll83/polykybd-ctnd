@@ -539,6 +539,25 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
 > never checked the thing the rig PR was written to check. Verify rather than assume:
 > grep the HIL job log for the test's own name (each prints `[test] PASS: <name>`),
 > not just the job's conclusion.
+>
+> ✅ **But merging does NOT forfeit that coverage — it defers it by one run.**
+> `qmk-test.yml` also triggers on `push: [PolyKybd]`, so the **merge commit itself**
+> starts a HIL run that executes the new test. (The follow-on auto-bump `chore:`
+> commit does not — it carries `[skip ci]`.) That is what decides the case where the
+> rig is unavailable and the choice is "hold the PR open or merge anyway": both reach
+> the same coverage at the same moment, so a rig outage is not a reason to leave a
+> reviewed, hardware-confirmed PR dangling. Seen 2026-08-27 on qmk#233 — the merge
+> started run #851, the first run able to execute `layer names (v14)`.
+>
+> ⚠️ **A red HIL that never RAN is a different thing again, and the settle line
+> cannot tell you.** The job can die in workflow setup — fetching a GitHub Action —
+> before checkout, before the station sync, before a single `[test]` line. On
+> 2026-08-27 the rig lost outbound access to `codeload.github.com` and failed that
+> way **three times** (twice on a PR, once on the `PolyKybd` merge push), leaving the
+> default branch red on the rig's network rather than on any code. The tell is a log
+> ending at `Prepare all required actions`; full triage in the `diagnose-hil-failure`
+> skill, §1.5. Note the runner stays *online* throughout — it picks jobs up and
+> streams logs — so "the rig is up" is not evidence its network is healthy.
 
 ### Self-update mechanism
 
