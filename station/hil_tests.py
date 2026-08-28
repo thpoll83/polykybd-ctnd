@@ -2369,8 +2369,31 @@ def test_layer_names(raw: RawHID, log: Callable[[str], None]) -> bool:
     examined and an unnamed layer stays expressible.
 
     Read-only, so there is nothing to restore.
+
+    ``send_and_read_all`` has no built-in retry, and this was the ONE test in its
+    neighbourhood without tolerance for the master's transient deaf windows: on
+    qmk#236's first HIL run the tests on either side each *recovered 1 read
+    timeout* via ``send()``'s retry while this one failed with "no reply" — a
+    false red on a command whose reply is perfectly idempotent (no one-shot
+    marker). Same remedy as the packed language list above: retry the whole
+    exchange (fresh handle each time) when NOTHING arrives. A reply that arrives
+    but fails validation is a real protocol fault and still fails immediately
+    without burning retries.
     """
-    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LAYER_NAMES]))
+    packets: list[bytes] = []
+    for attempt in range(3):
+        # The lengthened timeouts are half of the remedy (same values as the
+        # packed language list): 3 x the default 1 s first-read would give a
+        # ~3 s total window, which the observed 5104 ms deaf interval outlasts.
+        packets = raw.send_and_read_all(
+            bytes([POLY_CHANNEL, CMD_GET_LAYER_NAMES]),
+            first_timeout_ms=2500, next_timeout_ms=600)
+        if packets:
+            if attempt:
+                log(f"  reply arrived on attempt {attempt + 1}/3")
+            break
+        tail = "retrying" if attempt + 1 < 3 else "giving up"
+        log(f"  attempt {attempt + 1}/3: no reply (master busy?) — {tail}")
     if not packets:
         log("  FAIL: no reply to GET_LAYER_NAMES")
         return False
