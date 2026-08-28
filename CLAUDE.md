@@ -558,6 +558,19 @@ The RPi4 is not directly accessible from Claude Code on the web. Development cyc
 > ending at `Prepare all required actions`; full triage in the `diagnose-hil-failure`
 > skill, §1.5. Note the runner stays *online* throughout — it picks jobs up and
 > streams logs — so "the rig is up" is not evidence its network is healthy.
+>
+> ⚠️ **The order is measured against the rig's SYNC STEP, not the run's start — so
+> merging the two a minute apart in the WRONG order can still be fine.** On
+> 2026-08-28 qmk#234 merged at 12:06:47 and ctnd#74 at 12:07:47, i.e. the firmware
+> landed first, which the rule above says forfeits the new test. It did not: the
+> merge-commit run started at 12:06:48 but `qmk-test.yml` force-syncs the station to
+> ctnd `main` inside the **hil-test** job, which waits on the cloud build — several
+> minutes later, by which time the ctnd merge had landed. So the window that matters
+> is "ctnd `main` is current **when the sync step runs**", and a build long enough to
+> cover a same-minute merge closes it for you. Do not rely on that: it is luck, the
+> build time is not a contract, and the check is unchanged — **grep the HIL log for
+> the test's own name** and re-run the job if it is absent, since a re-run syncs
+> again and will then pick it up.
 
 ### Self-update mechanism
 
