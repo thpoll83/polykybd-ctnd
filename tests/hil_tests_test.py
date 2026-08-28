@@ -382,5 +382,59 @@ class SuiteTierGateTest(unittest.TestCase):
             self.assertIsNone(test.get("tier"), name)
 
 
+class LayerNamesRetryTest(unittest.TestCase):
+    """test_layer_names must ride out a deaf window but never retry a real fault.
+
+    On qmk#236's first HIL run the master had multi-second deaf windows; the
+    tests on either side of layer names each recovered a read timeout via
+    ``send()``'s retry while layer names — the one retry-less
+    ``send_and_read_all`` in that stretch — failed with "no reply". The reply is
+    idempotent (no one-shot marker), so the exchange now retries when NOTHING
+    arrives; a reply that arrives but fails validation is a protocol fault and
+    must still fail on the first attempt.
+    """
+
+    NAMES = [b"Qwerty", b"Stag!", b"ColemkDH", b"Neo", b"Workman",
+             b"Fn", b"Numpad", b"Utility"]
+
+    class FakeDevice:
+        def __init__(self, deaf_exchanges: int = 0, garble: bool = False):
+            body = b"".join(n + b"\x00" for n in LayerNamesRetryTest.NAMES)
+            payload = bytes([2 + len(body), len(LayerNamesRetryTest.NAMES)]) + body
+            report = bytes([POLY_CHANNEL, hil_tests.CMD_GET_LAYER_NAMES, ACK]) + payload
+            if garble:
+                report = bytes([POLY_CHANNEL, hil_tests.CMD_GET_LAYER_NAMES, ord("!")]) + payload
+            self._report = report.ljust(64, b"\x00")
+            self._deaf = deaf_exchanges
+            self.exchanges = 0
+
+        def send_and_read_all(self, data, **kwargs):
+            self.exchanges += 1
+            if self._deaf > 0:
+                self._deaf -= 1
+                return []
+            return [self._report]
+
+        def send(self, data, timeout_ms: int = 3000, attempts: int = 3):
+            # The layer-count cross-check (id_dynamic_keymap_get_layer_count).
+            return bytes([hil_tests.VIA_DYNAMIC_KEYMAP_GET_LAYER_COUNT,
+                          len(LayerNamesRetryTest.NAMES)]).ljust(32, b"\x00")
+
+    def test_a_deaf_window_is_ridden_out(self):
+        dev = self.FakeDevice(deaf_exchanges=1)
+        self.assertTrue(hil_tests.test_layer_names(dev, lambda m: None))
+        self.assertEqual(dev.exchanges, 2)
+
+    def test_a_permanently_deaf_master_still_fails(self):
+        dev = self.FakeDevice(deaf_exchanges=99)
+        self.assertFalse(hil_tests.test_layer_names(dev, lambda m: None))
+        self.assertEqual(dev.exchanges, 3)   # bounded — never an infinite ride
+
+    def test_a_real_protocol_fault_fails_without_burning_retries(self):
+        dev = self.FakeDevice(garble=True)
+        self.assertFalse(hil_tests.test_layer_names(dev, lambda m: None))
+        self.assertEqual(dev.exchanges, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
