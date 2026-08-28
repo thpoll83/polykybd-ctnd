@@ -2382,12 +2382,18 @@ def test_layer_names(raw: RawHID, log: Callable[[str], None]) -> bool:
     """
     packets: list[bytes] = []
     for attempt in range(3):
-        packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LAYER_NAMES]))
+        # The lengthened timeouts are half of the remedy (same values as the
+        # packed language list): 3 x the default 1 s first-read would give a
+        # ~3 s total window, which the observed 5104 ms deaf interval outlasts.
+        packets = raw.send_and_read_all(
+            bytes([POLY_CHANNEL, CMD_GET_LAYER_NAMES]),
+            first_timeout_ms=2500, next_timeout_ms=600)
         if packets:
             if attempt:
                 log(f"  reply arrived on attempt {attempt + 1}/3")
             break
-        log(f"  attempt {attempt + 1}/3: no reply (master busy?) — retrying")
+        tail = "retrying" if attempt + 1 < 3 else "giving up"
+        log(f"  attempt {attempt + 1}/3: no reply (master busy?) — {tail}")
     if not packets:
         log("  FAIL: no reply to GET_LAYER_NAMES")
         return False
