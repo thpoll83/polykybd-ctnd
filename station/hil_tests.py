@@ -187,7 +187,7 @@ TIER_EXTENDED = "extended"
 # A THIRD opt-in tier, separate from EXTENDED, for the signed-DOOM-pack checks
 # (FW-9). They are opt-in for two reasons at once: they flash a ~230 KB .plyx over
 # HID and drive the idle screensaver (slow, like EXTENDED), AND they need a signed
-# pack artifact CI builds only on demand (see --plyx-valid / the `doom` label).
+# pack artifact CI builds only on demand (see --plyx-valid / the `hil-doom` label).
 TIER_DOOM     = "doom"
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
@@ -342,7 +342,7 @@ def skip_reason(test: dict, caps: dict):
     # The doom-pack tier is fail-closed like EXTENDED, but on its OWN opt-in: it
     # also needs a signed .plyx artifact that only the `doom` CI path produces.
     if test.get("tier") == TIER_DOOM and not caps.get("doom"):
-        return "doom suite — re-run with --doom + a signed --plyx-valid (or the doom label)"
+        return "doom suite — re-run with --doom + a signed --plyx-valid (or the hil-doom label)"
     return None
 
 
@@ -2711,7 +2711,7 @@ TESTS = [
      "min_protocol": 6},
     # FW-9: the LOAD-time Ed25519 gate on the executable engine pack. TIER_DOOM
     # (its own opt-in): they flash a ~230 KB signed .plyx and drive the IDDQD
-    # screensaver, and need a signed pack CI builds only on the `doom` label. The
+    # screensaver, and need a signed pack CI builds only on the `hil-doom` label. The
     # tampered/unsigned variants are derived from the signed one on the rig. LAST,
     # after the magic gate: they leave a real (or refused) pack in the slot.
     {"name": "doom signed engine-pack loads (FW-9 accept)",
