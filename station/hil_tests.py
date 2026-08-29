@@ -184,6 +184,11 @@ NACK       = ord("!")
 # ``docs/FUTURE_TESTS.md`` until it is trustworthy, not in a tier nobody runs.
 TIER_DEFAULT  = "default"
 TIER_EXTENDED = "extended"
+# A THIRD opt-in tier, separate from EXTENDED, for the signed-DOOM-pack checks
+# (FW-9). They are opt-in for two reasons at once: they flash a ~230 KB .plyx over
+# HID and drive the idle screensaver (slow, like EXTENDED), AND they need a signed
+# pack artifact CI builds only on demand (see --plyx-valid / the `hil-doom` label).
+TIER_DOOM     = "doom"
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
 # Firmware facts (keyboards/polykybd/{config.h,base/com.h}).
@@ -234,6 +239,7 @@ ROI_START            = 64 - 2 - ROI_HDR_BYTES   # 57
 ROI_MAX              = 64 - 2                   # 62
 SCREEN_WIDTH         = 72    # keycap OLED, px
 SCREEN_HEIGHT        = 40
+IDLE_STYLE_IDDQD     = 2     # enum poly_idle_style (state.h): the DOOM screensaver
 IDLE_STYLE_EDEN      = 3     # enum poly_idle_style (state.h): pulse/jitter/iddqd/eden
 # Firmware version that introduced the Eden animation + IDLE_STYLE_EDEN, for the
 # min_fw gate (the feature bumps no PROTOCOL_VERSION, so GET_ID's P<n> can't gate it).
@@ -258,6 +264,10 @@ EDEN_BURST_SENDS      = 30
 # The idle fade runs for FADE_TRANSITION_TIME (10 s) after the backdated start
 # before the transition fires; wait comfortably past it.
 IDLE_ENGAGE_TIMEOUT_S = 25.0
+# The signed-pack tests wait for the idle fade to complete AND the loader to run
+# its ~230 KB CRC + one SHA-512 before it logs a verdict — a touch longer than the
+# bare idle-engage window.
+DOOM_LOAD_TIMEOUT_S   = 30.0
 # The soak's frames are sent in a few hundred ms, but the firmware prints its
 # summary from send_to_bridge, i.e. as it drains them.
 LINK_SUMMARY_TIMEOUT_S = 30.0
@@ -329,6 +339,10 @@ def skip_reason(test: dict, caps: dict):
     # because the whole point is that the default PR gate does not pay for it.
     if test.get("tier") == TIER_EXTENDED and not caps.get("extended"):
         return "extended suite — re-run with --extended (or the hil-extended label)"
+    # The doom-pack tier is fail-closed like EXTENDED, but on its OWN opt-in: it
+    # also needs a signed .plyx artifact that only the `doom` CI path produces.
+    if test.get("tier") == TIER_DOOM and not caps.get("doom"):
+        return "doom suite — re-run with --doom + a signed --plyx-valid (or the hil-doom label)"
     return None
 
 
@@ -2265,6 +2279,166 @@ def test_doompack_commit_magic_gate(raw: RawHID, log: Callable[[str], None]) -> 
     return True
 
 
+# --- signed DOOM engine-pack round trip (FW-9, TIER_DOOM) --------------------
+# The magic gate above proves the flash TRANSPORT and the COMMIT header check.
+# These three tests prove the LOAD-time Ed25519 gate in doom_pack_load.c: a pack
+# signed with the key the HIL image was built against loads and the engine runs;
+# a tampered or unsigned pack is refused and the fire demo runs instead. All three
+# read the ungated `doom:` printf console lines (needs_console) — the verdict is
+# NOT observable over HID, only on the console (and the idle-transition line is
+# uprint/debug-gated, so we key off the doom loader's own printf lines).
+#
+# CI (qmk-test.yml `doom` opt-in) builds the HIL images against an EPHEMERAL key
+# and ships ONE .plyx signed with it via --plyx-valid; the rig derives the tampered
+# and unsigned variants below, so only one artifact crosses and the derivation is
+# unit-tested. Without --plyx-valid these SKIP (the TIER_DOOM gate).
+DOOM_SIG_SIZE = 64  # doom_pack_abi.h DOOM_PACK_SIG_SIZE — the trailing Ed25519 sig
+
+_DOOM_VALID_PLYX: "bytes | None" = None
+
+
+def set_doom_pack(pack: "bytes | None") -> None:
+    """Give the TIER_DOOM tests the signed .plyx to flash (the runner calls this
+    from --plyx-valid). Left None otherwise, which — together with caps['doom'] —
+    keeps those tests skipped."""
+    global _DOOM_VALID_PLYX
+    _DOOM_VALID_PLYX = pack
+
+
+def _doom_tamper_sig(pack: bytes) -> bytes:
+    """Flip one bit of the trailing signature. Header + image stay byte-for-byte
+    valid (magic / CRC / ram-pairing all pass at load), so the loader reaches the
+    Ed25519 check and takes the 'signature is INVALID' branch — a genuine authorship
+    failure, not a corrupt image that would be caught earlier."""
+    if len(pack) <= DOOM_SIG_SIZE:
+        raise ValueError("pack too short to carry a signature")
+    b = bytearray(pack)
+    b[-1] ^= 0x01
+    return bytes(b)
+
+
+def _doom_strip_sig(pack: bytes) -> bytes:
+    """Drop the 64-byte trailer, leaving header+image with no signature. At load the
+    firmware reads the signature slot one past the flashed bytes (erased flash =
+    0xFF) and reports 'is unsigned' — the pre-signing pack case."""
+    if len(pack) <= DOOM_SIG_SIZE:
+        raise ValueError("pack too short to carry a signature")
+    return pack[:-DOOM_SIG_SIZE]
+
+
+def classify_doom_verdict(lines) -> str:
+    """Reduce the captured `doom:` console lines to one verdict token: 'loaded'
+    (accept), 'invalid' / 'unsigned' (the two FW-9 refusals), or 'none' (the loader
+    logged no signature verdict at all). Pure so it can be unit-tested against the
+    firmware's exact strings without hardware. The two refusals are checked before
+    'loaded' so a stray earlier 'loaded' from a prior attempt can't mask a refusal."""
+    joined = "\n".join(lines)
+    if "signature is INVALID" in joined:
+        return "invalid"
+    if "is unsigned" in joined:
+        return "unsigned"
+    if "pack v" in joined and "loaded" in joined:
+        return "loaded"
+    return "none"
+
+
+def _doom_idle_verdict(raw: RawHID, log: Callable[[str], None], pack: bytes):
+    """Flash `pack` to the DOOMPACK slot, engage the IDDQD screensaver, and return
+    ``(committed, lines)`` — whether COMMIT ACKed, and the console lines the loader
+    emitted while trying to load it. The IDDQD idle is what triggers the load; the
+    loader logs its verdict via ungated printf, and `attract screensaver up` fires
+    on BOTH the accept and the fire-demo-fallback paths, so it is the anchor to
+    wait on before reading the verdict out of the captured lines. Stops idle and
+    restores the previous style in a finally."""
+    reply = _doom_slot_flash(raw, log, pack, DOOMPACK_BUNDLE_ID)
+    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+        log(f"  FAIL: DOOMPACK COMMIT rejected: {reply!r}")
+        return False, []
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, 0xFF]))
+    original = cur[3] if (cur and len(cur) >= 4) else IDLE_STYLE_EDEN
+    try:
+        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, IDLE_STYLE_IDDQD]))
+        if not _resp_ok(set_resp, CMD_IDLE_STYLE, log, expect_status=ACK):
+            log("  FAIL: firmware rejected IDLE_STYLE_IDDQD")
+            return True, []
+        mark = TAP.mark()
+        start = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 1]))
+        if not _resp_ok(start, CMD_IDLE_STATE, log, expect_status=ACK):
+            return True, []
+        log(f"  IDDQD idle started — waiting up to {DOOM_LOAD_TIMEOUT_S:.0f}s for the loader")
+        up = TAP.wait_for("attract screensaver up", mark, timeout=DOOM_LOAD_TIMEOUT_S)
+        lines = TAP.since(mark)
+        if up is None:
+            log("  (no 'attract screensaver up' line — the screensaver never engaged)")
+        for ln in lines:
+            if ln.startswith("doom:"):
+                log(f"  firmware: {ln}")
+        return True, lines
+    finally:
+        raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
+        raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, original]))
+
+
+def test_doompack_signed_load(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A .plyx signed with the key the HIL image was built against LOADS — the FW-9
+    Ed25519 accept path. Flash it, engage IDDQD, and confirm the console logs
+    `doom: pack vN loaded`. Requires --plyx-valid (SKIPs via the TIER_DOOM gate
+    otherwise)."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    committed, lines = _doom_idle_verdict(raw, log, _DOOM_VALID_PLYX)
+    if not committed:
+        return False
+    verdict = classify_doom_verdict(lines)
+    if verdict != "loaded":
+        log(f"  FAIL: a correctly-signed pack was not loaded (verdict={verdict}) — the "
+            "accept path is broken, or the pack was not signed with this image's key")
+        return False
+    log("  PASS: signed pack loaded — the Ed25519 accept path works")
+    return True
+
+
+def test_doompack_tampered_refused(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A pack whose signature bit is flipped is REFUSED at load — header/image/CRC
+    all still valid, so the loader reaches the Ed25519 check and takes the
+    'signature is INVALID' branch, then runs the fire demo instead of branching into
+    the image. This is the core FW-9 property: an unauthenticated pack does not
+    execute."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    committed, lines = _doom_idle_verdict(raw, log, _doom_tamper_sig(_DOOM_VALID_PLYX))
+    if not committed:
+        return False
+    verdict = classify_doom_verdict(lines)
+    if verdict != "invalid":
+        log(f"  FAIL: a tampered-signature pack was not refused as INVALID "
+            f"(verdict={verdict}) — the FW-9 gate is not authenticating the pack")
+        return False
+    log("  PASS: tampered-signature pack refused (fire demo runs, image not executed)")
+    return True
+
+
+def test_doompack_unsigned_refused(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A pack with no signature trailer is REFUSED at load ('is unsigned'), never
+    branched into — the pre-signing pack case. There is deliberately NO on-keycap
+    prompt here (unlike an unsigned firmware image): the load runs at idle with
+    nobody present, so it is refused outright."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    committed, lines = _doom_idle_verdict(raw, log, _doom_strip_sig(_DOOM_VALID_PLYX))
+    if not committed:
+        return False
+    verdict = classify_doom_verdict(lines)
+    if verdict != "unsigned":
+        log(f"  FAIL: an unsigned pack was not refused as unsigned (verdict={verdict})")
+        return False
+    log("  PASS: unsigned pack refused (fire demo runs, image not executed)")
+    return True
+
+
 def _fontpack_abort(raw: RawHID) -> None:
     """Best-effort abort: a COMMIT clears fw_up mode on both halves regardless of
     outcome, so a partial transfer can't leave the keyboard stuck mid-flash."""
@@ -2535,4 +2709,18 @@ TESTS = [
      "min_protocol": 6},
     {"name": "doom engine-pack slot magic gate", "fn": test_doompack_commit_magic_gate,
      "min_protocol": 6},
+    # FW-9: the LOAD-time Ed25519 gate on the executable engine pack. TIER_DOOM
+    # (its own opt-in): they flash a ~230 KB signed .plyx and drive the IDDQD
+    # screensaver, and need a signed pack CI builds only on the `hil-doom` label. The
+    # tampered/unsigned variants are derived from the signed one on the rig. LAST,
+    # after the magic gate: they leave a real (or refused) pack in the slot.
+    {"name": "doom signed engine-pack loads (FW-9 accept)",
+     "fn": test_doompack_signed_load, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
+    {"name": "doom tampered-signature pack refused (FW-9)",
+     "fn": test_doompack_tampered_refused, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
+    {"name": "doom unsigned pack refused (FW-9)",
+     "fn": test_doompack_unsigned_refused, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
 ]
