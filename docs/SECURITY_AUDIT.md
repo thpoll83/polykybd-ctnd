@@ -15,8 +15,10 @@ an on-keycap ACCEPT/REJECT prompt. Previous review 2026-08-04 (HIL-2 confirmed s
 remediated on the rig; HIL-7 raised and fixed; HIL-8 raised and remediated; HIL-9 raised
 and partly mitigated; FW-2 key provisioned).
 
-⚠️ **Read FW-9 before concluding that firmware signing closes the code-execution
-surface. It does not.**
+⚠️ **Firmware signing did not, on its own, close the code-execution surface —
+the executable DOOM pack was CRC-checked only. FW-9 (below) fixed that with a
+load-time Ed25519 check on the pack; the warning is kept as the record of why
+signing the firmware image alone was not enough.**
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -28,7 +30,7 @@ surface. It does not.**
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
 | FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ✅ enforced — key provisioned, both verdicts confirmed on hardware |
-| **FW-9** | **Executable DOOM pack (`.plyx`) is CRC-checked, not signed — arbitrary code execution, bypasses FW-2** | qmk | 🔲 **open (high)** |
+| FW-9 | Executable DOOM pack (`.plyx`) is CRC-checked, not signed — arbitrary code execution, bypasses FW-2 | qmk | ✅ fixed (load-time Ed25519, qmk #243) |
 | FW-10 | Unsigned-flash confirmation is a repeatable input DoS (60 s modal) | qmk | 🟡 accepted + documented |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
@@ -51,59 +53,6 @@ surface. It does not.**
 ---
 
 ## 🔲 Open
-
-### FW-9 — the executable DOOM pack is CRC-checked, not signed (bypasses FW-2)
-
-Raised **2026-08-05**, by a fresh look at what FW-2 does *not* cover. FW-2 signs the
-**firmware image**. It does not sign the **DOOM engine pack** (`.plyx`) — which is
-executable code, flashed over the same HID transport, and *called* by the firmware.
-
-`doom/doom_pack_load.c` validates a flashed pack with: the `PlyX` magic, `abi ==
-DOOM_PACK_ABI`, `image_size` fits the slot, the `ram_base`/`ram_size` pairing, and a
-**CRC32** over the body. Every one of those is an integrity/compatibility check. **None
-authenticates the author** — a CRC32 is trivially satisfied by whoever crafts the image.
-It then does:
-
-```c
-doom_pack_init_fn init = (…)(slot + sizeof(*hdr) + hdr->entry_off + 1u);
-const doom_pack_api_t *api = init(&s_fw_api);
-```
-
-i.e. it **branches into attacker-supplied bytes at an attacker-supplied offset**, on a
-Cortex-M0+ with no MPU. Once executing, the code is not confined to `s_fw_api` — it has
-the whole address space, including the flash-write routines.
-
-**The chain needs no physical access and no user interaction:**
-
-1. Flash a crafted `.plyx` (cmds `0x50`–`0x52`, DOOMPACK target). No signature is checked
-   on this path — `fw_staging_check_signature()` is only called in the `FW_TARGET_FIRMWARE`
-   branch of `fw_staging_finalize_impl`.
-2. Set the idle style to `IDLE_STYLE_IDDQD` (2) over **HID cmd 28** — in range, so it is
-   accepted.
-3. Wait for the keyboard to idle. `doom_begin` → `doom_session_start` →
-   `doom_pack_load()` → the call above.
-
-So an attacker who can open the raw HID interface gets **arbitrary code execution with
-full firmware privilege**, which is precisely the outcome FW-2 exists to prevent. It
-applies to shipped keyboards: `release.yml` builds the `POLYKYBD_DOOM_PACK` flavour, and
-the `.plyx` is a published release asset.
-
-**Fix (recommended): verify the pack with the existing Ed25519 machinery, at LOAD time.**
-The verifier and `FW_SIGNING_PUBKEY` are already compiled in (`base/crypto/`,
-`base/fw_pubkey.h`). Put the 64-byte signature in the PlyX header (a `PACK_VERSION` bump)
-and check it in `doom_pack_load()` immediately before computing `init`. Verify at *load*,
-not at COMMIT: flash can be rewritten afterwards, so a "was validated once" flag is not a
-control. The cost is one SHA-512 over ~211 KB at session start — the loader already walks
-the whole image for the CRC there, so it is the same order of work, once per game session,
-not per frame. `release.yml` signs the `.plyx` alongside the `.bin`.
-
-**Interim mitigation** if that is not done promptly: build releases without
-`POLYKYBD_DOOM_PACK`. That removes the feature, so it is a stopgap, not a fix.
-
-⚠️ **The same "flashed over HID, authenticated by CRC only" property applies to the WAD
-(`.whx`) and the font-pack bundles (`.plyf`)** — but those are *data*, so the exposure is
-parser bugs in `fontpack.c` / the WAD reader rather than direct code execution. Lower
-severity, same root cause: the resource-flash path has no notion of authenticity.
 
 ### FW-10 — the unsigned-flash confirmation is a repeatable input DoS
 
@@ -369,6 +318,80 @@ not an escalation. Accepting remains a keypress on the matrix and must stay that
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### FW-9 — the executable DOOM pack was CRC-checked, not signed (FIXED)
+
+**✅ Fixed 2026-08-29 (qmk #243).** The `.plyx` now carries a 64-byte Ed25519
+signature over *(header ‖ image)*, appended after the image (its position derives
+from `image_size`, so the pack ABI is unchanged and a signed pack still loads on
+pre-signature firmware). `doom_pack_load()` verifies it against `FW_SIGNING_PUBKEY`
+under `FW_REQUIRE_SIGNATURE` **at load time** — immediately before computing the
+entry pointer, not at flash COMMIT, because flash can be rewritten after a COMMIT
+succeeds. Signing the header too is load-bearing: `entry_off`/`ram_base` are what an
+attacker would edit to re-target a signed image. There is no on-keycap escape hatch
+(unlike an unsigned firmware image): the load runs at idle with nobody present to
+answer a prompt, so an unsigned pack is refused and the fire demo runs.
+`tools/sign_doompack.py` appends the trailer and `release.yml` signs the `.plyx`
+beside the `.bin`; `PACK_VERSION` 3→4 so the enforcing firmware release ships a
+matching signed pack (host `validate_doompack` tolerates the trailer, so no host
+change). The `.whx` / `.plyf` note below still stands — those are data, not code,
+and the resource-flash path still has no notion of authenticity for them.
+
+The original finding, kept as the record:
+
+> **(as raised — the exposure below is now closed by the fix above.)**
+
+Raised **2026-08-05**, by a fresh look at what FW-2 does *not* cover. FW-2 signs the
+**firmware image**. It does not sign the **DOOM engine pack** (`.plyx`) — which is
+executable code, flashed over the same HID transport, and *called* by the firmware.
+
+`doom/doom_pack_load.c` validates a flashed pack with: the `PlyX` magic, `abi ==
+DOOM_PACK_ABI`, `image_size` fits the slot, the `ram_base`/`ram_size` pairing, and a
+**CRC32** over the body. Every one of those is an integrity/compatibility check. **None
+authenticates the author** — a CRC32 is trivially satisfied by whoever crafts the image.
+It then does:
+
+```c
+doom_pack_init_fn init = (…)(slot + sizeof(*hdr) + hdr->entry_off + 1u);
+const doom_pack_api_t *api = init(&s_fw_api);
+```
+
+i.e. it **branches into attacker-supplied bytes at an attacker-supplied offset**, on a
+Cortex-M0+ with no MPU. Once executing, the code is not confined to `s_fw_api` — it has
+the whole address space, including the flash-write routines.
+
+**The chain needs no physical access and no user interaction:**
+
+1. Flash a crafted `.plyx` (cmds `0x50`–`0x52`, DOOMPACK target). No signature is checked
+   on this path — `fw_staging_check_signature()` is only called in the `FW_TARGET_FIRMWARE`
+   branch of `fw_staging_finalize_impl`.
+2. Set the idle style to `IDLE_STYLE_IDDQD` (2) over **HID cmd 28** — in range, so it is
+   accepted.
+3. Wait for the keyboard to idle. `doom_begin` → `doom_session_start` →
+   `doom_pack_load()` → the call above.
+
+So an attacker who can open the raw HID interface gets **arbitrary code execution with
+full firmware privilege**, which is precisely the outcome FW-2 exists to prevent. It
+applies to shipped keyboards: `release.yml` builds the `POLYKYBD_DOOM_PACK` flavour, and
+the `.plyx` is a published release asset.
+
+**Fix (recommended): verify the pack with the existing Ed25519 machinery, at LOAD time.**
+The verifier and `FW_SIGNING_PUBKEY` are already compiled in (`base/crypto/`,
+`base/fw_pubkey.h`). Put the 64-byte signature in the PlyX header (a `PACK_VERSION` bump)
+and check it in `doom_pack_load()` immediately before computing `init`. Verify at *load*,
+not at COMMIT: flash can be rewritten afterwards, so a "was validated once" flag is not a
+control. The cost is one SHA-512 over ~211 KB at session start — the loader already walks
+the whole image for the CRC there, so it is the same order of work, once per game session,
+not per frame. `release.yml` signs the `.plyx` alongside the `.bin`.
+
+**Interim mitigation** if that is not done promptly: build releases without
+`POLYKYBD_DOOM_PACK`. That removes the feature, so it is a stopgap, not a fix.
+
+⚠️ **The same "flashed over HID, authenticated by CRC only" property applies to the WAD
+(`.whx`) and the font-pack bundles (`.plyf`)** — but those are *data*, so the exposure is
+parser bugs in `fontpack.c` / the WAD reader rather than direct code execution. Lower
+severity, same root cause: the resource-flash path has no notion of authenticity.
+
 
 ### HIL-8 — the station user held blanket passwordless root
 
