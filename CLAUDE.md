@@ -437,8 +437,9 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   The touch UI has a **Measure Perf** button (`run_perf` → `PerfRunner`) that
   takes the same selected firmware pair as **Run Tests**.
 - **CI: opt-in, report-only.** The `Performance measurement (split72)` job in
-  qmk's `qmk-test.yml` runs on the `perf` PR label, `[perf]` in a commit message,
-  or a manual `workflow_dispatch`. It posts a markdown table to the job summary +
+  qmk's `qmk-test.yml` runs on the `hil-perf` PR label (⚠️ renamed from `perf`
+  2026-08-29 — the bare `perf`/`[perf]` names now fire nothing), `[hil-perf]` in a
+  commit message, or a manual `workflow_dispatch`. It posts a markdown table to the job summary +
   a PR comment and uploads `perf-report.json`. It **never fails on a regression** —
   these are wall-clock numbers on shared hardware and a flaky red check is one
   people learn to ignore; only a *measurement* failure (wrong build, dead device)
