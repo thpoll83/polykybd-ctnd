@@ -161,6 +161,19 @@ FONTPACK_CHUNK_SIZE         = 56    # payload bytes/chunk (matches firmware FW_U
 # FONTPACK_BUNDLE_DOOMWAD/_DOOMPACK and PolyKybdHost hid_fontpack.py.
 DOOMWAD_BUNDLE_ID           = 0x7F
 DOOMPACK_BUNDLE_ID          = 0x7E
+# BEGIN erase-poll cap for a doom slot. The engine-pack slot is ~210 KB / 52
+# sectors, and the deferred erase is paced by these 0.3 s re-polls (the firmware
+# advances it in housekeeping between BEGIN re-polls), so the erase spans ~17
+# polls of wall-clock and readiness (`.`) lags the `erase complete` printf by a
+# further pass or two. On the FW-9 set the doom slot is flashed THREE times in a
+# row (valid / tampered / unsigned), and the 3rd erase drifted past the old
+# 20-attempt (~6 s) cap on qmk#249 — the erase completed but BEGIN still reported
+# `~` at attempt 20, so the test failed at "FONTPACK_BEGIN never became ready"
+# even though nothing was wrong. 60 attempts (~18 s) gives ~3x headroom over the
+# observed ~20 without masking a real hang (a genuinely stuck erase never logs
+# `erase complete` and still fails, just later). Only the doom slot needs this;
+# the font-pack wipe flashes a 32-byte empty pack (1-sector erase) and keeps 20.
+DOOM_BEGIN_ERASE_ATTEMPTS   = 60
 
 # VIA "reset dynamic keymap" report (bare command id, NOT a 'P' command — see
 # test_runner.VIA_DYNAMIC_KEYMAP_RESET). data[0]==0x06 -> legacy_command_kb ->
@@ -2203,7 +2216,7 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
     ready = False
-    for attempt in range(20):
+    for attempt in range(DOOM_BEGIN_ERASE_ATTEMPTS):
         reply = raw.send(begin, timeout_ms=15000)
         if reply and len(reply) >= 3 and reply[2] == ord('.'):
             ready = True
