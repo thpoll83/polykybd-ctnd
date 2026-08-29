@@ -174,6 +174,16 @@ DOOMPACK_BUNDLE_ID          = 0x7E
 # `erase complete` and still fails, just later). Only the doom slot needs this;
 # the font-pack wipe flashes a 32-byte empty pack (1-sector erase) and keeps 20.
 DOOM_BEGIN_ERASE_ATTEMPTS   = 60
+# ...but that big budget is ONLY for the erase-busy (`~`) path, which is cheap
+# (~0.3 s/poll). A NO-reply is the dead/hung-keyboard signal, and it is
+# EXPENSIVE: raw.send() already retries attempts×timeout_ms internally (3×15 s
+# here) before returning None, so one no-reply outer iteration is ~45 s. Sharing
+# the 60-cap across both would let a dead board stall ONE flash for ~45 min
+# before failing (was ~15 min at 20) — 3x slower HIL diagnostics (Greptile,
+# ctnd#81). So consecutive no-replies get their own tight cap and fail fast
+# (~2 min); a `~` in between means the erase is progressing, so it resets the
+# counter — an occasional dropped reply on a healthy-but-flaky link is tolerated.
+DOOM_BEGIN_NO_REPLY_MAX     = 3
 
 # VIA "reset dynamic keymap" report (bare command id, NOT a 'P' command — see
 # test_runner.VIA_DYNAMIC_KEYMAP_RESET). data[0]==0x06 -> legacy_command_kb ->
@@ -2216,6 +2226,7 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
     ready = False
+    no_reply = 0
     for attempt in range(DOOM_BEGIN_ERASE_ATTEMPTS):
         reply = raw.send(begin, timeout_ms=15000)
         if reply and len(reply) >= 3 and reply[2] == ord('.'):
@@ -2223,11 +2234,19 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
             break
         if reply and len(reply) >= 3 and reply[2] == ord('~'):
             log(f"  BEGIN: erasing doom slot 0x{bundle_id:02x}... (attempt {attempt + 1})")
+            no_reply = 0        # erase is progressing — not a dead board
             time.sleep(0.3)
             continue
         if reply and len(reply) >= 3 and reply[2] == ord('!'):
             log(f"  BEGIN NACK for pseudo bundle 0x{bundle_id:02x} — firmware without the doom slots?")
             return reply
+        # No/short reply: the board may be dead. Each of these already burned
+        # ~attempts×timeout_ms inside raw.send, so fail fast on a run of them
+        # instead of spending the whole (long) erase budget here.
+        no_reply += 1
+        if no_reply >= DOOM_BEGIN_NO_REPLY_MAX:
+            log(f"  BEGIN: no reply {no_reply}x in a row (last {reply!r}) — giving up (keyboard dead?)")
+            break
         log(f"  BEGIN: no/short reply {reply!r} (attempt {attempt + 1}) — retrying")
         time.sleep(0.3)
     if not ready:
