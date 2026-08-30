@@ -123,15 +123,28 @@ change. **`qmk-test.yml` and `release.yml` are ours and do still interpolate** �
 their values are build outputs and `env:` constants rather than user text, so they
 are not injection, but that has not been audited line by line.
 
-⚠️ **Write a check like this so a POSITIVE CONTROL proves it fires.** The first
-version of this one was an `awk` range using `\s`, which **mawk does not support** —
-it reported "clean" against the known-vulnerable pre-fix file, i.e. it was
-fail-open, the exact shape this project's CLAUDE.md files warn about repeatedly.
-Always run it against a file you know is bad *and* one you know is good before
-believing either answer:
+It covers **both** `run:` forms — the block scalar (`run: |`, `run: >-`) and the
+inline `run: echo …`, where the command is on the `run:` line itself.
+
+⚠️ **Write a check like this so a POSITIVE CONTROL proves it fires — this one has
+now failed OPEN twice, in two different ways, and neither was found by reading
+it.** Both are the shape this project's CLAUDE.md files warn about repeatedly:
+1. The first version was an `awk` range using `\s`, which **mawk does not
+   support**, so it reported "clean" against a file with two known injections.
+2. The rewrite matched only `run:` followed by `|` or `>`, so an **inline**
+   `run: echo '${{ github.event.pull_request.title }}'` was never inspected at
+   all (caught by Greptile in review, 2026-08-30). Our workflows have 14 inline
+   `run:` lines, so the blind spot was latent rather than theoretical.
+
+So keep a fixture with **one of each form** and run it every time the pattern is
+touched — a checker verified against only the case you had in mind will keep
+passing while missing the case you didn't:
 ```bash
 git show <pre-fix-sha>:.github/workflows/<f>.yml > /tmp/pre.yml
 python3 "$S" /tmp/pre.yml    # MUST report hits, or the checker is broken
+printf 'jobs:\n a:\n  steps:\n   - run: echo "${{ github.event.pull_request.title }}"\n' \
+  > /tmp/inline.yml
+python3 "$S" /tmp/inline.yml # MUST report a hit -- the inline form
 ```
 
 **Record as inert** otherwise. ⚠️ **Never patch a vendored tree in place** —

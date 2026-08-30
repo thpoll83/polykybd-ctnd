@@ -16,28 +16,45 @@ line numbers already gone -- which is the thing a reviewer needs.
 import re
 import sys
 
-RUN = re.compile(r"^(\s*)-?\s*run:\s*[|>]")   # `run: |`, `run: >-`, `- run: |`
+# `run:` in every form -- block scalar (`run: |`, `run: >-`) AND inline
+# (`run: echo ...`), with or without a leading `- `. Group 1 is the indent,
+# group 2 the rest of the line, which for the inline form IS the command.
+RUN = re.compile(r"^(\s*)(?:-\s+)?run:(.*)$")
 KEY = re.compile(r"^(\s*)(?:-\s+)?[A-Za-z_][\w-]*:")  # next key -- or `- name:` list item
 EXPR = re.compile(r"\$\{\{")
 
 
 def offenders(path):
-    """Yield (lineno, text) for every ${{ }} inside a run: block scalar."""
+    """Yield (lineno, text) for every ${{ }} in a run: command, block or inline.
+
+    An inline `run: echo ...` carries the command on the `run:` line itself, so
+    that line is checked too -- a checker that only entered block scalars would
+    report a genuinely injectable inline command as clean, which is the
+    fail-open direction and the whole thing this tool exists to avoid. Lines
+    indented under either form are scanned the same way, which also covers a
+    plain scalar continued across lines.
+    """
     out = []
     indent = None                      # indent of the `run:` key, or None outside
+
+    def open_run(n, line):
+        """Enter a run: at this line if it starts one; check it, return its indent."""
+        m = RUN.match(line)
+        if not m:
+            return None
+        if EXPR.search(m.group(2)):    # inline command on the run: line itself
+            out.append((n, line.rstrip()))
+        return len(m.group(1))
+
     for n, line in enumerate(open(path, encoding="utf-8"), 1):
         if indent is None:
-            m = RUN.match(line)
-            if m:
-                indent = len(m.group(1))
+            indent = open_run(n, line)
             continue
         if line.strip():               # blank lines never close a block scalar
             m = KEY.match(line)
             if m and len(m.group(1)) <= indent:
-                indent = None          # dedented to a sibling key: block is over
-                m2 = RUN.match(line)   # ...which may itself be another run:
-                if m2:
-                    indent = len(m2.group(1))
+                # dedented to a sibling key -- which may itself be another run:
+                indent = open_run(n, line)
                 continue
             if EXPR.search(line):
                 out.append((n, line.rstrip()))
