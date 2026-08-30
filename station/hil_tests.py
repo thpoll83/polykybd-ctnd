@@ -2326,6 +2326,36 @@ def test_doompack_commit_magic_gate(raw: RawHID, log: Callable[[str], None]) -> 
 # unit-tested. Without --plyx-valid these SKIP (the TIER_DOOM gate).
 DOOM_SIG_SIZE = 64  # doom_pack_abi.h DOOM_PACK_SIG_SIZE — the trailing Ed25519 sig
 
+# --- FW-9 follow-up: narrowing the intermittent post-doom slave wedge ---------
+# On a doom-slot reflash AFTER the doom engine has run, the SLAVE half sometimes
+# wedges: the master erases its 52 sectors, then FONTPACK_BEGIN reports the slave
+# not ready (slave_ack=0xe4 = SYNC_GIVEUP) and the flash fails with the board dead.
+# It is a coin-flip, and the qmk-side capture proved the slave never runs doom
+# itself (its core1 is the plain RLE service throughout) — so the doom linkage is
+# a CROSS-LINK effect of the master's IDDQD session (the doom-mirror RLE stream to
+# the slave / the ~150 ms per-frame busy window), not doom on the slave.
+#
+# This soak isolates ONE variable: it flashes the SAME ~211 KB engine pack to the
+# doom slot repeatedly with NO IDDQD run between the flashes — the "repeated big
+# pack flashes ALONE" arm. It runs BEFORE the three IDDQD load tests, so none of
+# its flashes is preceded by a doom run. Paired with those tests (the "flash +
+# run" arm), the two outcomes discriminate the trigger:
+#   * this soak WEDGES  -> repeated erases alone suffice; the doom mirror/run is
+#     NOT required, so the fault is the fw_staging erase halt/restart vs the
+#     slave's plain RLE-service core1 (look there, independent of doom).
+#   * this soak is CLEAN but the IDDQD tests wedge -> the doom RUN (IDDQD + the
+#     mirror stream to the slave) is what primes it; look at the doom-mirror path.
+# It flashes MORE times than the IDDQD arm and drops the run, so if flashes alone
+# could trigger it, this arm should trigger it MORE readily, not less.
+#
+# ⚠️ COST: each full ~211 KB doom-slot flash is ~5 min of bridged chunk streaming
+# on the rig (measured run #923: 3773 chunks, and slow even on the FIRST flash
+# before any doom run — the stream cost is the bridged-flash baseline, not a
+# post-doom effect). So this soak alone adds ~N×5 min to the doom job. 3 keeps it
+# ~15 min for a P(catch)≈0.66 at a per-flash wedge rate ~0.3; raise it for more
+# confidence at ~5 min/step if the rig has the time.
+DOOM_FLASH_SOAK_REPEATS = 3
+
 _DOOM_VALID_PLYX: "bytes | None" = None
 
 
@@ -2409,6 +2439,44 @@ def _doom_idle_verdict(raw: RawHID, log: Callable[[str], None], pack: bytes):
     finally:
         raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
         raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, original]))
+
+
+def test_doompack_flash_only_soak(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Flash the valid engine pack to the doom slot DOOM_FLASH_SOAK_REPEATS times
+    back-to-back with NO IDDQD run in between — the "repeated big pack flashes
+    alone" arm of the post-doom wedge narrowing (see DOOM_FLASH_SOAK_REPEATS).
+
+    Each flash exercises the same 52-sector deferred erase + ~211 KB stream +
+    COMMIT that the IDDQD tests do, and bridges the slave (halting/restarting its
+    core1) — but the slave's core1 is never driven by the doom-mirror RLE stream,
+    because no IDDQD idle is engaged. A wedge here (a BEGIN that never becomes
+    ready / a run of no-replies, i.e. slave_ack=0xe4 on the master console) is the
+    finding that repeated erases alone suffice; a clean run across every repeat
+    points the finger at the doom RUN instead. Runs BEFORE the three IDDQD tests
+    so none of its flashes is post-doom-run. Leaves a valid loadable pack in the
+    slot (the accept test re-flashes it anyway)."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    ok = 0
+    for i in range(DOOM_FLASH_SOAK_REPEATS):
+        log(f"  flash {i + 1}/{DOOM_FLASH_SOAK_REPEATS} (no IDDQD run before it)")
+        reply = _doom_slot_flash(raw, log, _DOOM_VALID_PLYX, DOOMPACK_BUNDLE_ID)
+        if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+            log(f"  FAIL: doom-slot flash {i + 1}/{DOOM_FLASH_SOAK_REPEATS} did not "
+                f"COMMIT ({reply!r}) — the slave wedged on a reflash with NO doom "
+                "run before it, so repeated erases ALONE trigger the wedge")
+            return False
+        # A live master answers GET_ID; a wedged split link does not stop the
+        # master answering HID, so this only rules out a full master death — the
+        # real wedge tell is the BEGIN-never-ready above and slave_ack on console.
+        if not _master_alive(raw, log):
+            log(f"  FAIL: master unresponsive after flash {i + 1}/{DOOM_FLASH_SOAK_REPEATS}")
+            return False
+        ok += 1
+    log(f"  PASS: {ok}/{DOOM_FLASH_SOAK_REPEATS} back-to-back doom-slot flashes with no "
+        "IDDQD run — repeated erases alone did NOT wedge the slave this run")
+    return True
 
 
 def test_doompack_signed_load(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -2741,6 +2809,15 @@ TESTS = [
      "min_protocol": 6},
     {"name": "doom engine-pack slot magic gate", "fn": test_doompack_commit_magic_gate,
      "min_protocol": 6},
+    # FW-9 follow-up: narrow the intermittent post-doom slave wedge. This soak
+    # flashes the doom slot DOOM_FLASH_SOAK_REPEATS× back-to-back with NO IDDQD run — the
+    # "repeated erases alone" arm. It runs BEFORE the three IDDQD tests (so none of
+    # its flashes is post-doom-run); a wedge here vs a clean-here-but-wedge-there
+    # discriminates whether the doom RUN is required to prime the fault. TIER_DOOM
+    # (needs the signed --plyx-valid pack and is slow, same as the load tests).
+    {"name": "doom engine-pack flash-only soak (no IDDQD run)",
+     "fn": test_doompack_flash_only_soak, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
     # FW-9: the LOAD-time Ed25519 gate on the executable engine pack. TIER_DOOM
     # (its own opt-in): they flash a ~230 KB signed .plyx and drive the IDDQD
     # screensaver, and need a signed pack CI builds only on the `hil-doom` label. The
