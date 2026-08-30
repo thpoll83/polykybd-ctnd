@@ -2347,7 +2347,14 @@ DOOM_SIG_SIZE = 64  # doom_pack_abi.h DOOM_PACK_SIG_SIZE — the trailing Ed2551
 #     mirror stream to the slave) is what primes it; look at the doom-mirror path.
 # It flashes MORE times than the IDDQD arm and drops the run, so if flashes alone
 # could trigger it, this arm should trigger it MORE readily, not less.
-DOOM_FLASH_SOAK_REPEATS = 5
+#
+# ⚠️ COST: each full ~211 KB doom-slot flash is ~5 min of bridged chunk streaming
+# on the rig (measured run #923: 3773 chunks, and slow even on the FIRST flash
+# before any doom run — the stream cost is the bridged-flash baseline, not a
+# post-doom effect). So this soak alone adds ~N×5 min to the doom job. 3 keeps it
+# ~15 min for a P(catch)≈0.66 at a per-flash wedge rate ~0.3; raise it for more
+# confidence at ~5 min/step if the rig has the time.
+DOOM_FLASH_SOAK_REPEATS = 3
 
 _DOOM_VALID_PLYX: "bytes | None" = None
 
