@@ -2810,7 +2810,7 @@ TESTS = [
     {"name": "doom engine-pack slot magic gate", "fn": test_doompack_commit_magic_gate,
      "min_protocol": 6},
     # FW-9 follow-up: narrow the intermittent post-doom slave wedge. This soak
-    # flashes the doom slot 5x back-to-back with NO IDDQD run between — the
+    # flashes the doom slot DOOM_FLASH_SOAK_REPEATS× back-to-back with NO IDDQD run — the
     # "repeated erases alone" arm. It runs BEFORE the three IDDQD tests (so none of
     # its flashes is post-doom-run); a wedge here vs a clean-here-but-wedge-there
     # discriminates whether the doom RUN is required to prime the fault. TIER_DOOM
