@@ -2,10 +2,17 @@
 
 Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` host app,
 `HIL-*` rig/CI). It lives here because most of the still-open items are rig items, but it
-covers all four repos — check the **Where** column before going looking for code.
+covers every repo in the project — check the **Where** column before going looking for code.
 
 Status verified against: `polykybd-ctnd` @ `0d1463a`, `qmk_firmware` @ `0.11.0`,
-`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. **2026-08-06**: HOST-3 added alongside
+`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. **2026-08-29**: an external scan
+(Aikido) raised five findings — two real and fixed (HIL-10, HOST-4), three inert in this
+fork and recorded under *"Checked and NOT vulnerable"* so the next scan does not re-open
+them. That scan also reached a **fifth** repo the ID scheme did not cover
+(`Adafruit-GFX-Library`); tracked under `SCAN-1` rather than a new prefix, since the
+finding was in an accidentally-committed build directory rather than in our code.
+
+**2026-08-06**: HOST-3 added alongside
 the telemetry feature — a single new surface reviewed on its own, not a fresh sweep of the
 tracker, so the review scope below still stands. Last full review **2026-08-05 (evening)** —
 a *fresh* evaluation of the surfaces FW-2 changed, plus one never examined before. It
@@ -49,6 +56,9 @@ signing the firmware image alone was not enough.**
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
 | HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | ✅ fixed (rig) |
 | HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 (1) fixed; (2) deferred by decision |
+| HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk | ✅ fixed (PR #251) |
+| HOST-4 | `Pillow` unpinned — CVE-2026-54058 reachable via overlay image open-by-filename | host | ✅ fixed (PR #201) |
+| SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
 
 ---
 
@@ -311,6 +321,70 @@ reachable by anyone who can talk HID, deliberately: a cancel can only ever *deny
 grants an attacker nothing they did not already have (they can simply not flash). The
 worst case is refusing a legitimate user's own in-progress confirmation — an annoyance,
 not an escalation. Accepting remains a keypress on the matrix and must stay that way.
+
+### The 2026-08-29 external scan: three findings that are inert in this fork
+
+An external scanner (Aikido) reported five findings across the repos. **Two were real and
+fixed** (see below); the other three are recorded here because each one is a true statement
+about the *file* and a false statement about the *shipped artifact*, so a path-based
+scanner will raise all three again on every run.
+
+| Reported | Where | Why it is inert |
+|---|---|---|
+| Template-expression injection — `qmk find -km ${{ inputs.keymap }}` | `qmk_firmware/.github/workflows/ci_build_major_branch_keymap.yml` | Byte-identical to upstream QMK; `workflow_call`-only; its sole caller is gated `if: github.repository == 'qmk/qmk_firmware'`, permanently false in a fork |
+| `eval("0x" + agl_values[g])` on parsed input | `Adafruit-GFX-Library/fontconvert/cmake-build-pinned/.../src/tools/glnames.py` | FreeType's own build script, inside a **build directory committed by accident**. The directory is untracked as of Adafruit#11, so the path no longer exists in the repo |
+| Use-after-free (`txt_window.c:561`) and `system()` (`txt_window.c:557`, `txt_fileselect.c:570`) | `qmk_firmware/keyboards/polykybd/doom/engine/textscreen/` | **No `textscreen/*.c` is in any `SRC` list** — not one translation unit from that directory enters the RP2040 firmware build, in either the monolith or the pack flavour |
+
+Verification for each, so it is re-checkable rather than re-argued:
+
+```bash
+# 1. is the workflow ours, or stock upstream?
+curl -sSL https://raw.githubusercontent.com/qmk/qmk_firmware/master/.github/workflows/ci_build_major_branch_keymap.yml \
+  | diff - qmk_firmware/.github/workflows/ci_build_major_branch_keymap.yml   # empty => stock
+grep -rn "ci_build_major_branch_keymap" qmk_firmware/.github/workflows/      # find the caller
+grep -n "if: github.repository" qmk_firmware/.github/workflows/ci_build_major_branch.yml
+
+# 3. is any textscreen source compiled?
+grep -rn "textscreen" qmk_firmware/keyboards/polykybd/*.mk qmk_firmware/keyboards/polykybd/rules.mk
+```
+
+⚠️ **The doom finding must NOT be "fixed" in place.** `doom/engine/` is a verbatim
+upstream rp2040-doom snapshot, refetchable by `mirror_rp2040_doom.py`; a local patch is
+silently reverted by the next mirror and makes the tree undiffable against upstream in the
+meantime. Its disposition lives with the code, in
+`qmk_firmware/keyboards/polykybd/doom/engine/PROVENANCE.md` § *"Static analysis: what is
+compiled, and what only looks alarming"* — that file is the thing to update if the build
+membership ever changes.
+
+⚠️ **Do not repeat the "`#ifndef _WIN32` means desktop-only" argument** for the doom
+findings. It is wrong and it was written down once before being caught: an RP2040 build is
+not `_WIN32` either, so the preprocessor takes exactly that branch. **The only reason those
+findings are inert is build membership**, and if a `textscreen` file is ever added to a
+`SRC` list they become live immediately.
+
+### The 2026-08-29 external scan: the two findings that WERE real
+
+Recorded because neither was where the report was looking, which is the reusable part.
+
+- **Shell injection in `bump-version.yml`** (`qmk_firmware`, fixed in #251). It
+  interpolated `${{ toJson(github.event.pull_request.labels.*.name) }}` straight into a
+  `run:` body, and a PR label is attacker-controllable text — a label containing a quote
+  and a `;` executes as shell in the workflow. **The scanner did not flag this**; it
+  flagged the inherited upstream workflow above instead. Every `${{ }}` in that file now
+  goes through `env:` and is read as `"$VAR"` / `os.environ[...]`, so nothing interpolates
+  into a shell or Python body.
+- **`Pillow` unpinned** (`PolyKybdHost`, fixed in #201) — CVE-2026-54058, an
+  out-of-bounds read decoding a McIdas AREA image opened *by filename*, which is exactly
+  what `im_converter.open()` does with a user-chosen overlay image. ⚠️ The fix had to be a
+  version **floor** (`Pillow>=12.3.0`), not a comment: an unpinned requirement is satisfied
+  by whatever is already installed, so pip will never upgrade an existing 10.x.
+
+### If a scan lands again, the disposition goes here — even when nothing changes
+
+The three inert findings above cost real verification and produced no artifact at the time;
+this section is that artifact. A dismissed finding with no written disposition is
+re-litigated in full by the next scan, at the same cost. `.claude/skills/verify-security-finding/`
+carries the procedure.
 
 ---
 
