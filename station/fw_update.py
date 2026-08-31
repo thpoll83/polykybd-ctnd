@@ -41,6 +41,7 @@ HID_POLYKYBD          = 0x50   # ord('P')
 CMD_FW_UP_BEGIN       = 0x40
 CMD_FW_UP_CHUNK       = 0x41
 CMD_FW_UP_COMMIT      = 0x42
+CMD_FW_UP_APPLY       = 0x44   # install the staged image on both halves and reboot
 CMD_FW_UP_GET_VERSION = 0x43
 CMD_FW_UP_SIGNATURE   = 0x45   # FW-2: 64-byte Ed25519 signature, two 32-byte halves
 
@@ -156,11 +157,18 @@ def _get_version(link: _FwLink, log: Callable[[str], None]) -> dict | None:
 
 
 def stage_and_verify(bin_path: str, log: Callable[[str], None],
-                     vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID) -> bool:
+                     vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
+                     require_signed: bool = False) -> bool:
     """Run BEGIN -> CHUNK* -> COMMIT for ``bin_path`` against the live keyboard.
 
     Returns True iff COMMIT ACKs (the keyboard's accumulated CRC matched the
     image we streamed). Non-destructive: no APPLY, no reboot.
+
+    ``require_signed`` refuses to call an unsigned refusal a pass. The default
+    tolerates it because CI builds carry no signature and the staging path is
+    fully exercised by the time COMMIT answers; the apply test sets it, because
+    an image the keyboard will not accept is one it will never install, and
+    reporting that as success would leave the apply step testing nothing.
     """
     try:
         with open(bin_path, "rb") as f:
@@ -355,6 +363,12 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
         # — BEGIN, every CHUNK, the resync/rewind path and the split link — has
         # already happened by the time COMMIT is answered.
         if not signed:
+            if require_signed:
+                log(f"  FAIL: COMMIT refused (status {reply[2]:#04x}) — this image is "
+                    "UNSIGNED and the keyboard enforces FW_REQUIRE_SIGNATURE, so it can "
+                    "never be applied. The apply test needs an image signed with an "
+                    "ephemeral key (the build-doom pattern), not the production key.")
+                return False
             log(f"  COMMIT refused (status {reply[2]:#04x}) — expected for an UNSIGNED "
                 "image on a firmware built with FW_REQUIRE_SIGNATURE. Staging path "
                 "itself is verified: all chunks delivered and the keyboard answered.")
@@ -363,5 +377,41 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
         log(f"  FAIL: FW_UP_COMMIT NACK (status {reply[2]:#04x}) — a SIGNED image was "
             "refused, so this is a real staged-CRC or signature-verification failure")
         return False
+    finally:
+        link.close()
+
+
+def apply_staged(log: Callable[[str], None],
+                 vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID) -> bool:
+    """Send FW_UP_APPLY (cmd 0x44) — install the staged image and reboot.
+
+    ⚠️ Destructive by design, and the only rig check that overwrites the running
+    firmware. It is safe here ONLY because the caller has established that the
+    staged image is byte-identical to the one the master is already running (see
+    :func:`station.uf2.uf2_to_bin` and the guard in the runner). Applying any
+    other image would reboot the master onto VBUS master-detection, and both
+    halves would enumerate as master until the next UF2 flash.
+
+    Returns True if the keyboard acknowledged the request. It reboots
+    immediately afterwards, so the *outcome* is not knowable from the reply —
+    that is what the re-enumeration check after this is for. A missing reply is
+    therefore NOT a failure: the board may simply have reset before answering.
+    """
+    link = _FwLink(vid, pid)
+    if not link.open(timeout_s=10.0):
+        log("  FAIL: FW_UP_APPLY — the keyboard is not open")
+        return False
+    try:
+        reply = link.xfer(bytes([HID_POLYKYBD, CMD_FW_UP_APPLY]), timeout_ms=3000)
+        if reply is None:
+            log("  FW_UP_APPLY sent, no reply — expected, the board reboots on the "
+                "spot. The re-enumeration check decides this one.")
+            return True
+        if len(reply) >= 3 and reply[2] == NACK:
+            log("  FAIL: FW_UP_APPLY NACKed — no valid staged image, or this build "
+                "has FW_UP_INAPP_APPLY=no")
+            return False
+        log("  FW_UP_APPLY acknowledged — the keyboard is installing and rebooting")
+        return True
     finally:
         link.close()
