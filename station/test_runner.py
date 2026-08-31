@@ -342,7 +342,7 @@ class TestRunner:
 
         want = caps_from_image(img) or {}
         self.log(f"[runner] firmware apply round-trip: staging {len(img)} B "
-                 f"({want.get('version', 'unknown version')}) and APPLYING it")
+                 f"({want.get('fw', 'unknown version')}) and APPLYING it")
 
         try:
             if not stage_and_verify(apply_bin, self.log, require_signed=True):
@@ -366,11 +366,18 @@ class TestRunner:
                     "neither the old one nor the new one. Recover with BOOTSEL+UF2, "
                     "then read the banner's 'apply:' lines -- the in-flash progress "
                     "log survives the recovery and names the sector it stopped at")
-            got = caps.get("version")
-            if want.get("version") and got and got != want["version"]:
+            # ⚠️ The key is "fw" -- both producers (hil_tests.parse_device_caps and
+            # fw_update.caps_from_image) use it, and this read said "version" until
+            # a reviewer caught it. That silently disabled the one check that
+            # catches the board coming back on the OLD image, which is exactly the
+            # partial-apply shape this whole test exists for. Pinned by
+            # CapsKeyContractTest so a rename on either side fails a test instead.
+            got = caps.get("fw")
+            if want.get("fw") and got and got != want["fw"]:
                 raise RuntimeError(
                     f"the keyboard came back as {got}, but the applied image is "
-                    f"{want['version']} -- the copy did not take")
+                    f"{want['fw']} -- it is running the OLD firmware, so the copy "
+                    "did not take even though the board re-enumerated")
 
             # The firmware verifies its own copy against the staged source and says
             # so in the boot banner. That is a stronger statement than "it booted":

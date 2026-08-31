@@ -8,7 +8,28 @@ a *plausible but wrong* image would defeat that guard, so the cases below are
 mostly about refusing bad input rather than accepting good input.
 """
 import struct
+import sys
+import types
 import unittest
+
+# The station package imports hidapi and RPi.GPIO at module load; neither exists
+# (nor is needed) off the rig. Stub them before importing anything from station.
+# Same shim the other offline suites use.
+if "hid" not in sys.modules:  # pragma: no cover - environment shim
+    _hid = types.ModuleType("hid")
+    _hid.enumerate = lambda *a, **k: []
+    _hid.Device = object
+    sys.modules["hid"] = _hid
+if "RPi" not in sys.modules:  # pragma: no cover - environment shim
+    _rpi = types.ModuleType("RPi")
+    _gpio = types.ModuleType("RPi.GPIO")
+    for _n in ("BCM", "OUT", "IN", "HIGH", "LOW"):
+        setattr(_gpio, _n, 0)
+    for _n in ("setmode", "setup", "output", "cleanup", "setwarnings"):
+        setattr(_gpio, _n, lambda *a, **k: None)
+    _rpi.GPIO = _gpio
+    sys.modules["RPi"] = _rpi
+    sys.modules["RPi.GPIO"] = _gpio
 
 from station.uf2 import (uf2_to_bin, Uf2Error, UF2_MAGIC_START0, UF2_MAGIC_START1,
                          UF2_MAGIC_END, UF2_FLAG_NOT_MAIN_FLASH, XIP_BASE)
@@ -129,3 +150,38 @@ class ApplyImageGuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapsKeyContractTest(unittest.TestCase):
+    """The two capability producers must agree on their key names.
+
+    `firmware_apply_roundtrip` compares what the applied image claims against
+    what the rebooted keyboard reports, and those dicts come from two different
+    modules. Reading a key only one of them uses is not a type error and not a
+    crash — the comparison just never fires, and the test reports PASS without
+    checking the thing it exists to check. That shipped once (reading "version"
+    where both produce "fw"), so the agreement is pinned here rather than left
+    to whoever edits either regex next.
+    """
+    def test_both_producers_use_the_same_version_key(self):
+        from station.hil_tests import parse_device_caps
+        from station.fw_update import caps_from_image
+        device = parse_device_caps("Split72 0.15.5 P12 HW0x0320")
+        image = caps_from_image(b"junk\x00Split72 0.15.5 P12 HW0x0320\x00more")
+        self.assertIn("fw", device, "parse_device_caps stopped reporting 'fw'")
+        self.assertIn("fw", image, "caps_from_image stopped reporting 'fw'")
+        self.assertEqual(device["fw"], image["fw"])
+        # The comparison in the runner is keyed on the intersection; if one side
+        # renames its key the intersection loses it and this fails.
+        self.assertIn("fw", set(device) & set(image))
+
+    def test_the_runner_reads_a_key_both_producers_actually_provide(self):
+        import inspect
+        from station import test_runner
+        from station.hil_tests import parse_device_caps
+        src = inspect.getsource(test_runner.TestRunner.firmware_apply_roundtrip)
+        keys = set(parse_device_caps("Split72 0.15.5 P12 HW0x0320"))
+        self.assertIn('caps.get("fw")', src)
+        self.assertTrue(keys, "parse_device_caps returned nothing to key on")
+        self.assertNotIn('caps.get("version")', src,
+                         "the apply round-trip is reading a key no producer emits")
