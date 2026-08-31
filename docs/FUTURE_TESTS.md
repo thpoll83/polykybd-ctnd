@@ -220,3 +220,53 @@ unattended rig now has a test. Covered:
   `Failed to sync … for transaction X` and `Bridge sync retry`. Do not design a check around
   those lines; the `Split link:` summary is deliberately ungated, which is why the link health
   test reads the counter and not the failures.
+
+## Automating firmware-apply debugging on the rig
+
+**Asked for 2026-08-31** (user), after the qmk#258 HID-apply brick investigation cost a
+long series of manual hardware rounds: *"in the future I want to do these kind of debugging
+sessions via the rig in an automated way. It is really time-consuming for me."*
+
+The manual loop that session ran, six times over, was always the same five steps:
+
+1. build a probe image with extra console markers,
+2. BOOTSEL both halves with the probe `.uf2` so the board *runs* the instrumented code,
+3. HID-flash the matching `.bin` to exercise the apply path,
+4. capture the console with `tools/poly_console.py` and read how far the markers got,
+5. interpret, form the next single-variable hypothesis, repeat.
+
+⚠️ **The rig already owns every piece of that except the orchestration.** `FlashController`
+does BOOTSEL + UF2 over the GPIO pins; `RawHID` speaks the same `FW_UP_BEGIN/CHUNK/
+SIGNATURE/COMMIT/APPLY` protocol PolyKybdHost uses; `station/console_log.py`'s `ConsoleTap`
+already reassembles report-sized console fragments into lines; and `FlashController.reset()`
+already power-cycles the master for `reboot_persistence`. So this is mostly wiring, not new
+infrastructure.
+
+- [ ] **`test_fw_update_apply_roundtrip`** — the check qmk#258 showed is missing entirely.
+  The existing firmware-update test **stages** an image and never applies it, so nothing on
+  the rig has ever exercised `fw_staging_do_apply()`. Flash a known-good image, HID-update it
+  with a second image, then assert the board **re-enumerates and answers `GET_ID`** with the
+  expected version. Runner-level (needs `FlashController`), `TIER_EXTENDED` (it is slow and
+  it reboots the board).
+- [ ] **`station/fw_probe_runner.py`** — the general version: given a `(uf2, bin)` pair, do
+  BOOTSEL → HID-flash → capture the console through the apply → return the captured marker
+  lines (and whether the device came back). That turns "build a probe, ask the user to flash
+  it, wait, read the log" into one command a session can run unattended, which is the actual
+  ask above.
+
+⚠️ **The blocker to solve first: an UNSIGNED image needs a finger.** Under
+`FW_REQUIRE_SIGNATURE` the firmware answers `COMMIT` with `?` and puts an A/ACCEPT · R/REJECT
+prompt on the keycaps, waiting up to 60 s for a **physical keypress** — which the rig cannot
+produce (GPIO key-matrix injection is still an open infra item above). The host may *cancel*
+(`COMMIT` with `'x'`) but never accept, by design: an acceptance sent over HID would be
+forgeable by exactly the attacker signing defends against. So an automated apply test must
+flash a **signed** image. The pattern already exists in `qmk-test.yml`'s `build-doom` job,
+which generates a throwaway Ed25519 keypair, rewrites `base/fw_pubkey.h`, and signs the test
+artifact with the ephemeral seed — the production `FW_SIGNING_KEY` never touches a PR run.
+Reuse that; do not try to route around the prompt.
+
+⚠️ **And note what the rig still would not have caught in #258.** It flashes
+`POLYKYBD_HIL=left/right` images that force master/slave at compile time and never exercise
+`USB_VBUS_PIN` detection, so it does not test the image shape users flash. An automated apply
+test is worth having anyway — it would have found the brick on the first push instead of in
+the field — but it is not a substitute for one hardware round on a real, unmodified image.

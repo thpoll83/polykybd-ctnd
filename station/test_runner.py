@@ -7,7 +7,8 @@ from typing import Callable
 from .console_log import TAP, console_sink
 from .flash import FlashController
 from .hid import HIDConsole, RawHID
-from .fw_update import stage_and_verify
+from .fw_update import stage_and_verify, apply_staged, caps_from_image
+from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import parse_device_caps, skip_reason
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
@@ -76,7 +77,8 @@ class TestRunner:
 
     def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
                        bin_path: str = None, extended: bool = False,
-                       doom: bool = False) -> dict:
+                       doom: bool = False,
+                       apply_bin: str = None) -> dict:
         """Flash both halves and run ``tests`` against the master.
 
         ``extended`` opts the run into the slow tier — the animation/idle checks,
@@ -225,6 +227,23 @@ class TestRunner:
                 self.log(f"[test] {'PASS' if fw_ok else 'FAIL'}: "
                          f"firmware update (stage+verify .bin)")
 
+            # Full HID update INCLUDING apply — extended tier, and the only check
+            # that overwrites the running firmware. See firmware_apply_roundtrip.
+            if apply_bin:
+                if not extended:
+                    self.log("[runner] firmware apply round-trip skipped — extended "
+                             "tier only (pass --extended)")
+                    results.append({
+                        "name": "firmware apply round-trip (HID update + reboot)",
+                        "status": "skip",
+                        "reason": "extended suite — re-run with --extended "
+                                  "(or the hil-extended label)"})
+                elif any(r.get("status") == "fail" for r in results):
+                    self.log("[runner] skipping the firmware apply round-trip — the "
+                             "suite already has a failure to diagnose first")
+                else:
+                    results.append(self.firmware_apply_roundtrip(apply_bin, left_uf2))
+
             # Persistence across a power cycle — LAST, because it reboots the
             # master (see reboot_persistence). Skipped when the suite already
             # failed: a rig that is misbehaving should not also be power-cycled,
@@ -261,6 +280,129 @@ class TestRunner:
             raise
         finally:
             self._flash.cleanup()
+
+    def firmware_apply_roundtrip(self, apply_bin: str, left_uf2: str) -> dict:
+        """Stage a SIGNED image over HID, APPLY it, and require the board to come back.
+
+        This is the check that would have caught #258 — a HID update that reported
+        complete success and then locked the master up mid-copy, leaving the running
+        image part-erased and only BOOTSEL+UF2 to recover it. Nothing on the rig
+        could see it: ``stage_and_verify`` deliberately stops at COMMIT, so the
+        applier — the code that actually overwrites the running firmware — had never
+        been executed here at all.
+
+        It is also the shape of bug that no amount of source review finds. The cause
+        was a ``uint8_t`` page buffer whose *link-time address* happened to be
+        unaligned, so an ``STMIA`` HardFaulted the core with PRIMASK set. Nothing
+        changed in the applier's code; a commit elsewhere moved its buffer. That is
+        reachable from **any** change that alters ``.bss``, which is why the only
+        durable guard is executing a real apply on real hardware.
+
+        ⚠️ Two preconditions, both enforced rather than assumed:
+
+        * **The image must be SIGNED.** Since FW-2 the keyboard puts an
+          ACCEPT/REJECT prompt on its own keycaps for an unsigned image, and the rig
+          has no fingers. CI signs the HIL image with an *ephemeral* key (the
+          ``build-doom`` pattern) — never the production key, which belongs to
+          ``release.yml`` alone.
+        * **It must be the image the master is already running.** Applying anything
+          else reboots the master onto VBUS master-detection, and both halves then
+          enumerate as master until the next UF2 flash. The guard compares the
+          candidate against the ``.uf2`` the rig itself flashed, so it cannot be
+          defeated by a filename.
+        """
+        name = "firmware apply round-trip (HID update + reboot)"
+
+        # -- Precondition: this really is the running image. ------------------
+        # Compared against the UF2 the rig flashed, not its name. The UF2 payload
+        # is the raw image plus 0xFF padding to a 256-byte block boundary, so the
+        # .bin is a prefix of it -- and the padding lands inside the last sector,
+        # which is erased to 0xFF anyway.
+        try:
+            with open(apply_bin, "rb") as fh:
+                img = fh.read()
+            flashed = uf2_file_to_bin(left_uf2)
+        except (OSError, Uf2Error) as exc:
+            self.log(f"[test] FAIL: {name}: cannot compare the image to the flashed "
+                     f"UF2: {exc}")
+            return {"name": name, "status": "fail", "error": str(exc)}
+
+        if not (len(flashed) >= len(img) and flashed[:len(img)] == img
+                and set(flashed[len(img):]) <= {0xFF}):
+            self.log(f"[test] FAIL: {name}: {os.path.basename(apply_bin)} is NOT the "
+                     f"image the rig flashed ({os.path.basename(left_uf2)}). Applying "
+                     "it would reboot the master onto VBUS master-detection and make "
+                     "both halves enumerate as master. Refusing.")
+            return {"name": name, "status": "fail",
+                    "error": "apply image differs from the flashed UF2"}
+
+        if not os.path.exists(apply_bin + ".sig"):
+            reason = ("no .sig beside the image — an unsigned image stops at the "
+                      "keyboard's physical ACCEPT prompt, which the rig cannot answer")
+            self.log(f"[test] SKIP: {name} ({reason})")
+            return {"name": name, "status": "skip", "reason": reason}
+
+        want = caps_from_image(img) or {}
+        self.log(f"[runner] firmware apply round-trip: staging {len(img)} B "
+                 f"({want.get('fw', 'unknown version')}) and APPLYING it")
+
+        try:
+            if not stage_and_verify(apply_bin, self.log, require_signed=True):
+                raise RuntimeError("staging the signed image did not reach a clean COMMIT")
+
+            mark = TAP.mark()
+            if not apply_staged(self.log):
+                raise RuntimeError("FW_UP_APPLY was refused")
+
+            # The board reboots into the applier, which runs with interrupts off and
+            # cannot print. Give it the copy time before looking for it back.
+            time.sleep(5)
+            self.wait_for_master_ready()
+            self.settle_master()
+
+            caps = self._device_caps()
+            if not caps:
+                raise RuntimeError(
+                    "the keyboard did not answer GET_ID after the apply. This is the "
+                    "#258 signature: the copy died part-way and left an image that is "
+                    "neither the old one nor the new one. Recover with BOOTSEL+UF2, "
+                    "then read the banner's 'apply:' lines -- the in-flash progress "
+                    "log survives the recovery and names the sector it stopped at")
+            # ⚠️ The key is "fw" -- both producers (hil_tests.parse_device_caps and
+            # fw_update.caps_from_image) use it, and this read said "version" until
+            # a reviewer caught it. That silently disabled the one check that
+            # catches the board coming back on the OLD image, which is exactly the
+            # partial-apply shape this whole test exists for. Pinned by
+            # CapsKeyContractTest so a rename on either side fails a test instead.
+            got = caps.get("fw")
+            if want.get("fw") and got and got != want["fw"]:
+                raise RuntimeError(
+                    f"the keyboard came back as {got}, but the applied image is "
+                    f"{want['fw']} -- it is running the OLD firmware, so the copy "
+                    "did not take even though the board re-enumerated")
+
+            # The firmware verifies its own copy against the staged source and says
+            # so in the boot banner. That is a stronger statement than "it booted":
+            # a copy can complete, be wrong, and still boot.
+            done = TAP.wait_for("last self-apply COMPLETED", mark=mark, timeout=5.0)
+            match = TAP.wait_for("written image MATCHED", mark=mark, timeout=1.0)
+            if done and match:
+                self.log("[runner] the firmware reports its own copy complete and "
+                         "byte-identical to the staged source")
+            elif done or match:
+                self.log("[runner] note: only part of the apply banner was seen "
+                         "(console lines can be dropped) -- the board is up and on "
+                         "the right version, which is the assertion that counts")
+            else:
+                self.log("[runner] note: no apply banner seen. Either the console did "
+                         "not come up, or this firmware predates the in-flash apply "
+                         "log; the re-enumeration check above still passed")
+
+            self.log(f"[test] PASS: {name} — applied {got} and the keyboard came back")
+            return {"name": name, "status": "pass"}
+        except Exception as exc:
+            self.log(f"[test] FAIL: {name}: {exc}")
+            return {"name": name, "status": "fail", "error": str(exc)}
 
     def reboot_persistence(self) -> dict:
         """Set a persisted setting, flush it, POWER-CYCLE the master, read it back.
@@ -690,6 +832,14 @@ if __name__ == "__main__":
                         help="Optional raw .bin image; after the suite, drives the "
                              "keyboard's HID firmware-update path (BEGIN/CHUNK/COMMIT, "
                              "stage+verify only — non-destructive, no apply/reboot)")
+    parser.add_argument("--apply-bin", dest="apply_bin", default=None,
+                        help="Optional SIGNED raw .bin (with its .sig beside it) that "
+                             "is byte-identical to the image passed to --left. Runs the "
+                             "full HID update INCLUDING apply and requires the keyboard "
+                             "to come back. EXTENDED tier and destructive: it overwrites "
+                             "the running firmware, which is safe only because the image "
+                             "is the one already running. Both preconditions are checked, "
+                             "not assumed.")
     parser.add_argument("--extended", action="store_true",
                         default=os.environ.get("HIL_EXTENDED", "").lower()
                         in ("1", "true", "yes"),
@@ -720,7 +870,8 @@ if __name__ == "__main__":
         result = runner.flash_and_test(args.left, args.right, tests=TESTS,
                                        bin_path=args.bin_path,
                                        extended=args.extended,
-                                       doom=args.doom)
+                                       doom=args.doom,
+                                       apply_bin=args.apply_bin)
     except Exception as exc:
         # A fatal flash/enumerate error still gets a summary line so the run page
         # shows *why* there are no per-test results, not just a red X.
