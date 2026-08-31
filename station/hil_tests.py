@@ -161,6 +161,29 @@ FONTPACK_CHUNK_SIZE         = 56    # payload bytes/chunk (matches firmware FW_U
 # FONTPACK_BUNDLE_DOOMWAD/_DOOMPACK and PolyKybdHost hid_fontpack.py.
 DOOMWAD_BUNDLE_ID           = 0x7F
 DOOMPACK_BUNDLE_ID          = 0x7E
+# BEGIN erase-poll cap for a doom slot. The engine-pack slot is ~210 KB / 52
+# sectors, and the deferred erase is paced by these 0.3 s re-polls (the firmware
+# advances it in housekeeping between BEGIN re-polls), so the erase spans ~17
+# polls of wall-clock and readiness (`.`) lags the `erase complete` printf by a
+# further pass or two. On the FW-9 set the doom slot is flashed THREE times in a
+# row (valid / tampered / unsigned), and the 3rd erase drifted past the old
+# 20-attempt (~6 s) cap on qmk#249 — the erase completed but BEGIN still reported
+# `~` at attempt 20, so the test failed at "FONTPACK_BEGIN never became ready"
+# even though nothing was wrong. 60 attempts (~18 s) gives ~3x headroom over the
+# observed ~20 without masking a real hang (a genuinely stuck erase never logs
+# `erase complete` and still fails, just later). Only the doom slot needs this;
+# the font-pack wipe flashes a 32-byte empty pack (1-sector erase) and keeps 20.
+DOOM_BEGIN_ERASE_ATTEMPTS   = 60
+# ...but that big budget is ONLY for the erase-busy (`~`) path, which is cheap
+# (~0.3 s/poll). A NO-reply is the dead/hung-keyboard signal, and it is
+# EXPENSIVE: raw.send() already retries attempts×timeout_ms internally (3×15 s
+# here) before returning None, so one no-reply outer iteration is ~45 s. Sharing
+# the 60-cap across both would let a dead board stall ONE flash for ~45 min
+# before failing (was ~15 min at 20) — 3x slower HIL diagnostics (Greptile,
+# ctnd#81). So consecutive no-replies get their own tight cap and fail fast
+# (~2 min); a `~` in between means the erase is progressing, so it resets the
+# counter — an occasional dropped reply on a healthy-but-flaky link is tolerated.
+DOOM_BEGIN_NO_REPLY_MAX     = 3
 
 # VIA "reset dynamic keymap" report (bare command id, NOT a 'P' command — see
 # test_runner.VIA_DYNAMIC_KEYMAP_RESET). data[0]==0x06 -> legacy_command_kb ->
@@ -184,6 +207,11 @@ NACK       = ord("!")
 # ``docs/FUTURE_TESTS.md`` until it is trustworthy, not in a tier nobody runs.
 TIER_DEFAULT  = "default"
 TIER_EXTENDED = "extended"
+# A THIRD opt-in tier, separate from EXTENDED, for the signed-DOOM-pack checks
+# (FW-9). They are opt-in for two reasons at once: they flash a ~230 KB .plyx over
+# HID and drive the idle screensaver (slow, like EXTENDED), AND they need a signed
+# pack artifact CI builds only on demand (see --plyx-valid / the `hil-doom` label).
+TIER_DOOM     = "doom"
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
 # Firmware facts (keyboards/polykybd/{config.h,base/com.h}).
@@ -234,6 +262,7 @@ ROI_START            = 64 - 2 - ROI_HDR_BYTES   # 57
 ROI_MAX              = 64 - 2                   # 62
 SCREEN_WIDTH         = 72    # keycap OLED, px
 SCREEN_HEIGHT        = 40
+IDLE_STYLE_IDDQD     = 2     # enum poly_idle_style (state.h): the DOOM screensaver
 IDLE_STYLE_EDEN      = 3     # enum poly_idle_style (state.h): pulse/jitter/iddqd/eden
 # Firmware version that introduced the Eden animation + IDLE_STYLE_EDEN, for the
 # min_fw gate (the feature bumps no PROTOCOL_VERSION, so GET_ID's P<n> can't gate it).
@@ -258,6 +287,10 @@ EDEN_BURST_SENDS      = 30
 # The idle fade runs for FADE_TRANSITION_TIME (10 s) after the backdated start
 # before the transition fires; wait comfortably past it.
 IDLE_ENGAGE_TIMEOUT_S = 25.0
+# The signed-pack tests wait for the idle fade to complete AND the loader to run
+# its ~230 KB CRC + one SHA-512 before it logs a verdict — a touch longer than the
+# bare idle-engage window.
+DOOM_LOAD_TIMEOUT_S   = 30.0
 # The soak's frames are sent in a few hundred ms, but the firmware prints its
 # summary from send_to_bridge, i.e. as it drains them.
 LINK_SUMMARY_TIMEOUT_S = 30.0
@@ -329,6 +362,10 @@ def skip_reason(test: dict, caps: dict):
     # because the whole point is that the default PR gate does not pay for it.
     if test.get("tier") == TIER_EXTENDED and not caps.get("extended"):
         return "extended suite — re-run with --extended (or the hil-extended label)"
+    # The doom-pack tier is fail-closed like EXTENDED, but on its OWN opt-in: it
+    # also needs a signed .plyx artifact that only the `doom` CI path produces.
+    if test.get("tier") == TIER_DOOM and not caps.get("doom"):
+        return "doom suite — re-run with --doom + a signed --plyx-valid (or the hil-doom label)"
     return None
 
 
@@ -2189,18 +2226,27 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
     ready = False
-    for attempt in range(20):
+    no_reply = 0
+    for attempt in range(DOOM_BEGIN_ERASE_ATTEMPTS):
         reply = raw.send(begin, timeout_ms=15000)
         if reply and len(reply) >= 3 and reply[2] == ord('.'):
             ready = True
             break
         if reply and len(reply) >= 3 and reply[2] == ord('~'):
             log(f"  BEGIN: erasing doom slot 0x{bundle_id:02x}... (attempt {attempt + 1})")
+            no_reply = 0        # erase is progressing — not a dead board
             time.sleep(0.3)
             continue
         if reply and len(reply) >= 3 and reply[2] == ord('!'):
             log(f"  BEGIN NACK for pseudo bundle 0x{bundle_id:02x} — firmware without the doom slots?")
             return reply
+        # No/short reply: the board may be dead. Each of these already burned
+        # ~attempts×timeout_ms inside raw.send, so fail fast on a run of them
+        # instead of spending the whole (long) erase budget here.
+        no_reply += 1
+        if no_reply >= DOOM_BEGIN_NO_REPLY_MAX:
+            log(f"  BEGIN: no reply {no_reply}x in a row (last {reply!r}) — giving up (keyboard dead?)")
+            break
         log(f"  BEGIN: no/short reply {reply!r} (attempt {attempt + 1}) — retrying")
         time.sleep(0.3)
     if not ready:
@@ -2262,6 +2308,234 @@ def test_doompack_commit_magic_gate(raw: RawHID, log: Callable[[str], None]) -> 
         log(f"  FAIL: minimal valid PlyX header rejected: {reply!r}")
         return False
     log("  COMMIT ok — engine-pack slot header gate passes valid, rejects invalid")
+    return True
+
+
+# --- signed DOOM engine-pack round trip (FW-9, TIER_DOOM) --------------------
+# The magic gate above proves the flash TRANSPORT and the COMMIT header check.
+# These three tests prove the LOAD-time Ed25519 gate in doom_pack_load.c: a pack
+# signed with the key the HIL image was built against loads and the engine runs;
+# a tampered or unsigned pack is refused and the fire demo runs instead. All three
+# read the ungated `doom:` printf console lines (needs_console) — the verdict is
+# NOT observable over HID, only on the console (and the idle-transition line is
+# uprint/debug-gated, so we key off the doom loader's own printf lines).
+#
+# CI (qmk-test.yml `doom` opt-in) builds the HIL images against an EPHEMERAL key
+# and ships ONE .plyx signed with it via --plyx-valid; the rig derives the tampered
+# and unsigned variants below, so only one artifact crosses and the derivation is
+# unit-tested. Without --plyx-valid these SKIP (the TIER_DOOM gate).
+DOOM_SIG_SIZE = 64  # doom_pack_abi.h DOOM_PACK_SIG_SIZE — the trailing Ed25519 sig
+
+# --- FW-9 follow-up: narrowing the intermittent post-doom slave wedge ---------
+# On a doom-slot reflash AFTER the doom engine has run, the SLAVE half sometimes
+# wedges: the master erases its 52 sectors, then FONTPACK_BEGIN reports the slave
+# not ready (slave_ack=0xe4 = SYNC_GIVEUP) and the flash fails with the board dead.
+# It is a coin-flip, and the qmk-side capture proved the slave never runs doom
+# itself (its core1 is the plain RLE service throughout) — so the doom linkage is
+# a CROSS-LINK effect of the master's IDDQD session (the doom-mirror RLE stream to
+# the slave / the ~150 ms per-frame busy window), not doom on the slave.
+#
+# This soak isolates ONE variable: it flashes the SAME ~211 KB engine pack to the
+# doom slot repeatedly with NO IDDQD run between the flashes — the "repeated big
+# pack flashes ALONE" arm. It runs BEFORE the three IDDQD load tests, so none of
+# its flashes is preceded by a doom run. Paired with those tests (the "flash +
+# run" arm), the two outcomes discriminate the trigger:
+#   * this soak WEDGES  -> repeated erases alone suffice; the doom mirror/run is
+#     NOT required, so the fault is the fw_staging erase halt/restart vs the
+#     slave's plain RLE-service core1 (look there, independent of doom).
+#   * this soak is CLEAN but the IDDQD tests wedge -> the doom RUN (IDDQD + the
+#     mirror stream to the slave) is what primes it; look at the doom-mirror path.
+# It flashes MORE times than the IDDQD arm and drops the run, so if flashes alone
+# could trigger it, this arm should trigger it MORE readily, not less.
+#
+# ⚠️ COST: each full ~211 KB doom-slot flash is ~5 min of bridged chunk streaming
+# on the rig (measured run #923: 3773 chunks, and slow even on the FIRST flash
+# before any doom run — the stream cost is the bridged-flash baseline, not a
+# post-doom effect). So this soak alone adds ~N×5 min to the doom job. 3 keeps it
+# ~15 min for a P(catch)≈0.66 at a per-flash wedge rate ~0.3; raise it for more
+# confidence at ~5 min/step if the rig has the time.
+DOOM_FLASH_SOAK_REPEATS = 3
+
+_DOOM_VALID_PLYX: "bytes | None" = None
+
+
+def set_doom_pack(pack: "bytes | None") -> None:
+    """Give the TIER_DOOM tests the signed .plyx to flash (the runner calls this
+    from --plyx-valid). Left None otherwise, which — together with caps['doom'] —
+    keeps those tests skipped."""
+    global _DOOM_VALID_PLYX
+    _DOOM_VALID_PLYX = pack
+
+
+def _doom_tamper_sig(pack: bytes) -> bytes:
+    """Flip one bit of the trailing signature. Header + image stay byte-for-byte
+    valid (magic / CRC / ram-pairing all pass at load), so the loader reaches the
+    Ed25519 check and takes the 'signature is INVALID' branch — a genuine authorship
+    failure, not a corrupt image that would be caught earlier."""
+    if len(pack) <= DOOM_SIG_SIZE:
+        raise ValueError("pack too short to carry a signature")
+    b = bytearray(pack)
+    b[-1] ^= 0x01
+    return bytes(b)
+
+
+def _doom_strip_sig(pack: bytes) -> bytes:
+    """Drop the 64-byte trailer, leaving header+image with no signature. At load the
+    firmware reads the signature slot one past the flashed bytes (erased flash =
+    0xFF) and reports 'is unsigned' — the pre-signing pack case."""
+    if len(pack) <= DOOM_SIG_SIZE:
+        raise ValueError("pack too short to carry a signature")
+    return pack[:-DOOM_SIG_SIZE]
+
+
+def classify_doom_verdict(lines) -> str:
+    """Reduce the captured `doom:` console lines to one verdict token: 'loaded'
+    (accept), 'invalid' / 'unsigned' (the two FW-9 refusals), or 'none' (the loader
+    logged no signature verdict at all). Pure so it can be unit-tested against the
+    firmware's exact strings without hardware. The two refusals are checked before
+    'loaded' so a stray earlier 'loaded' from a prior attempt can't mask a refusal."""
+    joined = "\n".join(lines)
+    if "signature is INVALID" in joined:
+        return "invalid"
+    if "is unsigned" in joined:
+        return "unsigned"
+    if "pack v" in joined and "loaded" in joined:
+        return "loaded"
+    return "none"
+
+
+def _doom_idle_verdict(raw: RawHID, log: Callable[[str], None], pack: bytes):
+    """Flash `pack` to the DOOMPACK slot, engage the IDDQD screensaver, and return
+    ``(committed, lines)`` — whether COMMIT ACKed, and the console lines the loader
+    emitted while trying to load it. The IDDQD idle is what triggers the load; the
+    loader logs its verdict via ungated printf, and `attract screensaver up` fires
+    on BOTH the accept and the fire-demo-fallback paths, so it is the anchor to
+    wait on before reading the verdict out of the captured lines. Stops idle and
+    restores the previous style in a finally."""
+    reply = _doom_slot_flash(raw, log, pack, DOOMPACK_BUNDLE_ID)
+    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+        log(f"  FAIL: DOOMPACK COMMIT rejected: {reply!r}")
+        return False, []
+    cur = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, 0xFF]))
+    original = cur[3] if (cur and len(cur) >= 4) else IDLE_STYLE_EDEN
+    try:
+        set_resp = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, IDLE_STYLE_IDDQD]))
+        if not _resp_ok(set_resp, CMD_IDLE_STYLE, log, expect_status=ACK):
+            log("  FAIL: firmware rejected IDLE_STYLE_IDDQD")
+            return True, []
+        mark = TAP.mark()
+        start = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 1]))
+        if not _resp_ok(start, CMD_IDLE_STATE, log, expect_status=ACK):
+            return True, []
+        log(f"  IDDQD idle started — waiting up to {DOOM_LOAD_TIMEOUT_S:.0f}s for the loader")
+        up = TAP.wait_for("attract screensaver up", mark, timeout=DOOM_LOAD_TIMEOUT_S)
+        lines = TAP.since(mark)
+        if up is None:
+            log("  (no 'attract screensaver up' line — the screensaver never engaged)")
+        for ln in lines:
+            if ln.startswith("doom:"):
+                log(f"  firmware: {ln}")
+        return True, lines
+    finally:
+        raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
+        raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, original]))
+
+
+def test_doompack_flash_only_soak(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Flash the valid engine pack to the doom slot DOOM_FLASH_SOAK_REPEATS times
+    back-to-back with NO IDDQD run in between — the "repeated big pack flashes
+    alone" arm of the post-doom wedge narrowing (see DOOM_FLASH_SOAK_REPEATS).
+
+    Each flash exercises the same 52-sector deferred erase + ~211 KB stream +
+    COMMIT that the IDDQD tests do, and bridges the slave (halting/restarting its
+    core1) — but the slave's core1 is never driven by the doom-mirror RLE stream,
+    because no IDDQD idle is engaged. A wedge here (a BEGIN that never becomes
+    ready / a run of no-replies, i.e. slave_ack=0xe4 on the master console) is the
+    finding that repeated erases alone suffice; a clean run across every repeat
+    points the finger at the doom RUN instead. Runs BEFORE the three IDDQD tests
+    so none of its flashes is post-doom-run. Leaves a valid loadable pack in the
+    slot (the accept test re-flashes it anyway)."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    ok = 0
+    for i in range(DOOM_FLASH_SOAK_REPEATS):
+        log(f"  flash {i + 1}/{DOOM_FLASH_SOAK_REPEATS} (no IDDQD run before it)")
+        reply = _doom_slot_flash(raw, log, _DOOM_VALID_PLYX, DOOMPACK_BUNDLE_ID)
+        if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+            log(f"  FAIL: doom-slot flash {i + 1}/{DOOM_FLASH_SOAK_REPEATS} did not "
+                f"COMMIT ({reply!r}) — the slave wedged on a reflash with NO doom "
+                "run before it, so repeated erases ALONE trigger the wedge")
+            return False
+        # A live master answers GET_ID; a wedged split link does not stop the
+        # master answering HID, so this only rules out a full master death — the
+        # real wedge tell is the BEGIN-never-ready above and slave_ack on console.
+        if not _master_alive(raw, log):
+            log(f"  FAIL: master unresponsive after flash {i + 1}/{DOOM_FLASH_SOAK_REPEATS}")
+            return False
+        ok += 1
+    log(f"  PASS: {ok}/{DOOM_FLASH_SOAK_REPEATS} back-to-back doom-slot flashes with no "
+        "IDDQD run — repeated erases alone did NOT wedge the slave this run")
+    return True
+
+
+def test_doompack_signed_load(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A .plyx signed with the key the HIL image was built against LOADS — the FW-9
+    Ed25519 accept path. Flash it, engage IDDQD, and confirm the console logs
+    `doom: pack vN loaded`. Requires --plyx-valid (SKIPs via the TIER_DOOM gate
+    otherwise)."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    committed, lines = _doom_idle_verdict(raw, log, _DOOM_VALID_PLYX)
+    if not committed:
+        return False
+    verdict = classify_doom_verdict(lines)
+    if verdict != "loaded":
+        log(f"  FAIL: a correctly-signed pack was not loaded (verdict={verdict}) — the "
+            "accept path is broken, or the pack was not signed with this image's key")
+        return False
+    log("  PASS: signed pack loaded — the Ed25519 accept path works")
+    return True
+
+
+def test_doompack_tampered_refused(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A pack whose signature bit is flipped is REFUSED at load — header/image/CRC
+    all still valid, so the loader reaches the Ed25519 check and takes the
+    'signature is INVALID' branch, then runs the fire demo instead of branching into
+    the image. This is the core FW-9 property: an unauthenticated pack does not
+    execute."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    committed, lines = _doom_idle_verdict(raw, log, _doom_tamper_sig(_DOOM_VALID_PLYX))
+    if not committed:
+        return False
+    verdict = classify_doom_verdict(lines)
+    if verdict != "invalid":
+        log(f"  FAIL: a tampered-signature pack was not refused as INVALID "
+            f"(verdict={verdict}) — the FW-9 gate is not authenticating the pack")
+        return False
+    log("  PASS: tampered-signature pack refused (fire demo runs, image not executed)")
+    return True
+
+
+def test_doompack_unsigned_refused(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A pack with no signature trailer is REFUSED at load ('is unsigned'), never
+    branched into — the pre-signing pack case. There is deliberately NO on-keycap
+    prompt here (unlike an unsigned firmware image): the load runs at idle with
+    nobody present, so it is refused outright."""
+    if _DOOM_VALID_PLYX is None:
+        log("  FAIL: TIER_DOOM ran without a --plyx-valid pack (runner misconfigured)")
+        return False
+    committed, lines = _doom_idle_verdict(raw, log, _doom_strip_sig(_DOOM_VALID_PLYX))
+    if not committed:
+        return False
+    verdict = classify_doom_verdict(lines)
+    if verdict != "unsigned":
+        log(f"  FAIL: an unsigned pack was not refused as unsigned (verdict={verdict})")
+        return False
+    log("  PASS: unsigned pack refused (fire demo runs, image not executed)")
     return True
 
 
@@ -2369,8 +2643,31 @@ def test_layer_names(raw: RawHID, log: Callable[[str], None]) -> bool:
     examined and an unnamed layer stays expressible.
 
     Read-only, so there is nothing to restore.
+
+    ``send_and_read_all`` has no built-in retry, and this was the ONE test in its
+    neighbourhood without tolerance for the master's transient deaf windows: on
+    qmk#236's first HIL run the tests on either side each *recovered 1 read
+    timeout* via ``send()``'s retry while this one failed with "no reply" — a
+    false red on a command whose reply is perfectly idempotent (no one-shot
+    marker). Same remedy as the packed language list above: retry the whole
+    exchange (fresh handle each time) when NOTHING arrives. A reply that arrives
+    but fails validation is a real protocol fault and still fails immediately
+    without burning retries.
     """
-    packets = raw.send_and_read_all(bytes([POLY_CHANNEL, CMD_GET_LAYER_NAMES]))
+    packets: list[bytes] = []
+    for attempt in range(3):
+        # The lengthened timeouts are half of the remedy (same values as the
+        # packed language list): 3 x the default 1 s first-read would give a
+        # ~3 s total window, which the observed 5104 ms deaf interval outlasts.
+        packets = raw.send_and_read_all(
+            bytes([POLY_CHANNEL, CMD_GET_LAYER_NAMES]),
+            first_timeout_ms=2500, next_timeout_ms=600)
+        if packets:
+            if attempt:
+                log(f"  reply arrived on attempt {attempt + 1}/3")
+            break
+        tail = "retrying" if attempt + 1 < 3 else "giving up"
+        log(f"  attempt {attempt + 1}/3: no reply (master busy?) — {tail}")
     if not packets:
         log("  FAIL: no reply to GET_LAYER_NAMES")
         return False
@@ -2512,4 +2809,27 @@ TESTS = [
      "min_protocol": 6},
     {"name": "doom engine-pack slot magic gate", "fn": test_doompack_commit_magic_gate,
      "min_protocol": 6},
+    # FW-9 follow-up: narrow the intermittent post-doom slave wedge. This soak
+    # flashes the doom slot DOOM_FLASH_SOAK_REPEATS× back-to-back with NO IDDQD run — the
+    # "repeated erases alone" arm. It runs BEFORE the three IDDQD tests (so none of
+    # its flashes is post-doom-run); a wedge here vs a clean-here-but-wedge-there
+    # discriminates whether the doom RUN is required to prime the fault. TIER_DOOM
+    # (needs the signed --plyx-valid pack and is slow, same as the load tests).
+    {"name": "doom engine-pack flash-only soak (no IDDQD run)",
+     "fn": test_doompack_flash_only_soak, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
+    # FW-9: the LOAD-time Ed25519 gate on the executable engine pack. TIER_DOOM
+    # (its own opt-in): they flash a ~230 KB signed .plyx and drive the IDDQD
+    # screensaver, and need a signed pack CI builds only on the `hil-doom` label. The
+    # tampered/unsigned variants are derived from the signed one on the rig. LAST,
+    # after the magic gate: they leave a real (or refused) pack in the slot.
+    {"name": "doom signed engine-pack loads (FW-9 accept)",
+     "fn": test_doompack_signed_load, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
+    {"name": "doom tampered-signature pack refused (FW-9)",
+     "fn": test_doompack_tampered_refused, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
+    {"name": "doom unsigned pack refused (FW-9)",
+     "fn": test_doompack_unsigned_refused, "min_protocol": 6,
+     "needs_console": True, "tier": TIER_DOOM},
 ]

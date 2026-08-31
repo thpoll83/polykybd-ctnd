@@ -437,8 +437,9 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   The touch UI has a **Measure Perf** button (`run_perf` → `PerfRunner`) that
   takes the same selected firmware pair as **Run Tests**.
 - **CI: opt-in, report-only.** The `Performance measurement (split72)` job in
-  qmk's `qmk-test.yml` runs on the `perf` PR label, `[perf]` in a commit message,
-  or a manual `workflow_dispatch`. It posts a markdown table to the job summary +
+  qmk's `qmk-test.yml` runs on the `hil-perf` PR label (⚠️ renamed from `perf`
+  2026-08-29 — the bare `perf`/`[perf]` names now fire nothing), `[hil-perf]` in a
+  commit message, or a manual `workflow_dispatch`. It posts a markdown table to the job summary +
   a PR comment and uploads `perf-report.json`. It **never fails on a regression** —
   these are wall-clock numbers on shared hardware and a flaky red check is one
   people learn to ignore; only a *measurement* failure (wrong build, dead device)
@@ -656,12 +657,14 @@ records that are easy to trip over:
   `ui.allow_lan: true` disables. Don't add a handler assuming some auth layer exists.
 - **The rig is a self-hosted runner for a public repo**, so fork-PR approval settings on
   `qmk_firmware` are load-bearing security, not CI hygiene (HIL-2, still open).
-- ⚠️ **Firmware signing (FW-2) does NOT close the code-execution surface — FW-9 is open.**
-  The `.plyx` DOOM engine pack is *executable code* flashed over the same HID transport,
-  and `doom_pack_load.c` authenticates it with a CRC32 only, then branches into it. Anyone
-  who can talk raw HID can flash a crafted pack, set the idle style to IDDQD over cmd 28,
-  and get arbitrary code execution on the next idle. Don't cite "the firmware is signed"
-  as though it settles this.
+- ✅ **FW-9 is FIXED (qmk #243): the `.plyx` DOOM engine pack is signed too.** It is
+  *executable code* on the same HID transport, and `doom_pack_load.c` used to authenticate
+  it with a CRC32 only before branching into it — arbitrary code execution for anyone who
+  could talk raw HID (crafted pack + IDDQD idle style over cmd 28). It now carries an
+  Ed25519 signature verified at load time under `FW_REQUIRE_SIGNATURE`. ⚠️ The `.whx` /
+  `.plyf` resources ride the same transport and are still authenticity-unchecked — but they
+  are *data*, so the exposure is parser bugs, not direct code execution (SECURITY_AUDIT.md
+  FW-9 tail).
 
 ## Related repos
 

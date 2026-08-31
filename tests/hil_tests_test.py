@@ -382,5 +382,126 @@ class SuiteTierGateTest(unittest.TestCase):
             self.assertIsNone(test.get("tier"), name)
 
 
+class LayerNamesRetryTest(unittest.TestCase):
+    """test_layer_names must ride out a deaf window but never retry a real fault.
+
+    On qmk#236's first HIL run the master had multi-second deaf windows; the
+    tests on either side of layer names each recovered a read timeout via
+    ``send()``'s retry while layer names — the one retry-less
+    ``send_and_read_all`` in that stretch — failed with "no reply". The reply is
+    idempotent (no one-shot marker), so the exchange now retries when NOTHING
+    arrives; a reply that arrives but fails validation is a protocol fault and
+    must still fail on the first attempt.
+    """
+
+    NAMES = [b"Qwerty", b"Stag!", b"ColemkDH", b"Neo", b"Workman",
+             b"Fn", b"Numpad", b"Utility"]
+
+    class FakeDevice:
+        def __init__(self, deaf_exchanges: int = 0, garble: bool = False):
+            body = b"".join(n + b"\x00" for n in LayerNamesRetryTest.NAMES)
+            payload = bytes([2 + len(body), len(LayerNamesRetryTest.NAMES)]) + body
+            report = bytes([POLY_CHANNEL, hil_tests.CMD_GET_LAYER_NAMES, ACK]) + payload
+            if garble:
+                report = bytes([POLY_CHANNEL, hil_tests.CMD_GET_LAYER_NAMES, ord("!")]) + payload
+            self._report = report.ljust(64, b"\x00")
+            self._deaf = deaf_exchanges
+            self.exchanges = 0
+
+        def send_and_read_all(self, data, **kwargs):
+            self.exchanges += 1
+            if self._deaf > 0:
+                self._deaf -= 1
+                return []
+            return [self._report]
+
+        def send(self, data, timeout_ms: int = 3000, attempts: int = 3):
+            # The layer-count cross-check (id_dynamic_keymap_get_layer_count).
+            return bytes([hil_tests.VIA_DYNAMIC_KEYMAP_GET_LAYER_COUNT,
+                          len(LayerNamesRetryTest.NAMES)]).ljust(32, b"\x00")
+
+    def test_a_deaf_window_is_ridden_out(self):
+        dev = self.FakeDevice(deaf_exchanges=1)
+        self.assertTrue(hil_tests.test_layer_names(dev, lambda m: None))
+        self.assertEqual(dev.exchanges, 2)
+
+    def test_a_permanently_deaf_master_still_fails(self):
+        dev = self.FakeDevice(deaf_exchanges=99)
+        self.assertFalse(hil_tests.test_layer_names(dev, lambda m: None))
+        self.assertEqual(dev.exchanges, 3)   # bounded — never an infinite ride
+
+    def test_a_real_protocol_fault_fails_without_burning_retries(self):
+        dev = self.FakeDevice(garble=True)
+        self.assertFalse(hil_tests.test_layer_names(dev, lambda m: None))
+        self.assertEqual(dev.exchanges, 1)
+
+
+class DoomSlotFlashBeginTest(unittest.TestCase):
+    """The doom-slot FONTPACK_BEGIN poll shares one loop for two very different
+    waits: a cheap erase-busy ``~`` (~0.3 s) and an EXPENSIVE no-reply (~45 s
+    inside raw.send on a dead board — 3 attempts x 15 s). The erase budget
+    (DOOM_BEGIN_ERASE_ATTEMPTS) must ride out a long, progressing erase, but a
+    dead board must fail after DOOM_BEGIN_NO_REPLY_MAX consecutive no-replies —
+    NOT after the full erase budget, or one flash stalls ~45 min (Greptile,
+    ctnd#81)."""
+
+    class FakeDoomDevice:
+        # begin_script: per-BEGIN reply status bytes; None = no reply (a dead
+        # exchange). Once exhausted it repeats the last entry. CHUNK/COMMIT always
+        # ACK, so a BEGIN that becomes ready flows through to a '.' COMMIT reply.
+        def __init__(self, begin_script):
+            self.begin_script = list(begin_script)
+            self.begin_calls = 0
+
+        def send(self, data, timeout_ms: int = 3000, attempts: int = 3):
+            cmd = data[1]
+            if cmd == hil_tests.CMD_FONTPACK_BEGIN:
+                i = min(self.begin_calls, len(self.begin_script) - 1)
+                self.begin_calls += 1
+                status = self.begin_script[i]
+                if status is None:
+                    return None
+                return bytes([POLY_CHANNEL, cmd, status]).ljust(64, b"\x00")
+            return bytes([POLY_CHANNEL, cmd, ord('.')]).ljust(64, b"\x00")
+
+    def setUp(self):
+        # Patch out the 0.3 s inter-poll sleep so the long-erase case is instant.
+        self._sleep = hil_tests.time.sleep
+        hil_tests.time.sleep = lambda *a, **k: None
+
+    def tearDown(self):
+        hil_tests.time.sleep = self._sleep
+
+    def _flash(self, begin_script):
+        dev = self.FakeDoomDevice(begin_script)
+        reply = hil_tests._doom_slot_flash(dev, lambda m: None,
+                                           b"PlyX" + b"\x00" * 60,
+                                           hil_tests.DOOMPACK_BUNDLE_ID)
+        return dev, reply
+
+    def test_a_dead_board_fails_after_the_no_reply_cap_not_the_erase_budget(self):
+        dev, reply = self._flash([None] * 100)
+        self.assertIsNone(reply)
+        self.assertEqual(dev.begin_calls, hil_tests.DOOM_BEGIN_NO_REPLY_MAX)
+        self.assertLess(dev.begin_calls, hil_tests.DOOM_BEGIN_ERASE_ATTEMPTS)
+
+    def test_a_long_erase_is_ridden_out_past_the_no_reply_cap(self):
+        script = [ord('~')] * (hil_tests.DOOM_BEGIN_ERASE_ATTEMPTS - 1) + [ord('.')]
+        dev, reply = self._flash(script)
+        self.assertTrue(reply and reply[2] == ord('.'))          # BEGIN ready -> COMMIT ACK
+        self.assertEqual(dev.begin_calls, hil_tests.DOOM_BEGIN_ERASE_ATTEMPTS)
+        self.assertGreater(dev.begin_calls, hil_tests.DOOM_BEGIN_NO_REPLY_MAX)
+
+    def test_a_dropped_reply_between_erase_polls_resets_the_counter(self):
+        # More total no-replies than the cap, but never MAX in a row — the `~`
+        # progress resets the counter, so it must NOT give up. Without the reset
+        # the accumulated no-replies would trip the cap and fail.
+        gap = hil_tests.DOOM_BEGIN_NO_REPLY_MAX - 1
+        script = ([None] * gap + [ord('~')]) * 4 + [ord('.')]
+        dev, reply = self._flash(script)
+        self.assertTrue(reply and reply[2] == ord('.'))
+        self.assertGreater(dev.begin_calls, hil_tests.DOOM_BEGIN_NO_REPLY_MAX)
+
+
 if __name__ == "__main__":
     unittest.main()

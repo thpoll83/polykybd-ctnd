@@ -77,6 +77,7 @@ class TestRunner:
 
     def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
                        bin_path: str = None, extended: bool = False,
+                       doom: bool = False,
                        apply_bin: str = None) -> dict:
         """Flash both halves and run ``tests`` against the master.
 
@@ -152,6 +153,7 @@ class TestRunner:
                     # GET_ID caps.
                     caps["console"] = console_started
                     caps["extended"] = extended
+                    caps["doom"] = doom
                     reason = skip_reason(test, caps)
                     if reason:
                         results.append({"name": name, "status": "skip", "reason": reason})
@@ -820,7 +822,7 @@ def write_github_summary(result: dict, label: str = "") -> None:
 
 if __name__ == "__main__":
     import argparse
-    from .hil_tests import TESTS
+    from .hil_tests import TESTS, set_doom_pack
     parser = argparse.ArgumentParser(description="Flash and test PolyKybd firmware")
     parser.add_argument("--left",  required=True, help="Path to left half UF2")
     parser.add_argument("--right", required=True, help="Path to right half UF2")
@@ -846,13 +848,30 @@ if __name__ == "__main__":
                              "reboot persistence). Adds roughly a minute; meant for "
                              "a release or a change big enough to want them. Also "
                              "settable with HIL_EXTENDED=1.")
+    parser.add_argument("--doom", action="store_true",
+                        default=os.environ.get("DOOM_HIL", "").lower()
+                        in ("1", "true", "yes"),
+                        help="also run the TIER_DOOM checks (FW-9 signed-engine-pack "
+                             "load/refuse). Needs --plyx-valid, a signed .plyx built "
+                             "against these HIL images' signing key. Also settable "
+                             "with DOOM_HIL=1.")
+    parser.add_argument("--plyx-valid", dest="plyx_valid", default=None,
+                        help="a signed DOOM engine pack (.plyx) for the --doom tests; "
+                             "the rig derives the tampered/unsigned variants from it.")
     args = parser.parse_args()
+    if args.doom and not args.plyx_valid:
+        parser.error("--doom needs --plyx-valid (a signed .plyx built against the "
+                     "HIL images' signing key)")
+    if args.plyx_valid:
+        with open(args.plyx_valid, "rb") as fh:
+            set_doom_pack(fh.read())
     runner = TestRunner()
     try:
         result = runner.flash_and_test(args.left, args.right, tests=TESTS,
                                        bin_path=args.bin_path,
-                                       apply_bin=args.apply_bin,
-                                       extended=args.extended)
+                                       extended=args.extended,
+                                       doom=args.doom,
+                                       apply_bin=args.apply_bin)
     except Exception as exc:
         # A fatal flash/enumerate error still gets a summary line so the run page
         # shows *why* there are no per-test results, not just a red X.

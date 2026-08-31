@@ -2,10 +2,17 @@
 
 Cross-repo tracker for the security audit findings (`FW-*` firmware, `HOST-*` host app,
 `HIL-*` rig/CI). It lives here because most of the still-open items are rig items, but it
-covers all four repos — check the **Where** column before going looking for code.
+covers every repo in the project — check the **Where** column before going looking for code.
 
 Status verified against: `polykybd-ctnd` @ `0d1463a`, `qmk_firmware` @ `0.11.0`,
-`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. **2026-08-06**: HOST-3 added alongside
+`PolyKybdHost` @ `0.11.0`, `polykybd-docs` @ PR #35. **2026-08-29**: an external scan
+(Aikido) raised five findings — two real and fixed (HIL-10, HOST-4), three inert in this
+fork and recorded under *"Checked and NOT vulnerable"* so the next scan does not re-open
+them. That scan also reached a **fifth** repo the ID scheme did not cover
+(`Adafruit-GFX-Library`); tracked under `SCAN-1` rather than a new prefix, since the
+finding was in an accidentally-committed build directory rather than in our code.
+
+**2026-08-06**: HOST-3 added alongside
 the telemetry feature — a single new surface reviewed on its own, not a fresh sweep of the
 tracker, so the review scope below still stands. Last full review **2026-08-05 (evening)** —
 a *fresh* evaluation of the surfaces FW-2 changed, plus one never examined before. It
@@ -15,8 +22,10 @@ an on-keycap ACCEPT/REJECT prompt. Previous review 2026-08-04 (HIL-2 confirmed s
 remediated on the rig; HIL-7 raised and fixed; HIL-8 raised and remediated; HIL-9 raised
 and partly mitigated; FW-2 key provisioned).
 
-⚠️ **Read FW-9 before concluding that firmware signing closes the code-execution
-surface. It does not.**
+⚠️ **Firmware signing did not, on its own, close the code-execution surface —
+the executable DOOM pack was CRC-checked only. FW-9 (below) fixed that with a
+load-time Ed25519 check on the pack; the warning is kept as the record of why
+signing the firmware image alone was not enough.**
 
 > The finding IDs originate from an audit that was only ever held in session context. This
 > file is the first committed record of them, reconstructed and re-verified against the
@@ -28,7 +37,7 @@ surface. It does not.**
 |---|---|---|---|
 | FW-1 | ROI clamp | qmk | ✅ fixed |
 | FW-2 | Firmware image signing (Ed25519) | qmk / host / docs | ✅ enforced — key provisioned, both verdicts confirmed on hardware |
-| **FW-9** | **Executable DOOM pack (`.plyx`) is CRC-checked, not signed — arbitrary code execution, bypasses FW-2** | qmk | 🔲 **open (high)** |
+| FW-9 | Executable DOOM pack (`.plyx`) is CRC-checked, not signed — arbitrary code execution, bypasses FW-2 | qmk | ✅ fixed (load-time Ed25519, qmk #243) |
 | FW-10 | Unsigned-flash confirmation is a repeatable input DoS (60 s modal) | qmk | 🟡 accepted + documented |
 | FW-3 / FW-5 | Dynamic-keymap buffer OOB | qmk | ✅ fixed (PR #112) |
 | FW-4 | `get_overlay` OOB | qmk | ✅ fixed |
@@ -47,63 +56,13 @@ surface. It does not.**
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
 | HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | ✅ fixed (rig) |
 | HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 (1) fixed; (2) deferred by decision |
+| HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk | ✅ fixed (PR #251) |
+| HOST-4 | `Pillow` unpinned — CVE-2026-54058 reachable via overlay image open-by-filename | host | ✅ fixed (PR #201) |
+| SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
 
 ---
 
 ## 🔲 Open
-
-### FW-9 — the executable DOOM pack is CRC-checked, not signed (bypasses FW-2)
-
-Raised **2026-08-05**, by a fresh look at what FW-2 does *not* cover. FW-2 signs the
-**firmware image**. It does not sign the **DOOM engine pack** (`.plyx`) — which is
-executable code, flashed over the same HID transport, and *called* by the firmware.
-
-`doom/doom_pack_load.c` validates a flashed pack with: the `PlyX` magic, `abi ==
-DOOM_PACK_ABI`, `image_size` fits the slot, the `ram_base`/`ram_size` pairing, and a
-**CRC32** over the body. Every one of those is an integrity/compatibility check. **None
-authenticates the author** — a CRC32 is trivially satisfied by whoever crafts the image.
-It then does:
-
-```c
-doom_pack_init_fn init = (…)(slot + sizeof(*hdr) + hdr->entry_off + 1u);
-const doom_pack_api_t *api = init(&s_fw_api);
-```
-
-i.e. it **branches into attacker-supplied bytes at an attacker-supplied offset**, on a
-Cortex-M0+ with no MPU. Once executing, the code is not confined to `s_fw_api` — it has
-the whole address space, including the flash-write routines.
-
-**The chain needs no physical access and no user interaction:**
-
-1. Flash a crafted `.plyx` (cmds `0x50`–`0x52`, DOOMPACK target). No signature is checked
-   on this path — `fw_staging_check_signature()` is only called in the `FW_TARGET_FIRMWARE`
-   branch of `fw_staging_finalize_impl`.
-2. Set the idle style to `IDLE_STYLE_IDDQD` (2) over **HID cmd 28** — in range, so it is
-   accepted.
-3. Wait for the keyboard to idle. `doom_begin` → `doom_session_start` →
-   `doom_pack_load()` → the call above.
-
-So an attacker who can open the raw HID interface gets **arbitrary code execution with
-full firmware privilege**, which is precisely the outcome FW-2 exists to prevent. It
-applies to shipped keyboards: `release.yml` builds the `POLYKYBD_DOOM_PACK` flavour, and
-the `.plyx` is a published release asset.
-
-**Fix (recommended): verify the pack with the existing Ed25519 machinery, at LOAD time.**
-The verifier and `FW_SIGNING_PUBKEY` are already compiled in (`base/crypto/`,
-`base/fw_pubkey.h`). Put the 64-byte signature in the PlyX header (a `PACK_VERSION` bump)
-and check it in `doom_pack_load()` immediately before computing `init`. Verify at *load*,
-not at COMMIT: flash can be rewritten afterwards, so a "was validated once" flag is not a
-control. The cost is one SHA-512 over ~211 KB at session start — the loader already walks
-the whole image for the CRC there, so it is the same order of work, once per game session,
-not per frame. `release.yml` signs the `.plyx` alongside the `.bin`.
-
-**Interim mitigation** if that is not done promptly: build releases without
-`POLYKYBD_DOOM_PACK`. That removes the feature, so it is a stopgap, not a fix.
-
-⚠️ **The same "flashed over HID, authenticated by CRC only" property applies to the WAD
-(`.whx`) and the font-pack bundles (`.plyf`)** — but those are *data*, so the exposure is
-parser bugs in `fontpack.c` / the WAD reader rather than direct code execution. Lower
-severity, same root cause: the resource-flash path has no notion of authenticity.
 
 ### FW-10 — the unsigned-flash confirmation is a repeatable input DoS
 
@@ -363,12 +322,150 @@ grants an attacker nothing they did not already have (they can simply not flash)
 worst case is refusing a legitimate user's own in-progress confirmation — an annoyance,
 not an escalation. Accepting remains a keypress on the matrix and must stay that way.
 
+### The 2026-08-29 external scan: three findings that are inert in this fork
+
+An external scanner (Aikido) reported five findings across the repos. **Two were real and
+fixed** (see below); the other three are recorded here because each one is a true statement
+about the *file* and a false statement about the *shipped artifact*, so a path-based
+scanner will raise all three again on every run.
+
+| Reported | Where | Why it is inert |
+|---|---|---|
+| Template-expression injection — `qmk find -km ${{ inputs.keymap }}` | `qmk_firmware/.github/workflows/ci_build_major_branch_keymap.yml` | Byte-identical to upstream QMK; `workflow_call`-only; its sole caller is gated `if: github.repository == 'qmk/qmk_firmware'`, permanently false in a fork |
+| `eval("0x" + agl_values[g])` on parsed input | `Adafruit-GFX-Library/fontconvert/cmake-build-pinned/.../src/tools/glnames.py` | FreeType's own build script, inside a **build directory committed by accident**. The directory is untracked as of Adafruit#11, so the path no longer exists in the repo |
+| Use-after-free (`txt_window.c:561`) and `system()` (`txt_window.c:557`, `txt_fileselect.c:570`) | `qmk_firmware/keyboards/polykybd/doom/engine/textscreen/` | **No `textscreen/*.c` is in any `SRC` list** — not one translation unit from that directory enters the RP2040 firmware build, in either the monolith or the pack flavour |
+
+Verification for each, so it is re-checkable rather than re-argued:
+
+```bash
+# 1. is the workflow ours, or stock upstream?
+curl -sSL https://raw.githubusercontent.com/qmk/qmk_firmware/master/.github/workflows/ci_build_major_branch_keymap.yml \
+  | diff - qmk_firmware/.github/workflows/ci_build_major_branch_keymap.yml   # empty => stock
+grep -rn "ci_build_major_branch_keymap" qmk_firmware/.github/workflows/      # find the caller
+grep -n "if: github.repository" qmk_firmware/.github/workflows/ci_build_major_branch.yml
+
+# 3. is any textscreen source compiled?
+grep -rn "textscreen" qmk_firmware/keyboards/polykybd/*.mk qmk_firmware/keyboards/polykybd/rules.mk
+```
+
+⚠️ **The doom finding must NOT be "fixed" in place.** `doom/engine/` is a verbatim
+upstream rp2040-doom snapshot, refetchable by `mirror_rp2040_doom.py`; a local patch is
+silently reverted by the next mirror and makes the tree undiffable against upstream in the
+meantime. Its disposition lives with the code, in
+`qmk_firmware/keyboards/polykybd/doom/engine/PROVENANCE.md` § *"Static analysis: what is
+compiled, and what only looks alarming"* — that file is the thing to update if the build
+membership ever changes.
+
+⚠️ **Do not repeat the "`#ifndef _WIN32` means desktop-only" argument** for the doom
+findings. It is wrong and it was written down once before being caught: an RP2040 build is
+not `_WIN32` either, so the preprocessor takes exactly that branch. **The only reason those
+findings are inert is build membership**, and if a `textscreen` file is ever added to a
+`SRC` list they become live immediately.
+
+### The 2026-08-29 external scan: the two findings that WERE real
+
+Recorded because neither was where the report was looking, which is the reusable part.
+
+- **Shell injection in `bump-version.yml`** (`qmk_firmware`, fixed in #251). It
+  interpolated `${{ toJson(github.event.pull_request.labels.*.name) }}` straight into a
+  `run:` body, and a PR label is attacker-controllable text — a label containing a quote
+  and a `;` executes as shell in the workflow. **The scanner did not flag this**; it
+  flagged the inherited upstream workflow above instead. Every `${{ }}` in that file now
+  goes through `env:` and is read as `"$VAR"` / `os.environ[...]`, so nothing interpolates
+  into a shell or Python body.
+- **`Pillow` unpinned** (`PolyKybdHost`, fixed in #201) — CVE-2026-54058, an
+  out-of-bounds read decoding a McIdas AREA image opened *by filename*, which is exactly
+  what `im_converter.open()` does with a user-chosen overlay image. ⚠️ The fix had to be a
+  version **floor** (`Pillow>=12.3.0`), not a comment: an unpinned requirement is satisfied
+  by whatever is already installed, so pip will never upgrade an existing 10.x.
+
+### If a scan lands again, the disposition goes here — even when nothing changes
+
+The three inert findings above cost real verification and produced no artifact at the time;
+this section is that artifact. A dismissed finding with no written disposition is
+re-litigated in full by the next scan, at the same cost. `.claude/skills/verify-security-finding/`
+carries the procedure.
+
 ---
 
 ## ✅ Fixed — verification notes
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### FW-9 — the executable DOOM pack was CRC-checked, not signed (FIXED)
+
+**✅ Fixed 2026-08-29 (qmk #243).** The `.plyx` now carries a 64-byte Ed25519
+signature over *(header ‖ image)*, appended after the image (its position derives
+from `image_size`, so the pack ABI is unchanged and a signed pack still loads on
+pre-signature firmware). `doom_pack_load()` verifies it against `FW_SIGNING_PUBKEY`
+under `FW_REQUIRE_SIGNATURE` **at load time** — immediately before computing the
+entry pointer, not at flash COMMIT, because flash can be rewritten after a COMMIT
+succeeds. Signing the header too is load-bearing: `entry_off`/`ram_base` are what an
+attacker would edit to re-target a signed image. There is no on-keycap escape hatch
+(unlike an unsigned firmware image): the load runs at idle with nobody present to
+answer a prompt, so an unsigned pack is refused and the fire demo runs.
+`tools/sign_doompack.py` appends the trailer and `release.yml` signs the `.plyx`
+beside the `.bin`; `PACK_VERSION` 3→4 so the enforcing firmware release ships a
+matching signed pack (host `validate_doompack` tolerates the trailer, so no host
+change). The `.whx` / `.plyf` note below still stands — those are data, not code,
+and the resource-flash path still has no notion of authenticity for them.
+
+The original finding, kept as the record:
+
+> **(as raised — the exposure below is now closed by the fix above.)**
+
+Raised **2026-08-05**, by a fresh look at what FW-2 does *not* cover. FW-2 signs the
+**firmware image**. It does not sign the **DOOM engine pack** (`.plyx`) — which is
+executable code, flashed over the same HID transport, and *called* by the firmware.
+
+`doom/doom_pack_load.c` validates a flashed pack with: the `PlyX` magic, `abi ==
+DOOM_PACK_ABI`, `image_size` fits the slot, the `ram_base`/`ram_size` pairing, and a
+**CRC32** over the body. Every one of those is an integrity/compatibility check. **None
+authenticates the author** — a CRC32 is trivially satisfied by whoever crafts the image.
+It then does:
+
+```c
+doom_pack_init_fn init = (…)(slot + sizeof(*hdr) + hdr->entry_off + 1u);
+const doom_pack_api_t *api = init(&s_fw_api);
+```
+
+i.e. it **branches into attacker-supplied bytes at an attacker-supplied offset**, on a
+Cortex-M0+ with no MPU. Once executing, the code is not confined to `s_fw_api` — it has
+the whole address space, including the flash-write routines.
+
+**The chain needs no physical access and no user interaction:**
+
+1. Flash a crafted `.plyx` (cmds `0x50`–`0x52`, DOOMPACK target). No signature is checked
+   on this path — `fw_staging_check_signature()` is only called in the `FW_TARGET_FIRMWARE`
+   branch of `fw_staging_finalize_impl`.
+2. Set the idle style to `IDLE_STYLE_IDDQD` (2) over **HID cmd 28** — in range, so it is
+   accepted.
+3. Wait for the keyboard to idle. `doom_begin` → `doom_session_start` →
+   `doom_pack_load()` → the call above.
+
+So an attacker who can open the raw HID interface gets **arbitrary code execution with
+full firmware privilege**, which is precisely the outcome FW-2 exists to prevent. It
+applies to shipped keyboards: `release.yml` builds the `POLYKYBD_DOOM_PACK` flavour, and
+the `.plyx` is a published release asset.
+
+**Fix (recommended): verify the pack with the existing Ed25519 machinery, at LOAD time.**
+The verifier and `FW_SIGNING_PUBKEY` are already compiled in (`base/crypto/`,
+`base/fw_pubkey.h`). Put the 64-byte signature in the PlyX header (a `PACK_VERSION` bump)
+and check it in `doom_pack_load()` immediately before computing `init`. Verify at *load*,
+not at COMMIT: flash can be rewritten afterwards, so a "was validated once" flag is not a
+control. The cost is one SHA-512 over ~211 KB at session start — the loader already walks
+the whole image for the CRC there, so it is the same order of work, once per game session,
+not per frame. `release.yml` signs the `.plyx` alongside the `.bin`.
+
+**Interim mitigation** if that is not done promptly: build releases without
+`POLYKYBD_DOOM_PACK`. That removes the feature, so it is a stopgap, not a fix.
+
+⚠️ **The same "flashed over HID, authenticated by CRC only" property applies to the WAD
+(`.whx`) and the font-pack bundles (`.plyf`)** — but those are *data*, so the exposure is
+parser bugs in `fontpack.c` / the WAD reader rather than direct code execution. Lower
+severity, same root cause: the resource-flash path has no notion of authenticity.
+
 
 ### HIL-8 — the station user held blanket passwordless root
 
