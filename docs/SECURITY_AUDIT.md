@@ -44,6 +44,7 @@ signing the firmware image alone was not enough.**
 | FW-6 | (note only) | qmk | ✅ closed (PR #112) |
 | FW-7 | Plain-overlay 1-byte over-read | qmk / host / rig | ✅ fixed as the protocol-11 reframe (#120 / #96 / #43) |
 | FW-8 | RLE non-aligned OOB | qmk | ✅ fixed (PR #112) |
+| FW-11 | Font-pack (`.plyf`) glyph offset unvalidated — persistent HardFault DoS from an unsigned resource | qmk | ✅ fixed (offset alignment + extent checks) |
 | HOST-1 | Legacy plaintext window relay on by default | host | ✅ fixed (PR #133) |
 | HOST-2 | Confirmation polling holds `worker.exclusive()` for up to 75 s | host | 🟡 accepted + documented |
 | HOST-3 | Usage telemetry: new outbound surface, unauthenticated collector, on by default | host | 🟡 accepted + documented |
@@ -392,6 +393,40 @@ carries the procedure.
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### FW-11 — a crafted `.plyf` could HardFault the board persistently (FIXED)
+
+**✅ Fixed 2026-09-01.** `fontpack_load_at()` cast the pack's **file-controlled**
+`glyph_off` straight to `PolyColGlyph *`, validating only that it was
+`< total_size`. Two holes, both reachable from data flashed over the **unsigned**
+resource transport (cmds `0x50`–`0x52`) — the surface FW-9's tail already names:
+*".whx / .plyf ride the same transport and are still authenticity-unchecked — but
+they are data, so the exposure is parser bugs, not direct code execution."* This
+was one of those parser bugs.
+
+1. **Odd offset → unaligned 16-bit read → HardFault.** `PolyColGlyph` begins with
+   a `uint16_t`, so an odd `glyph_off` faults the M0+ on *every* glyph lookup.
+   Severity comes from persistence: the pack lives in the 4–8 MB resource region
+   and `fontpack_load()` runs at boot, so a crafted pack is a **boot fault loop
+   that only BOOTSEL clears** — the same recovery cost as the FW-2 brick, reached
+   without any signature or keypress.
+2. **Extent unchecked.** Only the *start* of the glyph array was bounded; the
+   array is `last - first + 1` records and all of them are read, so a truthful
+   offset with an oversized range walks off the end of the pack. An out-of-bounds
+   read of mapped XIP flash — garbage glyphs, not a fault, but unbounded.
+
+**Fix**: reject an odd `glyph_off`, an inverted `first > last`, and a glyph array
+whose extent passes `total_size`. Verified against every shipped bundle before
+landing — 8 packs / 158 fonts, **zero** rejected, so the checks cost no
+compatibility.
+
+**How it was found**, which is the part worth keeping: not by review or by a
+scanner, but by turning on **`-Wcast-align`** for PolyKybd's own sources
+(`keyboards/polykybd/rules.mk`) after the HID-apply brick (qmk#258) turned out to
+be that exact shape — a `uint8_t` buffer word-copied through a widening cast. The
+flag flagged this loader on its first build. A compile-time check aimed at one
+known bug found an unrelated, more exposed instance of the same class; that is
+the argument for keeping it on.
 
 ### FW-9 — the executable DOOM pack was CRC-checked, not signed (FIXED)
 
