@@ -115,6 +115,39 @@ class LoadTest(ProbeFixture):
             load_probe(self.write("p.py", "NAME = 'nope'\n"))
         self.assertIn("no probe(raw, log)", str(ctx.exception))
 
+    def test_a_probe_is_registered_in_sys_modules_before_it_executes(self):
+        """importlib's prescribed idiom, and not optional for a probe.
+
+        Anything resolving its own defining module through ``sys.modules`` during
+        import fails without it — at LOAD time, so a whole rig run is spent on an
+        error that has nothing to do with the firmware under test.
+
+        ⚠️ The fixture is deliberately ``from __future__ import annotations`` plus
+        ``@dataclass``, NOT a bare ``@dataclass``. A bare one does not reproduce:
+        dataclasses fall back to empty globals when the module is absent. String
+        annotations are what force the lookup. A test written against the obvious
+        example would pass against the broken code and prove nothing.
+        """
+        body = ("from __future__ import annotations\n"
+                "from dataclasses import dataclass, field\n"
+                "@dataclass\n"
+                "class C:\n"
+                "    xs: list[int] = field(default_factory=list)\n"
+                "def probe(raw, log):\n"
+                "    return C().xs == []\n")
+        test = load_probe(self.write("p.py", body))
+        self.assertTrue(test["fn"](None, lambda *_: None))
+
+    def test_a_failed_import_does_not_leave_the_module_registered(self):
+        # The other half of the idiom: a probe that raises must not leave a
+        # half-initialised module behind for the next load of the same name.
+        import sys
+        before = set(sys.modules)
+        with self.assertRaises(ProbeError):
+            load_probe(self.write("p.py", "raise RuntimeError('boom')\n"))
+        self.assertEqual([m for m in set(sys.modules) - before
+                          if m.startswith("hil_probe_")], [])
+
     def test_a_probe_that_fails_to_IMPORT_is_refused_before_any_flash(self):
         # Reported as a ProbeError, not raised through the runner: the CLI turns
         # it into a parser error, so a broken probe costs a message rather than a

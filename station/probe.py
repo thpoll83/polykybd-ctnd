@@ -38,6 +38,7 @@ importing some unrelated module for its side effects.
 
 import importlib.util
 import os
+import sys
 from typing import Callable, Optional
 
 # Where a probe must live, relative to the firmware checkout root.
@@ -101,9 +102,20 @@ def load_probe(path: str, log: Optional[Callable[[str], None]] = None) -> dict:
     if spec is None or spec.loader is None:
         raise ProbeError(f"cannot import a probe from {path}")
     module = importlib.util.module_from_spec(spec)
+    # ⚠️ Register BEFORE exec_module, and unregister if it raises — the idiom the
+    # importlib docs prescribe, and not optional here. Anything that resolves its
+    # own defining module through sys.modules during import fails otherwise, and
+    # it fails at LOAD time, i.e. before the flash, so the whole rig run is spent
+    # on an error that has nothing to do with the firmware. The obvious example
+    # (`@dataclass`) does NOT reproduce — dataclasses fall back to empty globals
+    # — but `from __future__ import annotations` plus @dataclass does, because
+    # string annotations force the lookup, and so does pickling a probe-defined
+    # class. Both are things an ordinary probe might reasonably do.
+    sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
     except Exception as exc:                       # noqa: BLE001 - reported, not swallowed
+        sys.modules.pop(spec.name, None)
         raise ProbeError(f"probe {stem!r} failed to import: {exc}") from exc
 
     fn = getattr(module, "probe", None)
