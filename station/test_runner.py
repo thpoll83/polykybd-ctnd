@@ -858,6 +858,21 @@ if __name__ == "__main__":
     parser.add_argument("--plyx-valid", dest="plyx_valid", default=None,
                         help="a signed DOOM engine pack (.plyx) for the --doom tests; "
                              "the rig derives the tampered/unsigned variants from it.")
+    parser.add_argument("--probe", default=None,
+                        help="run an ad-hoc PROBE from the firmware checkout instead "
+                             "of the graded suite (see station/probe.py). Takes a probe "
+                             "name or a repo-relative path under keyboards/polykybd/"
+                             "tools/hil_probes/. The flash, readiness gates and console "
+                             "tap all still run, so the firmware's own [qmk] lines land "
+                             "in the run log — which is what lets a firmware bug be "
+                             "chased without anyone flashing a .bin by hand.")
+    parser.add_argument("--firmware-dir", default=os.environ.get("FIRMWARE_DIR", "."),
+                        help="the firmware checkout --probe is resolved against "
+                             "(default: $FIRMWARE_DIR, else the cwd)")
+    parser.add_argument("--probe-with-suite", action="store_true",
+                        help="run the graded suite as well as --probe. Off by default: "
+                             "a debug loop wants the probe alone, and the suite costs "
+                             "rig time on every iteration.")
     args = parser.parse_args()
     if args.doom and not args.plyx_valid:
         parser.error("--doom needs --plyx-valid (a signed .plyx built against the "
@@ -865,9 +880,22 @@ if __name__ == "__main__":
     if args.plyx_valid:
         with open(args.plyx_valid, "rb") as fh:
             set_doom_pack(fh.read())
+    # A probe REPLACES the graded suite unless asked otherwise (see --probe-with-suite).
+    # Resolve and import it BEFORE flashing: a typo'd probe name should cost a
+    # message, not a full flash-and-enumerate cycle on the rig.
+    suite = TESTS
+    if args.probe:
+        from .probe import ProbeError, load_probe, resolve_probe
+        try:
+            probe_test = load_probe(resolve_probe(args.probe, args.firmware_dir),
+                                    log=print)
+        except ProbeError as exc:
+            parser.error(str(exc))
+        suite = list(TESTS) + [probe_test] if args.probe_with_suite else [probe_test]
+
     runner = TestRunner()
     try:
-        result = runner.flash_and_test(args.left, args.right, tests=TESTS,
+        result = runner.flash_and_test(args.left, args.right, tests=suite,
                                        bin_path=args.bin_path,
                                        extended=args.extended,
                                        doom=args.doom,
