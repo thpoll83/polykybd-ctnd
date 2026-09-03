@@ -287,16 +287,13 @@ class ConsoleReopenTest(unittest.TestCase):
         self.assertEqual(console.abandoned_handles, 1)
 
 
-class ApplyRoundTripWiringTest(unittest.TestCase):
-    """The link check must run against a console that is actually being fed.
+class _ApplyFixture(unittest.TestCase):
+    """Stubs for every device interaction the apply path makes.
 
-    This is the test that would have caught the first cut of this feature. The
-    suite STOPS the console before the whole firmware-update section (BEGIN
-    tears USB down during the master's staging erase), so passing the
-    run-start "did the console come up" flag straight through made the post-apply
-    measurement read a `TAP` nothing was feeding: `LINK_NO_SUMMARY` on every run,
-    present and passing and asserting nothing. Rendering the wiring correct in a
-    diff is not the same as exercising it.
+    A TestCase with no test methods of its own, so the subclasses below share
+    it without re-running each other's tests — inheriting a populated TestCase
+    would silently run the parent's assertions once per subclass and inflate
+    the count that is meant to prove new tests were registered at all.
     """
 
     def setUp(self):
@@ -318,12 +315,17 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         # boot banner; neither is what these tests are about.
         clock = {"t": 0.0}
 
+        sleeps = []
+
         def fake_sleep(seconds):
             clock["t"] += seconds
+            sleeps.append(seconds)
 
         fake_time = types.SimpleNamespace(sleep=fake_sleep,
                                           monotonic=lambda: clock["t"])
         test_runner.time = fake_time
+        self.clock = clock
+        self.sleeps = sleeps
         test_runner.TAP = types.SimpleNamespace(
             mark=lambda: 0,
             wait_for=lambda *a, **k: "banner",
@@ -334,7 +336,8 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         for name, value in self._saved.items():
             setattr(self.tr, name, value)
 
-    def _runner(self, console_ok=True, link=None, masters=1):
+    def _runner(self, console_ok=True, link=None, masters=1,
+                flash_raises=False):
         """A runner with every device interaction stubbed out."""
         seen = {"console_live_at_measure": None, "measured": False}
 
@@ -352,7 +355,17 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         seen["log"] = []
         runner = self.tr.TestRunner(log=seen["log"].append)
         runner._console = FakeConsole()
-        runner._flash = None
+        class FakeFlash:
+            def __init__(self):
+                self.calls = []
+
+            def flash(self, side, path, log=None):
+                self.calls.append((side, path))
+                if flash_raises:
+                    raise RuntimeError("BOOTSEL never enumerated")
+
+        runner._flash = FakeFlash()
+        seen["flash"] = runner._flash
         runner._caps = {"fw": "9.9.9"}
         runner.wait_for_master_ready = lambda *a, **k: True
         runner.settle_master = lambda *a, **k: True
@@ -386,6 +399,18 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         binp.write_bytes(b"IMAGE")
         (binp.parent / "fw.bin.sig").write_bytes(b"\0" * 64)
         return runner.firmware_apply_roundtrip(str(binp), "left.uf2", console=True)
+
+class ApplyRoundTripWiringTest(_ApplyFixture):
+    """The link check must run against a console that is actually being fed.
+
+    This is the test that would have caught the first cut of this feature. The
+    suite STOPS the console before the whole firmware-update section (BEGIN
+    tears USB down during the master's staging erase), so passing the
+    run-start "did the console come up" flag straight through made the post-apply
+    measurement read a `TAP` nothing was feeding: `LINK_NO_SUMMARY` on every run,
+    present and passing and asserting nothing. Rendering the wiring correct in a
+    diff is not the same as exercising it.
+    """
 
     def test_the_console_is_LIVE_when_the_link_is_measured(self):
         import tempfile
@@ -569,3 +594,157 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
             [ln for ln in seen["log"] if "during the measurement" in ln], [],
             "claimed a measurement that never ran")
         self.assertEqual(result["status"], "pass")
+
+
+class PostApplySlaveReflashTest(_ApplyFixture):
+    """The re-flash that lets the split link be measured at all on this rig.
+
+    An apply necessarily converts the rig's slave into a second master (it
+    installs the master's bridged bytes, and the two halves run different images
+    by construction), so the link check inside the apply can only ever report
+    UNVERIFIED here. Re-flashing the slave's own image and measuring afterwards
+    asks the question that IS answerable: can the **applied master image** bring
+    a split link back up?
+
+    ⚠️ It does NOT answer "did the slave survive its own apply" — nothing on
+    this rig can, and a test named as though it did would be worse than none.
+    """
+
+    def _post(self, runner):
+        return runner.post_apply_split_link("right.uf2", console=True)
+
+    def test_the_slave_is_reflashed_and_the_link_measured(self):
+        runner, seen, _fc = self._runner()
+        result = self._post(runner)
+        self.assertEqual(seen["flash"].calls, [("right", "right.uf2")],
+                         "the SLAVE half is the one that must be re-flashed")
+        self.assertTrue(seen["measured"])
+        self.assertTrue(seen["console_live_at_measure"],
+                        "measured a TAP nothing was feeding — the check is inert")
+        self.assertEqual(result["status"], "pass")
+
+    def test_the_link_settles_BEFORE_it_is_measured(self):
+        """The reconnect must not land inside the measured window.
+
+        A master that exhausted SPLIT_MAX_CONNECTION_ERRORS throttles to one
+        attempt per SPLIT_CONNECTION_CHECK_TIMEOUT and clears its error count on
+        the first success — so the link recovers on its own, but the failing
+        attempts before it are real transport_fails. The soak tolerates ~1% of
+        ~450 frames, i.e. about 4, which a reconnect window clears easily, so
+        measuring immediately would grade the reconnect as the fault.
+        """
+        at = {}
+        runner, seen, _fc = self._runner()
+        inner = self.tr.measure_split_link
+
+        def timed(raw, log):
+            at["sleeps"] = list(self.sleeps)
+            return inner(raw, log)
+
+        self.tr.measure_split_link = timed
+        self._post(runner)
+        self.assertIn("sleeps", at, "the link was never measured")
+        # ⚠️ Assert the settle SLEEP happened, not that enough clock elapsed.
+        # `_masters_after_apply` polls for up to _MASTERS_SETTLE_S right before
+        # the measurement, so an elapsed-total form passes with the settle
+        # deleted — it did, and this mutation escaped until the test asked the
+        # question it meant to ask.
+        self.assertIn(
+            runner.POST_APPLY_LINK_SETTLE_S, at["sleeps"],
+            "measured without waiting POST_APPLY_LINK_SETTLE_S for the link to "
+            "re-establish — the reconnect lands inside the measured window")
+
+    def test_a_link_fault_after_the_reflash_FAILS(self):
+        runner, seen, _fc = self._runner(link=LINK_FAULT)
+        result = self._post(runner)
+        self.assertEqual(result["status"], "fail")
+
+    def test_two_masters_after_the_reflash_is_a_rig_fault_and_is_not_measured(self):
+        """A slave that did not come back as a slave leaves no link to measure.
+
+        Grading that as a firmware fault would report the rig's own failed flash
+        as the applied image being unable to talk to its slave.
+        """
+        runner, seen, _fc = self._runner(masters=2)
+        result = self._post(runner)
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(seen["measured"],
+                         "measured a link that cannot exist")
+        self.assertIn("RIG fault", "\n".join(seen["log"]))
+
+    def test_a_dead_console_SKIPS_rather_than_failing(self):
+        runner, seen, _fc = self._runner(console_ok=False)
+        result = self._post(runner)
+        self.assertEqual(result["status"], "skip")
+        self.assertFalse(seen["measured"])
+
+    def test_no_summary_SKIPS_rather_than_failing(self):
+        runner, seen, _fc = self._runner(link=LINK_NO_SUMMARY)
+        result = self._post(runner)
+        self.assertEqual(result["status"], "skip")
+
+    def test_a_failed_reflash_fails_without_measuring(self):
+        runner, seen, _fc = self._runner(flash_raises=True)
+        result = self._post(runner)
+        self.assertEqual(result["status"], "fail")
+        self.assertFalse(seen["measured"])
+
+
+class ApplyResultCarriesTheLinkOutcomeTest(_ApplyFixture):
+    """The apply reports WHICH link outcome it reached, not just pass/fail.
+
+    That is what lets the caller skip the re-flash on a run whose link was
+    already healthy — re-flashing there costs a full flash cycle to learn
+    nothing — and it is the only thing distinguishing the two cases from
+    outside, since both return ``status: pass``.
+    """
+
+    def test_a_healthy_link_is_reported_as_such(self):
+        import tempfile
+        runner, _seen, _fc = self._runner()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertEqual(result.get("link"), LINK_OK)
+
+    def test_an_unverified_link_is_reported_as_such(self):
+        import tempfile
+        runner, _seen, _fc = self._runner(masters=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result.get("link"), LINK_NO_SUMMARY)
+
+
+class ShouldReflashSlaveTest(unittest.TestCase):
+    """The switch that decides whether the re-flash runs at all.
+
+    Pinned because an unexercised one-line gate is exactly how the first cut of
+    the post-apply link check shipped inert — present, passing, asserting
+    nothing. Inverting either condition here has to turn a test red.
+    """
+
+    def setUp(self):
+        from station.test_runner import should_reflash_slave
+        self.decide = should_reflash_slave
+
+    def test_an_unverified_link_after_a_passing_apply_is_followed_up(self):
+        self.assertTrue(self.decide({"status": "pass", "link": LINK_NO_SUMMARY}))
+
+    def test_a_healthy_link_needs_no_reflash(self):
+        self.assertFalse(self.decide({"status": "pass", "link": LINK_OK}))
+
+    def test_a_failed_apply_is_not_followed_up(self):
+        """Its diagnosis is the apply's, and a re-flash overwrites the evidence."""
+        self.assertFalse(self.decide({"status": "fail", "link": LINK_NO_SUMMARY}))
+
+    def test_a_skipped_apply_is_not_followed_up(self):
+        self.assertFalse(self.decide({"status": "skip",
+                                      "reason": "no .sig beside the image"}))
+
+    def test_an_apply_result_with_no_link_key_is_followed_up(self):
+        """An older result shape must not silently disable the check.
+
+        Absent is not the same as OK: a result that never recorded a link
+        outcome has not measured one, so the question is still open.
+        """
+        self.assertTrue(self.decide({"status": "pass"}))

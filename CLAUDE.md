@@ -299,10 +299,41 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
       graded.
     - ⚠️ **So the fwapply tier cannot answer "did the slave survive its own
       apply?" on this rig at all**, and no amount of assertion strength changes
-      that. Answering it would need the runner to re-flash the slave's own
-      `*_hil_right.uf2` after the apply and then measure — which tests something
-      different ("the applied master image can still talk to a slave") and is a
-      deliberate design choice, not a bug fix.
+      that. It is a property of the per-side images, not of the check.
+    - ✅ **The answerable half of that question IS now asked —
+      `post_apply_split_link` re-flashes the slave and measures.** It runs after
+      a passing apply whose own link check came back UNVERIFIED, re-flashes
+      `*_hil_right.uf2` over BOOTSEL, and bridges the same soak. What it proves
+      is deliberately narrower than the name suggests: **the applied master
+      image can bring a split link back up with a fresh slave** — a master that
+      returned subtly wrong (broken transport, mis-sized shared-memory struct,
+      dead PIO) fails here and passes every other assertion in the round-trip.
+      That is the other half of the 2026-09-03 field report, where the master
+      enumerated perfectly and the link stayed silent. It also restores the
+      rig's two-image invariant, which an apply otherwise leaves broken until
+      the next run's flash.
+      - ⚠️ **SETTLE before measuring, or the reconnect is graded as the fault.**
+        A master that exhausted `SPLIT_MAX_CONNECTION_ERRORS` (200 here)
+        throttles to one attempt per `SPLIT_CONNECTION_CHECK_TIMEOUT` (500 ms)
+        and zeroes its error count on the first success
+        (`quantum/split_common/split_util.c`, `transport_master_if_connected`) —
+        so the link does come back by itself, but every failing attempt before
+        it is a real `transport_fail`, and the soak tolerates only ~1% of ~450
+        frames. Hence `POST_APPLY_LINK_SETTLE_S`.
+      - ⚠️ **Two masters AFTER the re-flash is a RIG fault, not a firmware one**
+        — the flash did not take, so there is no link to measure and grading one
+        would report the rig's own failure as the applied image being unable to
+        talk to its slave. It fails, and says which.
+      - **Costs the default tier nothing**, because its caller is extended-only:
+        the apply round-trip needs `--extended`, which the fwapply CI job passes.
+        ⚠️ Note that means "extended" and "every merge to `PolyKybd`" are the
+        **same set** here — the added BOOTSEL cycle lands on every merge, not
+        only on an opt-in run.
+      - **`should_reflash_slave()` is the gate, extracted and pure** for the
+        reason `classify_link_health` and `decide_stale_bundles` are: a one-line
+        switch nobody exercises is exactly how the first cut of the post-apply
+        link check shipped inert. It needs the apply's `link` outcome, which is
+        why that result dict carries one.
   - ⚠️ **`measure_split_link` is TRI-state, and the third value is what keeps the
     check honest.** `LINK_NO_SUMMARY` means the console produced no `Split link:`
     line, i.e. the measurement did not happen — reporting that as a dead slave
