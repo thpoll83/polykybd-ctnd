@@ -312,7 +312,8 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         self.tr = test_runner
         self._saved = {n: getattr(test_runner, n) for n in
                        ("stage_and_verify", "apply_staged", "caps_from_image",
-                        "uf2_file_to_bin", "measure_split_link", "time", "TAP")}
+                        "uf2_file_to_bin", "measure_split_link", "time", "TAP",
+                        "enumerate_raw_interfaces")}
         # The real path sleeps out the applier's copy window and waits on the
         # boot banner; neither is what these tests are about.
         fake_time = types.SimpleNamespace(sleep=lambda _s: None,
@@ -328,7 +329,7 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         for name, value in self._saved.items():
             setattr(self.tr, name, value)
 
-    def _runner(self, console_ok=True, link=None):
+    def _runner(self, console_ok=True, link=None, masters=1):
         """A runner with every device interaction stubbed out."""
         seen = {"console_live_at_measure": None, "measured": False}
 
@@ -362,6 +363,7 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
             return link if link is not None else self.tr.LINK_OK
 
         self.tr.measure_split_link = fake_measure
+        self.tr.enumerate_raw_interfaces = lambda: [{"path": b"one"}] * masters
         return runner, seen, FakeConsole
 
     def _apply(self, runner, tmp):
@@ -405,3 +407,30 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._apply(runner, tmp)
         self.assertFalse(fc.live)
+
+    def test_two_masters_after_the_apply_is_reported_not_graded(self):
+        """The rig's own apply semantics must not read as a firmware fault.
+
+        The slave installs its own STAGED image, which is the master's image
+        bridged during CHUNK. On a real keyboard that is correct — one image,
+        role chosen at runtime by VBUS. On the rig the halves run different
+        images by construction, so the slave applies the master image and comes
+        back as a second master: no slave, 100% transport_fail. Observed on run
+        33733020495 (12930/12930 frames, crc_err=0).
+        """
+        import tempfile
+        runner, seen, _fc = self._runner(masters=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertFalse(seen["measured"],
+                         "measured a link whose slave is running a master image")
+        self.assertEqual(result["status"], "pass")
+
+    def test_one_master_and_a_dead_link_still_FAILS(self):
+        # The distinction is what keeps the check worth having: this is the
+        # shape of the field report (master fine, slave silent).
+        import tempfile
+        runner, _seen, _fc = self._runner(masters=1, link="fault")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertEqual(result["status"], "fail")

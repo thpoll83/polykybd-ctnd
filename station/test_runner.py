@@ -6,7 +6,7 @@ from typing import Callable
 
 from .console_log import TAP, console_sink
 from .flash import FlashController
-from .hid import HIDConsole, RawHID
+from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (parse_device_caps, skip_reason, measure_split_link,
@@ -469,8 +469,37 @@ class TestRunner:
             # Everything above this point is a statement about the MASTER. The
             # slave reboots too, and only the split-link counters can say
             # whether it came back; see the docstring.
-            link = (measure_split_link(self._raw, self.log)
-                    if console_live else LINK_NO_SUMMARY)
+            # ⚠️ On THIS RIG the apply necessarily destroys the slave, and that
+            # is structural, not a firmware fault. The slave installs its own
+            # STAGED image, and the staged bytes are the ones the master bridged
+            # during CHUNK — i.e. the master's image. On a real keyboard both
+            # halves run one identical image and the role is decided at runtime
+            # by VBUS, so that is exactly right. Here the halves run DIFFERENT
+            # images by construction (POLYKYBD_HIL=left/right), so the slave
+            # applies the left/master image, no longer calls usb_disconnect(),
+            # and comes back as a second master: no slave, so 100%
+            # transport_fail. Measured on run 33733020495 — 12930 of 12930
+            # frames, crc_err=0.
+            #
+            # That is directly observable rather than assumed: two enumerated
+            # Raw HID interfaces IS both halves being master (the same signal
+            # `test_single_master` uses). So the two cases stay distinguishable
+            # — one master plus a dead link is a REAL slave failure and still
+            # fails; two masters is this rig's own apply semantics and is
+            # reported, not graded.
+            masters = len(enumerate_raw_interfaces())
+            if masters > 1:
+                self.log(f"[runner] note: {masters} Raw HID interfaces after the "
+                         "apply — the slave installed the master's image (the rig "
+                         "flashes per-side images, so an apply necessarily converts "
+                         "it) and came back as a second master. The split link "
+                         "cannot be measured in that state, so the SLAVE IS "
+                         "UNVERIFIED for this run; it is NOT evidence of a firmware "
+                         "fault. See the note in firmware_apply_roundtrip.")
+                link = LINK_NO_SUMMARY
+            else:
+                link = (measure_split_link(self._raw, self.log)
+                        if console_live else LINK_NO_SUMMARY)
             if link == LINK_OK:
                 self.log("[runner] the split link is carrying traffic again — both "
                          "halves came back from the apply")
