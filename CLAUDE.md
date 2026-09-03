@@ -324,11 +324,27 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
         — the flash did not take, so there is no link to measure and grading one
         would report the rig's own failure as the applied image being unable to
         talk to its slave. It fails, and says which.
-      - **Costs the default tier nothing**, because its caller is extended-only:
-        the apply round-trip needs `--extended`, which the fwapply CI job passes.
-        ⚠️ Note that means "extended" and "every merge to `PolyKybd`" are the
-        **same set** here — the added BOOTSEL cycle lands on every merge, not
-        only on an opt-in run.
+      - ⚠️ **OFF by default — `--reflash-slave` / `HIL_RESLAVE=1`, and that is a
+        RELEASE-GATE decision, not a cost one.** The obvious wiring is "it is
+        extended-only, and the apply round-trip is extended-only, so it rides
+        along" — but the fwapply job passes `--extended` and runs on **every
+        merge to `PolyKybd`**, so "extended" and "every merge" are the same set
+        here. And this check lives INSIDE that job, whose conclusion
+        `require_fwapply_run.py` requires to be `success` before a release can
+        publish (`covered_by()`). So anything that can fail here can refuse a
+        release — which is not a thing to switch on for code that has never
+        executed against the rig. Prove it with a dispatch first, then decide.
+        Cost when on: **~45–55 s**, not the ~25 s a flash alone suggests — the
+        BOOTSEL cycle plus `POST_APPLY_LINK_SETTLE_S` plus
+        `_masters_after_apply`, which has **no early exit for the expected count
+        of 1** and so always spends its full `_MASTERS_SETTLE_S`.
+      - ⚠️ **A ctnd branch CANNOT be proven on the rig before it merges** — every
+        rig job hard-checkouts ctnd `main` (`git checkout -q -f -B main
+        origin/main`, five times over in `qmk-test.yml`), so a dispatch runs
+        `main`'s station code no matter which branch you dispatch on. That is
+        why the opt-in exists at all rather than a "try it on the branch first"
+        plan: the only sequence that works is **merge off → dispatch on →
+        decide**.
       - **`should_reflash_slave()` is the gate, extracted and pure** for the
         reason `classify_link_health` and `decide_stale_bundles` are: a one-line
         switch nobody exercises is exactly how the first cut of the post-apply

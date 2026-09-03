@@ -33,7 +33,7 @@ ACK              = ord(".")
 VIA_DYNAMIC_KEYMAP_RESET = 0x06
 
 
-def should_reflash_slave(apply_result: dict) -> bool:
+def should_reflash_slave(apply_result: dict, enabled: bool) -> bool:
     """Whether to finish the link question by re-flashing the slave.
 
     Pure, and extracted rather than left inline, because it is the switch that
@@ -53,8 +53,16 @@ def should_reflash_slave(apply_result: dict) -> bool:
     slave into a second master, so the in-apply check can only report
     UNVERIFIED), but that is a property of the rig's per-side images, not of the
     contract — a single-image rig would take the skip.
+
+    ``enabled`` is the caller's opt-in and is checked FIRST, so the whole
+    follow-up is off unless asked for. It defaults off because this runs inside
+    the apply job, and ``require_fwapply_run.py`` gates publishing on that job's
+    conclusion being ``success`` — so anything that can fail here can refuse a
+    release. It has never executed against the rig; turning it on per-merge is a
+    decision to make after a clean proof run, not before one.
     """
-    return (apply_result.get("status") == "pass"
+    return (enabled
+            and apply_result.get("status") == "pass"
             and apply_result.get("link") != LINK_OK)
 
 
@@ -103,6 +111,7 @@ class TestRunner:
 
     def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
                        bin_path: str = None, extended: bool = False,
+                       reflash_slave: bool = False,
                        doom: bool = False,
                        apply_bin: str = None) -> dict:
         """Flash both halves and run ``tests`` against the master.
@@ -271,7 +280,7 @@ class TestRunner:
                     applied = self.firmware_apply_roundtrip(
                         apply_bin, left_uf2, console=console_started)
                     results.append(applied)
-                    if should_reflash_slave(applied):
+                    if should_reflash_slave(applied, reflash_slave):
                         results.append(self.post_apply_split_link(
                             right_uf2, console=console_started))
 
@@ -1176,9 +1185,17 @@ def write_github_summary(result: dict, label: str = "") -> None:
         print(f"[runner] could not write GITHUB_STEP_SUMMARY: {exc}")
 
 
-if __name__ == "__main__":
+def build_parser():
+    """The CLI, as a function so its DEFAULTS are reachable from a test.
+
+    Built inline under ``__main__`` until 2026-09-03, which meant no test
+    could assert what a flag defaults to — and ``--reflash-slave`` defaulting
+    off is the whole safety argument for it (it runs inside the job the
+    release gate requires green). A mutation flipping that default escaped
+    the suite; this is what closes it.
+    """
     import argparse
-    from .hil_tests import TESTS, set_doom_pack
+
     parser = argparse.ArgumentParser(description="Flash and test PolyKybd firmware")
     parser.add_argument("--left",  required=True, help="Path to left half UF2")
     parser.add_argument("--right", required=True, help="Path to right half UF2")
@@ -1204,6 +1221,18 @@ if __name__ == "__main__":
                              "reboot persistence). Adds roughly a minute; meant for "
                              "a release or a change big enough to want them. Also "
                              "settable with HIL_EXTENDED=1.")
+    parser.add_argument("--reflash-slave", dest="reflash_slave", action="store_true",
+                        default=os.environ.get("HIL_RESLAVE", "").lower()
+                        in ("1", "true", "yes"),
+                        help="after the firmware apply round-trip, re-flash the "
+                             "slave with its own image and measure the split link. "
+                             "Answers whether the APPLIED master image can bring a "
+                             "link back up (an apply on this rig necessarily turns "
+                             "the slave into a second master, so the in-apply check "
+                             "can only report UNVERIFIED). Adds ~45-55 s and a "
+                             "BOOTSEL cycle. Off by default: it runs inside the job "
+                             "the release gate requires to be green. Also settable "
+                             "with HIL_RESLAVE=1.")
     parser.add_argument("--doom", action="store_true",
                         default=os.environ.get("DOOM_HIL", "").lower()
                         in ("1", "true", "yes"),
@@ -1229,6 +1258,13 @@ if __name__ == "__main__":
                         help="run the graded suite as well as --probe. Off by default: "
                              "a debug loop wants the probe alone, and the suite costs "
                              "rig time on every iteration.")
+    return parser
+
+
+if __name__ == "__main__":
+    import argparse
+    from .hil_tests import TESTS, set_doom_pack
+    parser = build_parser()
     args = parser.parse_args()
     if args.doom and not args.plyx_valid:
         parser.error("--doom needs --plyx-valid (a signed .plyx built against the "
@@ -1254,6 +1290,7 @@ if __name__ == "__main__":
         result = runner.flash_and_test(args.left, args.right, tests=suite,
                                        bin_path=args.bin_path,
                                        extended=args.extended,
+                                       reflash_slave=args.reflash_slave,
                                        doom=args.doom,
                                        apply_bin=args.apply_bin)
     except Exception as exc:

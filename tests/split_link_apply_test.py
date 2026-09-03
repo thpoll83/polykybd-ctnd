@@ -728,18 +728,33 @@ class ShouldReflashSlaveTest(unittest.TestCase):
         self.decide = should_reflash_slave
 
     def test_an_unverified_link_after_a_passing_apply_is_followed_up(self):
-        self.assertTrue(self.decide({"status": "pass", "link": LINK_NO_SUMMARY}))
+        self.assertTrue(self.decide({"status": "pass", "link": LINK_NO_SUMMARY},
+                                    enabled=True))
+
+    def test_it_is_OFF_unless_the_caller_opts_in(self):
+        """The opt-in is checked first, and defaults off.
+
+        This runs inside the apply job, and require_fwapply_run.py gates
+        publishing on that job's conclusion being success — so anything that can
+        fail here can refuse a release. It has never executed against the rig,
+        so per-merge is a decision for after a clean proof run.
+        """
+        self.assertFalse(self.decide({"status": "pass", "link": LINK_NO_SUMMARY},
+                                     enabled=False))
 
     def test_a_healthy_link_needs_no_reflash(self):
-        self.assertFalse(self.decide({"status": "pass", "link": LINK_OK}))
+        self.assertFalse(self.decide({"status": "pass", "link": LINK_OK},
+                                     enabled=True))
 
     def test_a_failed_apply_is_not_followed_up(self):
         """Its diagnosis is the apply's, and a re-flash overwrites the evidence."""
-        self.assertFalse(self.decide({"status": "fail", "link": LINK_NO_SUMMARY}))
+        self.assertFalse(self.decide({"status": "fail", "link": LINK_NO_SUMMARY},
+                                     enabled=True))
 
     def test_a_skipped_apply_is_not_followed_up(self):
         self.assertFalse(self.decide({"status": "skip",
-                                      "reason": "no .sig beside the image"}))
+                                      "reason": "no .sig beside the image"},
+                                     enabled=True))
 
     def test_an_apply_result_with_no_link_key_is_followed_up(self):
         """An older result shape must not silently disable the check.
@@ -747,4 +762,70 @@ class ShouldReflashSlaveTest(unittest.TestCase):
         Absent is not the same as OK: a result that never recorded a link
         outcome has not measured one, so the question is still open.
         """
-        self.assertTrue(self.decide({"status": "pass"}))
+        self.assertTrue(self.decide({"status": "pass"}, enabled=True))
+
+
+class ReflashSlaveDefaultsOffTest(unittest.TestCase):
+    """The CLI default is the safety property, so it is pinned.
+
+    ``post_apply_split_link`` runs inside the firmware-apply job, and
+    ``require_fwapply_run.py`` gates publishing on that job's conclusion being
+    ``success`` — so anything that can fail there can refuse a release. It has
+    never executed against the rig, so it must stay opt-in until a proof run
+    says otherwise. A mutation flipping this default escaped the suite before
+    the parser was made reachable.
+
+    ⚠️ What is STILL uncovered is the one-line hand-off inside ``__main__``
+    (``reflash_slave=args.reflash_slave``): a mutation wiring it to
+    ``args.extended`` passes every test here, because nothing can import that
+    block. Both ends are pinned — the parser default below and
+    ``should_reflash_slave``'s opt-in — but the wire between them is not, and
+    that is true of every flag in this file. Extracting a full ``main()`` is
+    what would close it.
+    """
+
+    def setUp(self):
+        if "RPi" not in sys.modules:  # pragma: no cover - environment shim
+            rpi, gpio = types.ModuleType("RPi"), types.ModuleType("RPi.GPIO")
+            for name in ("setmode", "setup", "output", "cleanup", "setwarnings"):
+                setattr(gpio, name, lambda *a, **k: None)
+            for name in ("BCM", "OUT", "HIGH", "LOW"):
+                setattr(gpio, name, 0)
+            rpi.GPIO = gpio
+            sys.modules["RPi"], sys.modules["RPi.GPIO"] = rpi, gpio
+        from station.test_runner import build_parser
+        self.build_parser = build_parser
+        self.argv = ["--left", "l_hil_left.uf2", "--right", "r_hil_right.uf2"]
+
+    def _parse(self, env=None):
+        import os
+        saved = os.environ.pop("HIL_RESLAVE", None)
+        try:
+            if env is not None:
+                os.environ["HIL_RESLAVE"] = env
+            return self.build_parser().parse_args(self.argv)
+        finally:
+            os.environ.pop("HIL_RESLAVE", None)
+            if saved is not None:
+                os.environ["HIL_RESLAVE"] = saved
+
+    def test_it_is_off_when_nothing_asks_for_it(self):
+        self.assertFalse(self._parse().reflash_slave)
+
+    def test_the_flag_turns_it_on(self):
+        self.argv += ["--reflash-slave"]
+        self.assertTrue(self._parse().reflash_slave)
+
+    def test_the_env_var_turns_it_on(self):
+        """CI passes it as an env var, mirroring HIL_EXTENDED."""
+        self.assertTrue(self._parse(env="1").reflash_slave)
+
+    def test_an_empty_env_var_does_not_turn_it_on(self):
+        self.assertFalse(self._parse(env="").reflash_slave)
+
+    def test_extended_is_unaffected(self):
+        """The two opt-ins are independent — extended must not imply this one."""
+        self.argv += ["--extended"]
+        args = self._parse()
+        self.assertTrue(args.extended)
+        self.assertFalse(args.reflash_slave)
