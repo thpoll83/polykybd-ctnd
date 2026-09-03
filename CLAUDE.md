@@ -280,6 +280,29 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
   bridging the same cmd-21 soak and measuring the counters
   (`hil_tests.measure_split_link`, shared with `test_split_link_health` so the two
   cannot disagree about what a fault is).
+  - ⚠️ **On THIS RIG the apply necessarily destroys the slave, and that is
+    STRUCTURAL — not a firmware fault, and not the field bug it resembles.** The
+    slave installs its own STAGED image, and the staged bytes are the ones the
+    master bridged during CHUNK, i.e. the **master's** image. On a real keyboard
+    that is exactly right: both halves run one identical image and the role is
+    decided at runtime by VBUS. Here the halves run **different** images by
+    construction (`POLYKYBD_HIL=left`/`right`), so the slave applies the
+    left/master image, stops calling `usb_disconnect()`, and comes back as a
+    **second master** — no slave, so 100% `transport_fail`. Measured on run
+    33733020495: **12930 of 12930 frames, `crc_err=0`**, which is the same
+    signature as the 2026-09-03 field report and has a completely different
+    cause. Read this before concluding the rig has reproduced a slave failure.
+    - **It is observed, not assumed:** two enumerated Raw HID interfaces IS both
+      halves being master (the signal `test_single_master` already uses), so the
+      two cases stay distinguishable — one master plus a dead link is a REAL
+      slave failure and still fails the run; two masters is reported and not
+      graded.
+    - ⚠️ **So the fwapply tier cannot answer "did the slave survive its own
+      apply?" on this rig at all**, and no amount of assertion strength changes
+      that. Answering it would need the runner to re-flash the slave's own
+      `*_hil_right.uf2` after the apply and then measure — which tests something
+      different ("the applied master image can still talk to a slave") and is a
+      deliberate design choice, not a bug fix.
   - ⚠️ **`measure_split_link` is TRI-state, and the third value is what keeps the
     check honest.** `LINK_NO_SUMMARY` means the console produced no `Split link:`
     line, i.e. the measurement did not happen — reporting that as a dead slave

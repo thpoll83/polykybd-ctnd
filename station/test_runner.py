@@ -6,7 +6,7 @@ from typing import Callable
 
 from .console_log import TAP, console_sink
 from .flash import FlashController
-from .hid import HIDConsole, RawHID
+from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (parse_device_caps, skip_reason, measure_split_link,
@@ -283,6 +283,53 @@ class TestRunner:
         finally:
             self._flash.cleanup()
 
+    # The slave reboots a few seconds AFTER the master, so the post-apply master
+    # count is a MOVING value for a short window. Long enough to cover that,
+    # with an early exit once it has settled.
+    _MASTERS_SETTLE_S = 15.0
+    _MASTERS_STABLE   = 3
+    _MASTERS_SPACING  = 0.5
+
+    def _masters_after_apply(self) -> int:
+        """How many halves enumerate as master, waiting for the count to SETTLE.
+
+        Two IS both halves being master — the same signal ``test_single_master``
+        grades — and after an apply on THIS rig that is the expected outcome
+        rather than a fault. See the note in :meth:`firmware_apply_roundtrip`.
+
+        ⚠️ **A single snapshot is not enough, and waiting for it implicitly is
+        what makes the result fragile.** Everything the runner does between the
+        apply and this point — the sleep, ``wait_for_master_ready``,
+        ``settle_master`` — probes the MASTER only, so it happens to outlast the
+        slave's delayed reboot rather than waiting for it. A firmware timing
+        change that lets those finish sooner would leave two intermediate states
+        indistinguishable from real outcomes: measuring the still-healthy
+        *pre-reboot* slave and reporting "both halves came back" (a false GREEN,
+        the worse one), or catching the reset mid-measurement and grading a
+        fault. So this polls until the count stops moving instead of trusting
+        one reading. Raised by Greptile on ctnd#87.
+        """
+        last, streak = None, 0
+        deadline = time.monotonic() + self._MASTERS_SETTLE_S
+        while time.monotonic() < deadline:
+            try:
+                count = len(enumerate_raw_interfaces())
+            except Exception as exc:
+                # Never let an enumeration hiccup decide a firmware verdict:
+                # report one master, which sends the caller down the *measuring*
+                # path rather than silently exempting the run.
+                self.log(f"[runner] could not enumerate Raw HID interfaces: {exc}")
+                return 1
+            streak = streak + 1 if count == last else 1
+            last = count
+            # Early exit only on the state we are waiting FOR. A settled 1 is
+            # not terminal — the slave may simply not have rebooted yet, which
+            # is the false-green case.
+            if count > 1 and streak >= self._MASTERS_STABLE:
+                return count
+            time.sleep(self._MASTERS_SPACING)
+        return last if last is not None else 1
+
     def _reattach_console(self) -> bool:
         """Re-open the firmware console after a flash, for the checks that need it.
 
@@ -469,8 +516,49 @@ class TestRunner:
             # Everything above this point is a statement about the MASTER. The
             # slave reboots too, and only the split-link counters can say
             # whether it came back; see the docstring.
-            link = (measure_split_link(self._raw, self.log)
-                    if console_live else LINK_NO_SUMMARY)
+            # ⚠️ On THIS RIG the apply necessarily destroys the slave, and that
+            # is structural, not a firmware fault. The slave installs its own
+            # STAGED image, and the staged bytes are the ones the master bridged
+            # during CHUNK — i.e. the master's image. On a real keyboard both
+            # halves run one identical image and the role is decided at runtime
+            # by VBUS, so that is exactly right. Here the halves run DIFFERENT
+            # images by construction (POLYKYBD_HIL=left/right), so the slave
+            # applies the left/master image, no longer calls usb_disconnect(),
+            # and comes back as a second master: no slave, so 100%
+            # transport_fail. Measured on run 33733020495 — 12930 of 12930
+            # frames, crc_err=0.
+            #
+            # That is directly observable rather than assumed: two enumerated
+            # Raw HID interfaces IS both halves being master (the same signal
+            # `test_single_master` uses). So the two cases stay distinguishable
+            # — one master plus a dead link is a REAL slave failure and still
+            # fails; two masters is this rig's own apply semantics and is
+            # reported, not graded.
+            masters = self._masters_after_apply()
+            if masters > 1:
+                self.log(f"[runner] note: {masters} Raw HID interfaces after the "
+                         "apply — the slave installed the master's image (the rig "
+                         "flashes per-side images, so an apply necessarily converts "
+                         "it) and came back as a second master. The split link "
+                         "cannot be measured in that state, so the SLAVE IS "
+                         "UNVERIFIED for this run; it is NOT evidence of a firmware "
+                         "fault. See the note in firmware_apply_roundtrip.")
+                link = LINK_NO_SUMMARY
+            else:
+                link = (measure_split_link(self._raw, self.log)
+                        if console_live else LINK_NO_SUMMARY)
+                # ⚠️ Re-check before grading a fault. The slave reboots a few
+                # SECONDS after the master, so a single enumeration above can
+                # catch it mid-boot and read one interface where there will
+                # shortly be two — and the soak itself takes long enough for it
+                # to finish. Without this the race lands as a FALSE RED on a
+                # gate that runs on every merge, which is the failure this
+                # whole commit exists to prevent.
+                if link != LINK_OK and self._masters_after_apply() > 1:
+                    self.log("[runner] note: the slave finished rebooting into "
+                             "the master's image during the measurement — see "
+                             "above; the SLAVE IS UNVERIFIED, not faulty")
+                    link = LINK_NO_SUMMARY
             if link == LINK_OK:
                 self.log("[runner] the split link is carrying traffic again — both "
                          "halves came back from the apply")
