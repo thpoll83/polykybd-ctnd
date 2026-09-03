@@ -349,7 +349,8 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
             def stop(self):
                 FakeConsole.live = False
 
-        runner = self.tr.TestRunner(log=lambda _m: None)
+        seen["log"] = []
+        runner = self.tr.TestRunner(log=seen["log"].append)
         runner._console = FakeConsole()
         runner._flash = None
         runner._caps = {"fw": "9.9.9"}
@@ -518,3 +519,31 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
             result = self._apply(runner, tmp)
         self.assertTrue(seen["measured"], "the settle loop should have timed out")
         self.assertEqual(result["status"], "pass")
+
+    def test_the_two_master_run_does_not_also_blame_the_console(self):
+        """One UNVERIFIED outcome, one reason — and not a false one.
+
+        The console-blaming note used to fire on every LINK_NO_SUMMARY path, so a
+        two-master run printed both the real reason and "the console did not
+        reattach after the reboot". Run 33745711432 disproved that in its own
+        log: the apply banner it printed a second earlier is only readable
+        THROUGH that console. A diagnostic the same log falsifies is worse than
+        none.
+        """
+        import tempfile
+        runner, seen, _fc = self._runner(masters=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            self._apply(runner, tmp)
+        blamed = [ln for ln in seen["log"] if "did not reattach" in ln]
+        self.assertEqual(blamed, [], f"blamed the console as well: {blamed}")
+        self.assertTrue([ln for ln in seen["log"] if "second master" in ln],
+                        "the real reason was not reported")
+
+    def test_a_console_that_never_came_back_still_says_so(self):
+        # The note is still the right one when the console IS the reason.
+        import tempfile
+        runner, seen, _fc = self._runner(console_ok=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            self._apply(runner, tmp)
+        self.assertTrue([ln for ln in seen["log"] if "did not reattach" in ln],
+                        "the console failure was not reported")
