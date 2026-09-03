@@ -283,6 +283,32 @@ class TestRunner:
         finally:
             self._flash.cleanup()
 
+    def _reattach_console(self) -> bool:
+        """Re-open the firmware console after a flash, for the checks that need it.
+
+        ⚠️ The suite STOPS the console before the whole firmware-update section
+        (``BEGIN`` tears USB down during the master's staging erase), so anything
+        after that point reads a ``TAP`` nothing is feeding. That is what makes
+        this necessary and it is easy to miss: the post-apply link check would
+        otherwise report ``LINK_NO_SUMMARY`` on every run — present, passing,
+        and asserting nothing, which is the exact shape of non-coverage this
+        whole change exists to remove.
+
+        Best-effort, like the initial start: a console that will not come back
+        must not fail a firmware test. Returns whether the reader is live.
+        """
+        try:
+            self._console.stop()
+        except Exception:
+            pass
+        try:
+            self._console.start(console_sink(lambda msg: self.log(f"[qmk] {msg}")))
+            return True
+        except Exception as exc:
+            self.log(f"[runner] could not reattach the firmware console "
+                     f"(continuing without it): {exc}")
+            return False
+
     def firmware_apply_roundtrip(self, apply_bin: str, left_uf2: str,
                                  console: bool = False) -> dict:
         """Stage a SIGNED image over HID, APPLY it, and require the board to come back.
@@ -373,6 +399,9 @@ class TestRunner:
             # cannot print. Give it the copy time before looking for it back.
             time.sleep(5)
             self.wait_for_master_ready()
+            # Reattach BEFORE the banner and link checks below — both read the
+            # console, and it has been stopped since before BEGIN.
+            console_live = self._reattach_console() if console else False
             settled = self.settle_master()
             if not settled:
                 # Reported, not failed. Measured on two consecutive runs (0.17.4
@@ -424,16 +453,24 @@ class TestRunner:
                          "(console lines can be dropped) -- the board is up and on "
                          "the right version, which is the assertion that counts")
             else:
-                self.log("[runner] note: no apply banner seen. Either the console did "
-                         "not come up, or this firmware predates the in-flash apply "
-                         "log; the re-enumeration check above still passed")
+                # ⚠️ Expected, and NOT evidence about the firmware. The console is
+                # stopped before BEGIN and only reattached above, i.e. after the
+                # board has already rebooted — so a banner printed during boot is
+                # missed by construction. This note used to offer "the console did
+                # not come up, or this firmware predates the in-flash apply log",
+                # neither of which was the reason, and that reading closed the
+                # question for months.
+                self.log("[runner] note: no apply banner seen — expected, since the "
+                         "console is reattached only after the reboot, so a line "
+                         "printed during boot is missed. The re-enumeration and "
+                         "link checks are the assertions that count")
 
             # -- The other half of the board. -------------------------------
             # Everything above this point is a statement about the MASTER. The
             # slave reboots too, and only the split-link counters can say
             # whether it came back; see the docstring.
-            link = LINK_NO_SUMMARY if not console else measure_split_link(
-                self._raw, self.log)
+            link = (measure_split_link(self._raw, self.log)
+                    if console_live else LINK_NO_SUMMARY)
             if link == LINK_OK:
                 self.log("[runner] the split link is carrying traffic again — both "
                          "halves came back from the apply")
@@ -444,8 +481,8 @@ class TestRunner:
                 # measurement did not happen — reporting that as a dead slave
                 # would be a false red on a console problem.
                 self.log("[runner] note: the post-apply split-link check could not "
-                         "read the firmware's 'Split link:' counters (console not "
-                         "up, or it did not reopen after the reboot) — the SLAVE IS "
+                         "read the firmware's 'Split link:' counters (the console "
+                         "did not reattach after the reboot) — the SLAVE IS "
                          "UNVERIFIED for this run")
             else:
                 raise RuntimeError(
@@ -459,6 +496,15 @@ class TestRunner:
         except Exception as exc:
             self.log(f"[test] FAIL: {name}: {exc}")
             return {"name": name, "status": "fail", "error": str(exc)}
+        finally:
+            # Hand the console back in the state the caller left it: stopped for
+            # the rest of the firmware section (reboot_persistence power-cycles
+            # the master right after this).
+            try:
+                self._console.stop()
+                TAP.flush()
+            except Exception:
+                pass
 
     def reboot_persistence(self) -> dict:
         """Set a persisted setting, flush it, POWER-CYCLE the master, read it back.

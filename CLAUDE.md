@@ -289,14 +289,32 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
     slave still yields two summaries with `transport_fail` climbing. The graded
     test carries `needs_console` and so may treat anything but `LINK_OK` as a
     failure; the runner cannot, and says "the SLAVE IS UNVERIFIED for this run".
-- [x] ⚠️ **The console reader never survived a reboot, so the apply test's own
-  banner check had NEVER fired.** `HIDConsole` opened one hidraw handle at suite
-  start; after an APPLY the master re-enumerates, that node is gone, every later
-  `read` raises and the old loop just slept on the exception — silently, with
-  nothing logged. So `TAP.wait_for("last self-apply COMPLETED")` could not
-  possibly match, and both the 0.17.4 and the 0.18.0 apply runs printed *"no apply
-  banner seen … the re-enumeration check above still passed"* and went green on
-  the weaker assertion. `HIDConsole._loop` now reopens (after
+- [x] ⚠️ **The console is STOPPED before the whole firmware-update section, so
+  anything after that point reads a `TAP` nothing is feeding — and that, not the
+  reader dying, is why the apply test's banner check had never fired.**
+  `flash_and_test` calls `self._console.stop()` before the `--bin` stage+verify
+  and the `--apply-bin` round-trip, deliberately: `BEGIN` tears USB down during
+  the master's staging erase. So `TAP.wait_for("last self-apply COMPLETED")`
+  could not possibly match, and both the 0.17.4 and the 0.18.0 runs printed *"no
+  apply banner seen … the re-enumeration check above still passed"* and went
+  green on the weaker assertion.
+  - ⚠️ **This is the trap for anything added to that section**, and the first cut
+    of the post-apply link check walked straight into it: it took the run-start
+    "did the console come up" flag and passed it through, so the measurement
+    would have returned `LINK_NO_SUMMARY` on **every** run — present, passing,
+    and asserting nothing, i.e. exactly the non-coverage the check was written to
+    remove. Caught by Greptile on ctnd#86, not by the suite; the test that pins it
+    now asserts the console is **live at the moment `measure_split_link` is
+    called**, not that the wiring reads correctly.
+  - `_reattach_console()` re-opens it after the reboot, which is necessarily
+    *after* boot — so a banner printed during boot is missed **by construction**
+    and its absence says nothing about the firmware. The old note offered "the
+    console did not come up, or this firmware predates the in-flash apply log";
+    neither was the reason, and that reading closed the question for months.
+- [x] **The console reader also never survived a re-enumeration**, which is a
+  second, independent defect: `HIDConsole` opened one hidraw handle at start, and
+  after any reboot that node is gone, every later `read` raises, and the old loop
+  just slept on the exception — silently, with nothing logged. `HIDConsole._loop` now reopens (after
   `_REOPEN_AFTER_ERRORS` consecutive failures, so a momentary USB hiccup does not
   make it fight `RawHID`, which opens its own handle per call). Lines printed
   while the device is away are lost and always will be — the firmware drops

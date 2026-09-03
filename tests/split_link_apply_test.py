@@ -285,3 +285,123 @@ class ConsoleReopenTest(unittest.TestCase):
         self.assertFalse(dev.closed,
                          "stop() closed a handle the reader thread was still using")
         self.assertEqual(console.abandoned_handles, 1)
+
+
+class ApplyRoundTripWiringTest(unittest.TestCase):
+    """The link check must run against a console that is actually being fed.
+
+    This is the test that would have caught the first cut of this feature. The
+    suite STOPS the console before the whole firmware-update section (BEGIN
+    tears USB down during the master's staging erase), so passing the
+    run-start "did the console come up" flag straight through made the post-apply
+    measurement read a `TAP` nothing was feeding: `LINK_NO_SUMMARY` on every run,
+    present and passing and asserting nothing. Rendering the wiring correct in a
+    diff is not the same as exercising it.
+    """
+
+    def setUp(self):
+        if "RPi" not in sys.modules:  # pragma: no cover - environment shim
+            rpi, gpio = types.ModuleType("RPi"), types.ModuleType("RPi.GPIO")
+            for name in ("setmode", "setup", "output", "cleanup", "setwarnings"):
+                setattr(gpio, name, lambda *a, **k: None)
+            for name in ("BCM", "OUT", "HIGH", "LOW"):
+                setattr(gpio, name, 0)
+            rpi.GPIO = gpio
+            sys.modules["RPi"], sys.modules["RPi.GPIO"] = rpi, gpio
+        from station import test_runner
+        self.tr = test_runner
+        self._saved = {n: getattr(test_runner, n) for n in
+                       ("stage_and_verify", "apply_staged", "caps_from_image",
+                        "uf2_file_to_bin", "measure_split_link", "time", "TAP")}
+        # The real path sleeps out the applier's copy window and waits on the
+        # boot banner; neither is what these tests are about.
+        fake_time = types.SimpleNamespace(sleep=lambda _s: None,
+                                          monotonic=__import__("time").monotonic)
+        test_runner.time = fake_time
+        test_runner.TAP = types.SimpleNamespace(
+            mark=lambda: 0,
+            wait_for=lambda *a, **k: "banner",
+            flush=lambda: None,
+        )
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            setattr(self.tr, name, value)
+
+    def _runner(self, console_ok=True, link=None):
+        """A runner with every device interaction stubbed out."""
+        seen = {"console_live_at_measure": None, "measured": False}
+
+        class FakeConsole:
+            live = False
+
+            def start(self, _cb):
+                if not console_ok:
+                    raise RuntimeError("console not found")
+                FakeConsole.live = True
+
+            def stop(self):
+                FakeConsole.live = False
+
+        runner = self.tr.TestRunner(log=lambda _m: None)
+        runner._console = FakeConsole()
+        runner._flash = None
+        runner._caps = {"fw": "9.9.9"}
+        runner.wait_for_master_ready = lambda *a, **k: True
+        runner.settle_master = lambda *a, **k: True
+        runner._device_caps = lambda: {"fw": "9.9.9"}
+
+        self.tr.uf2_file_to_bin = lambda _p: b"IMAGE"
+        self.tr.caps_from_image = lambda _i: {"fw": "9.9.9"}
+        self.tr.stage_and_verify = lambda *a, **k: True
+        self.tr.apply_staged = lambda *a, **k: True
+
+        def fake_measure(_raw, _log):
+            seen["measured"] = True
+            seen["console_live_at_measure"] = FakeConsole.live
+            return link if link is not None else self.tr.LINK_OK
+
+        self.tr.measure_split_link = fake_measure
+        return runner, seen, FakeConsole
+
+    def _apply(self, runner, tmp):
+        import pathlib
+        binp = pathlib.Path(tmp) / "fw.bin"
+        binp.write_bytes(b"IMAGE")
+        (binp.parent / "fw.bin.sig").write_bytes(b"\0" * 64)
+        return runner.firmware_apply_roundtrip(str(binp), "left.uf2", console=True)
+
+    def test_the_console_is_LIVE_when_the_link_is_measured(self):
+        import tempfile
+        runner, seen, _fc = self._runner()
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertTrue(seen["measured"], "the link was never measured")
+        self.assertTrue(seen["console_live_at_measure"],
+                        "measured a TAP that nothing was feeding — the check is inert")
+        self.assertEqual(result["status"], "pass")
+
+    def test_a_link_fault_fails_the_apply(self):
+        import tempfile
+        runner, _seen, _fc = self._runner(link="fault")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("split link", result["error"])
+
+    def test_a_console_that_will_not_reattach_does_not_fail_the_apply(self):
+        import tempfile
+        runner, seen, _fc = self._runner(console_ok=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertFalse(seen["measured"],
+                         "measured the link with no console — the result is meaningless")
+        self.assertEqual(result["status"], "pass")
+
+    def test_the_console_is_left_stopped_for_what_follows(self):
+        # reboot_persistence power-cycles the master straight after this.
+        import tempfile
+        runner, _seen, fc = self._runner()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._apply(runner, tmp)
+        self.assertFalse(fc.live)
