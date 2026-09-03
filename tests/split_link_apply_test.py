@@ -363,7 +363,15 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
             return link if link is not None else self.tr.LINK_OK
 
         self.tr.measure_split_link = fake_measure
-        self.tr.enumerate_raw_interfaces = lambda: [{"path": b"one"}] * masters
+        counts = list(masters) if isinstance(masters, (list, tuple)) else [masters]
+        seen["enumerations"] = 0
+
+        def fake_enumerate():
+            i = min(seen["enumerations"], len(counts) - 1)
+            seen["enumerations"] += 1
+            return [{"path": b"one"}] * counts[i]
+
+        self.tr.enumerate_raw_interfaces = fake_enumerate
         return runner, seen, FakeConsole
 
     def _apply(self, runner, tmp):
@@ -431,6 +439,30 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         # shape of the field report (master fine, slave silent).
         import tempfile
         runner, _seen, _fc = self._runner(masters=1, link="fault")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertEqual(result["status"], "fail")
+
+    def test_a_slave_that_reboots_LATE_is_not_graded_as_a_fault(self):
+        """The slave reboots seconds after the master, so one enumeration races.
+
+        A single check before the soak can catch the slave mid-boot and read one
+        interface where there will shortly be two. Grading that as a fault would
+        put a false red on a gate that runs on every merge — the exact failure
+        this guard exists to prevent.
+        """
+        import tempfile
+        runner, seen, _fc = self._runner(masters=[1, 2], link="fault")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertTrue(seen["measured"], "the first enumeration should still measure")
+        self.assertEqual(result["status"], "pass")
+
+    def test_a_genuinely_dead_slave_still_fails_after_the_recheck(self):
+        # One master throughout: nothing rebooted into a master image, the link
+        # is simply dead. This is the field-report shape and must stay a FAIL.
+        import tempfile
+        runner, _seen, _fc = self._runner(masters=[1, 1], link="fault")
         with tempfile.TemporaryDirectory() as tmp:
             result = self._apply(runner, tmp)
         self.assertEqual(result["status"], "fail")

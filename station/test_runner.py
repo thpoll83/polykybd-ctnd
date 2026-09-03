@@ -283,6 +283,21 @@ class TestRunner:
         finally:
             self._flash.cleanup()
 
+    def _masters_after_apply(self) -> int:
+        """How many halves are enumerating as master right now.
+
+        Two IS both halves being master — the same signal ``test_single_master``
+        grades — and after an apply on THIS rig that is the expected outcome
+        rather than a fault. See the note in :meth:`firmware_apply_roundtrip`.
+        """
+        try:
+            return len(enumerate_raw_interfaces())
+        except Exception as exc:
+            # Never let an enumeration hiccup decide a firmware verdict: report
+            # one master, which sends the caller down the *measuring* path.
+            self.log(f"[runner] could not enumerate Raw HID interfaces: {exc}")
+            return 1
+
     def _reattach_console(self) -> bool:
         """Re-open the firmware console after a flash, for the checks that need it.
 
@@ -487,7 +502,7 @@ class TestRunner:
             # — one master plus a dead link is a REAL slave failure and still
             # fails; two masters is this rig's own apply semantics and is
             # reported, not graded.
-            masters = len(enumerate_raw_interfaces())
+            masters = self._masters_after_apply()
             if masters > 1:
                 self.log(f"[runner] note: {masters} Raw HID interfaces after the "
                          "apply — the slave installed the master's image (the rig "
@@ -500,6 +515,18 @@ class TestRunner:
             else:
                 link = (measure_split_link(self._raw, self.log)
                         if console_live else LINK_NO_SUMMARY)
+                # ⚠️ Re-check before grading a fault. The slave reboots a few
+                # SECONDS after the master, so a single enumeration above can
+                # catch it mid-boot and read one interface where there will
+                # shortly be two — and the soak itself takes long enough for it
+                # to finish. Without this the race lands as a FALSE RED on a
+                # gate that runs on every merge, which is the failure this
+                # whole commit exists to prevent.
+                if link != LINK_OK and self._masters_after_apply() > 1:
+                    self.log("[runner] note: the slave finished rebooting into "
+                             "the master's image during the measurement — see "
+                             "above; the SLAVE IS UNVERIFIED, not faulty")
+                    link = LINK_NO_SUMMARY
             if link == LINK_OK:
                 self.log("[runner] the split link is carrying traffic again — both "
                          "halves came back from the apply")
