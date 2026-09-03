@@ -283,20 +283,52 @@ class TestRunner:
         finally:
             self._flash.cleanup()
 
+    # The slave reboots a few seconds AFTER the master, so the post-apply master
+    # count is a MOVING value for a short window. Long enough to cover that,
+    # with an early exit once it has settled.
+    _MASTERS_SETTLE_S = 15.0
+    _MASTERS_STABLE   = 3
+    _MASTERS_SPACING  = 0.5
+
     def _masters_after_apply(self) -> int:
-        """How many halves are enumerating as master right now.
+        """How many halves enumerate as master, waiting for the count to SETTLE.
 
         Two IS both halves being master — the same signal ``test_single_master``
         grades — and after an apply on THIS rig that is the expected outcome
         rather than a fault. See the note in :meth:`firmware_apply_roundtrip`.
+
+        ⚠️ **A single snapshot is not enough, and waiting for it implicitly is
+        what makes the result fragile.** Everything the runner does between the
+        apply and this point — the sleep, ``wait_for_master_ready``,
+        ``settle_master`` — probes the MASTER only, so it happens to outlast the
+        slave's delayed reboot rather than waiting for it. A firmware timing
+        change that lets those finish sooner would leave two intermediate states
+        indistinguishable from real outcomes: measuring the still-healthy
+        *pre-reboot* slave and reporting "both halves came back" (a false GREEN,
+        the worse one), or catching the reset mid-measurement and grading a
+        fault. So this polls until the count stops moving instead of trusting
+        one reading. Raised by Greptile on ctnd#87.
         """
-        try:
-            return len(enumerate_raw_interfaces())
-        except Exception as exc:
-            # Never let an enumeration hiccup decide a firmware verdict: report
-            # one master, which sends the caller down the *measuring* path.
-            self.log(f"[runner] could not enumerate Raw HID interfaces: {exc}")
-            return 1
+        last, streak = None, 0
+        deadline = time.monotonic() + self._MASTERS_SETTLE_S
+        while time.monotonic() < deadline:
+            try:
+                count = len(enumerate_raw_interfaces())
+            except Exception as exc:
+                # Never let an enumeration hiccup decide a firmware verdict:
+                # report one master, which sends the caller down the *measuring*
+                # path rather than silently exempting the run.
+                self.log(f"[runner] could not enumerate Raw HID interfaces: {exc}")
+                return 1
+            streak = streak + 1 if count == last else 1
+            last = count
+            # Early exit only on the state we are waiting FOR. A settled 1 is
+            # not terminal — the slave may simply not have rebooted yet, which
+            # is the false-green case.
+            if count > 1 and streak >= self._MASTERS_STABLE:
+                return count
+            time.sleep(self._MASTERS_SPACING)
+        return last if last is not None else 1
 
     def _reattach_console(self) -> bool:
         """Re-open the firmware console after a flash, for the checks that need it.

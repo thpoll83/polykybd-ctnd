@@ -316,8 +316,13 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
                         "enumerate_raw_interfaces")}
         # The real path sleeps out the applier's copy window and waits on the
         # boot banner; neither is what these tests are about.
-        fake_time = types.SimpleNamespace(sleep=lambda _s: None,
-                                          monotonic=__import__("time").monotonic)
+        clock = {"t": 0.0}
+
+        def fake_sleep(seconds):
+            clock["t"] += seconds
+
+        fake_time = types.SimpleNamespace(sleep=fake_sleep,
+                                          monotonic=lambda: clock["t"])
         test_runner.time = fake_time
         test_runner.TAP = types.SimpleNamespace(
             mark=lambda: 0,
@@ -455,7 +460,10 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         runner, seen, _fc = self._runner(masters=[1, 2], link="fault")
         with tempfile.TemporaryDirectory() as tmp:
             result = self._apply(runner, tmp)
-        self.assertTrue(seen["measured"], "the first enumeration should still measure")
+        # The settle loop now catches the transition BEFORE measuring, which is
+        # strictly better than measuring and re-checking. What this test pins is
+        # the outcome — a late reboot is never graded as a fault — not which of
+        # the two paths reaches it.
         self.assertEqual(result["status"], "pass")
 
     def test_a_genuinely_dead_slave_still_fails_after_the_recheck(self):
@@ -466,3 +474,47 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._apply(runner, tmp)
         self.assertEqual(result["status"], "fail")
+
+    def test_a_settled_ONE_master_is_not_an_early_exit(self):
+        """The false-GREEN case: the slave may simply not have rebooted yet.
+
+        A stable count of 1 is not terminal — on this rig the apply's terminal
+        state is two masters — so returning early on it would let the runner
+        measure the still-healthy PRE-reboot slave and report "both halves came
+        back from the apply" when the slave had not yet applied anything.
+        """
+        import tempfile
+        # 1 for a while, then the slave's delayed reboot lands.
+        runner, seen, _fc = self._runner(masters=[1, 1, 1, 1, 2, 2, 2])
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertFalse(seen["measured"],
+                         "measured before the slave's delayed reboot had landed")
+        self.assertEqual(result["status"], "pass")
+
+    def test_a_real_single_master_rig_still_measures(self):
+        # Count never moves off 1: nothing rebooted into a master image, so the
+        # link is measured normally rather than exempted.
+        import tempfile
+        runner, seen, _fc = self._runner(masters=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertTrue(seen["measured"])
+        self.assertEqual(result["status"], "pass")
+
+    def test_a_reboot_that_lands_DURING_the_measurement_is_still_caught(self):
+        """The re-check after a measured fault is not made redundant by the settle.
+
+        The settle loop covers a slave that transitions before the soak starts.
+        One that transitions *during* it still reaches the measurement, comes
+        back as a fault, and must be caught by the post-measurement re-check —
+        so both guards are load-bearing.
+        """
+        import tempfile
+        # Stable 1 for the whole settle window, so the loop times out and the
+        # link is measured; the transition lands afterwards.
+        runner, seen, _fc = self._runner(masters=[1] * 40 + [2], link="fault")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertTrue(seen["measured"], "the settle loop should have timed out")
+        self.assertEqual(result["status"], "pass")
