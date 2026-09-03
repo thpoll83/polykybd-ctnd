@@ -58,6 +58,11 @@ def enumerate_raw_interfaces(
 class HIDConsole:
     """Reads QMK's built-in HID console output (equivalent to hid-listen)."""
 
+    # Consecutive read errors before the handle is treated as dead rather than
+    # hiccuping, and how long to wait between reopen attempts.
+    _REOPEN_AFTER_ERRORS = 5
+    _REOPEN_POLL_S = 0.5
+
     def __init__(self, vendor_id: int = QMK_VENDOR_ID, product_id: int = QMK_PRODUCT_ID):
         self._vid = vendor_id
         self._pid = product_id
@@ -75,15 +80,71 @@ class HIDConsole:
         self._thread.start()
 
     def _loop(self, callback: Callable[[str], None]) -> None:
+        """Read forever, REOPENING the handle when the keyboard re-enumerates.
+
+        ⚠️ Without the reopen this reader dies silently at the first reboot and
+        never comes back: the hidraw node the handle was opened on disappears,
+        every subsequent ``read`` raises, and the old loop just slept on the
+        exception. Nothing logs it, so the console simply stops — which is why
+        the firmware-apply test's own banner assertion
+        (``last self-apply COMPLETED`` / ``written image MATCHED``) had *never*
+        fired: an APPLY reboots the master, so the one window that check exists
+        to read is exactly the window the reader was dead for. Both the 0.17.4
+        and 0.18.0 apply runs logged "no apply banner seen" and passed on the
+        weaker re-enumeration check alone.
+
+        The reopen is deliberately slow to trigger (``_REOPEN_AFTER_ERRORS``
+        consecutive failures, then a poll): a read error is also what a
+        momentary USB hiccup looks like, and re-enumerating on every one of
+        those would fight ``RawHID``, which opens its own handle per call.
+
+        Lines printed while the device is away are lost, and there is no way
+        around that — the firmware drops console output nobody is draining.
+        """
+        errors = 0
         while self._running:
+            dev = self._dev
             try:
-                data = self._dev.read(64, timeout=200)
+                data = dev.read(64, timeout=200) if dev is not None else None
+                errors = 0
                 if data:
                     msg = bytes(data).rstrip(b"\x00").decode("utf-8", errors="replace")
                     if msg.strip():
                         callback(msg)
             except Exception:
-                time.sleep(0.1)
+                errors += 1
+                if errors >= self._REOPEN_AFTER_ERRORS:
+                    self._reopen()
+                    errors = 0
+                else:
+                    time.sleep(0.1)
+            if dev is None:
+                self._reopen()
+
+    def _reopen(self) -> None:
+        """Close the dead handle and try to acquire a fresh one.
+
+        Runs on the reader thread ONLY. That is what makes it safe without a
+        lock: ``stop()`` clears ``_running``, joins this thread, and only then
+        touches ``_dev`` — so the close here and the close there can never race
+        (see the use-after-free note on ``stop``).
+        """
+        dev, self._dev = self._dev, None
+        if dev is not None:
+            try:
+                dev.close()
+            except Exception:
+                pass
+        time.sleep(self._REOPEN_POLL_S)
+        if not self._running:
+            return
+        try:
+            path = _find_path(self._vid, self._pid,
+                              HID_CONSOLE_USAGE_PAGE, HID_CONSOLE_USAGE)
+            if path is not None:
+                self._dev = hid.Device(path=path)
+        except Exception:
+            self._dev = None
 
     def stop(self) -> None:
         """Stop the reader thread and close the device, in that order."""

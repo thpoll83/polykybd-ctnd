@@ -2124,6 +2124,78 @@ def _link_soak_report() -> bytes:
     return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING]) + data
 
 
+# measure_split_link outcomes. Deliberately THREE, not a bool: "the console
+# produced no summary" is a failure to MEASURE, and a caller that cannot assume
+# a live console (the runner, straight after an apply reboot) must not report it
+# as a dead slave. The distinction is sound because the master prints the
+# summary from send_to_bridge regardless of whether the slave answers — a dead
+# slave still yields two summaries, with transport_fail climbing.
+LINK_OK         = "ok"
+LINK_FAULT      = "fault"
+LINK_NO_SUMMARY = "no-summary"
+
+
+def measure_split_link(raw: RawHID, log: Callable[[str], None]) -> str:
+    """Bridge a soak of real traffic and assert the link's error DELTA is clean.
+
+    Extracted from :func:`test_split_link_health` so the *runner* can ask the
+    same question at a moment a graded test cannot reach — immediately after a
+    firmware APPLY, once the master has rebooted onto the new image. Both
+    callers must measure the link the same way; two implementations of "is the
+    link healthy" would be free to disagree about the one thing that matters
+    here (that ``nack`` is not a fault).
+
+    Returns one of ``LINK_OK`` / ``LINK_FAULT`` / ``LINK_NO_SUMMARY``.
+    Restores the mapping table either way.
+    """
+    report = _link_soak_report()
+    mark = TAP.mark()
+    try:
+        sent = 0
+        while sent < LINK_SOAK_REPORTS:
+            batch = min(LINK_SOAK_BATCH, LINK_SOAK_REPORTS - sent)
+            raw.write_reports([report] * batch)
+            sent += batch
+            time.sleep(0.05)   # let the firmware drain rather than fill the endpoint
+        log(f"bridged {sent} mapping reports (cmd 21) to generate measurable "
+            "split-link traffic")
+        if not _master_alive(raw, log):
+            log("  FAIL: master unresponsive after the mapping soak")
+            return LINK_FAULT
+
+        deadline = time.monotonic() + LINK_SUMMARY_TIMEOUT_S
+        stats = TAP.link_stats(mark)
+        while len(stats) < 2 and time.monotonic() < deadline:
+            time.sleep(0.25)
+            stats = TAP.link_stats(mark)
+        if len(stats) < 2:
+            log(f"  FAIL: only {len(stats)} 'Split link:' summary line(s) after "
+                f"{sent} bridged reports. Either the reports never reached the "
+                "firmware, or the summary cadence (LINK_STATS_LOG_EVERY) changed "
+                "and this test's arithmetic is stale")
+            return LINK_NO_SUMMARY
+
+        delta = link_delta(stats[0], stats[-1])
+        ok, errors, tolerance = classify_link_health(delta)
+        log(f"  link over {delta['tx']} bridged frames: crc_err +{delta['crc_err']}, "
+            f"transport_fail +{delta['transport_fail']}, nack +{delta['nack']} "
+            f"(not an error), giveup +{delta['giveup']}")
+        if not ok:
+            log(f"  FAIL: {errors} link fault(s) in that window, tolerance "
+                f"{tolerance}. Steady state on the full-duplex link is ZERO ongoing "
+                "errors — a non-zero crc_err means frames are arriving corrupted, a "
+                "non-zero transport_fail means they are not arriving at all")
+            return LINK_FAULT
+        log(f"  {errors} link fault(s), tolerance {tolerance} — link healthy")
+        return LINK_OK
+    finally:
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON,
+                                  OVERLAY_MAPPING_RESET_BITS]))
+        ok = _resp_ok(restore, CMD_OVERLAY_FLAGS_ON, lambda *_a: None, expect_status=ACK)
+        log("  reset mapping + usage bits to identity: "
+            + ("ok" if ok else "FAILED — rig left with the soak mappings until next boot"))
+
+
 def test_split_link_health(raw: RawHID, log: Callable[[str], None]) -> bool:
     """The master↔slave link carries a burst of real traffic with no wire errors.
 
@@ -2152,52 +2224,9 @@ def test_split_link_health(raw: RawHID, log: Callable[[str], None]) -> bool:
     older hosts still send) has — cmd 33 got a test at v12 and its predecessor
     never did.
     """
-    report = _link_soak_report()
-    mark = TAP.mark()
-    try:
-        sent = 0
-        while sent < LINK_SOAK_REPORTS:
-            batch = min(LINK_SOAK_BATCH, LINK_SOAK_REPORTS - sent)
-            raw.write_reports([report] * batch)
-            sent += batch
-            time.sleep(0.05)   # let the firmware drain rather than fill the endpoint
-        log(f"bridged {sent} mapping reports (cmd 21) to generate measurable "
-            "split-link traffic")
-        if not _master_alive(raw, log):
-            log("  FAIL: master unresponsive after the mapping soak")
-            return False
-
-        deadline = time.monotonic() + LINK_SUMMARY_TIMEOUT_S
-        stats = TAP.link_stats(mark)
-        while len(stats) < 2 and time.monotonic() < deadline:
-            time.sleep(0.25)
-            stats = TAP.link_stats(mark)
-        if len(stats) < 2:
-            log(f"  FAIL: only {len(stats)} 'Split link:' summary line(s) after "
-                f"{sent} bridged reports. Either the reports never reached the "
-                "firmware, or the summary cadence (LINK_STATS_LOG_EVERY) changed "
-                "and this test's arithmetic is stale")
-            return False
-
-        delta = link_delta(stats[0], stats[-1])
-        ok, errors, tolerance = classify_link_health(delta)
-        log(f"  link over {delta['tx']} bridged frames: crc_err +{delta['crc_err']}, "
-            f"transport_fail +{delta['transport_fail']}, nack +{delta['nack']} "
-            f"(not an error), giveup +{delta['giveup']}")
-        if not ok:
-            log(f"  FAIL: {errors} link fault(s) in that window, tolerance "
-                f"{tolerance}. Steady state on the full-duplex link is ZERO ongoing "
-                "errors — a non-zero crc_err means frames are arriving corrupted, a "
-                "non-zero transport_fail means they are not arriving at all")
-            return False
-        log(f"  {errors} link fault(s), tolerance {tolerance} — link healthy")
-        return True
-    finally:
-        restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON,
-                                  OVERLAY_MAPPING_RESET_BITS]))
-        ok = _resp_ok(restore, CMD_OVERLAY_FLAGS_ON, lambda *_a: None, expect_status=ACK)
-        log("  reset mapping + usage bits to identity: "
-            + ("ok" if ok else "FAILED — rig left with the soak mappings until next boot"))
+    # This test carries ``needs_console``, so the console IS live here and
+    # LINK_NO_SUMMARY means the reports never reached the firmware — a failure.
+    return measure_split_link(raw, log) == LINK_OK
 
 
 def _build_empty_fontpack() -> bytes:

@@ -9,7 +9,8 @@ from .flash import FlashController
 from .hid import HIDConsole, RawHID
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
-from .hil_tests import parse_device_caps, skip_reason
+from .hil_tests import (parse_device_caps, skip_reason, measure_split_link,
+                        LINK_OK, LINK_NO_SUMMARY)
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
 # keyboards/polykybd/hid_com.c (case 24 / 0x18). A command report is
@@ -242,7 +243,8 @@ class TestRunner:
                     self.log("[runner] skipping the firmware apply round-trip — the "
                              "suite already has a failure to diagnose first")
                 else:
-                    results.append(self.firmware_apply_roundtrip(apply_bin, left_uf2))
+                    results.append(self.firmware_apply_roundtrip(
+                        apply_bin, left_uf2, console=console_started))
 
             # Persistence across a power cycle — LAST, because it reboots the
             # master (see reboot_persistence). Skipped when the suite already
@@ -281,7 +283,8 @@ class TestRunner:
         finally:
             self._flash.cleanup()
 
-    def firmware_apply_roundtrip(self, apply_bin: str, left_uf2: str) -> dict:
+    def firmware_apply_roundtrip(self, apply_bin: str, left_uf2: str,
+                                 console: bool = False) -> dict:
         """Stage a SIGNED image over HID, APPLY it, and require the board to come back.
 
         This is the check that would have caught #258 — a HID update that reported
@@ -310,6 +313,18 @@ class TestRunner:
           enumerate as master until the next UF2 flash. The guard compares the
           candidate against the ``.uf2`` the rig itself flashed, so it cannot be
           defeated by a filename.
+        
+        ⚠️ **"The master came back" is NOT the whole assertion, and used to be.**
+        An apply reboots BOTH halves — the slave copies its own staged image and
+        resets a few seconds after the master — so the split link has to
+        re-establish afterwards, and nothing here looked at it: the suite's link
+        soak runs long *before* the update. A field report (2026-09-03) had the
+        master enumerate perfectly while the link went totally silent —
+        ``transport_fail`` climbing 201 of 201 frames with ``crc_err=0``, i.e. the
+        slave answering nothing at all rather than answering corrupt. Every
+        assertion this test made would have passed. So the apply now ends by
+        bridging real traffic and measuring the link, which is the only thing on
+        the rig that can see the slave at all.
         """
         name = "firmware apply round-trip (HID update + reboot)"
 
@@ -358,7 +373,22 @@ class TestRunner:
             # cannot print. Give it the copy time before looking for it back.
             time.sleep(5)
             self.wait_for_master_ready()
-            self.settle_master()
+            settled = self.settle_master()
+            if not settled:
+                # Reported, not failed. Measured on two consecutive runs (0.17.4
+                # and 0.18.0), the master answers GET_LANG in a uniform ~450 ms
+                # for the full 30 s window after an apply — 66 probes, worst
+                # 446 ms, byte-identical across both — where the same master
+                # after an ordinary RUN-pin power cycle settles in 15 probes.
+                # That is a real and reproducible difference between the two
+                # reboot paths; what causes it is NOT established, so this says
+                # what was measured and stops there rather than naming a
+                # mechanism the rig cannot see.
+                self.log("[runner] note: the master did not settle after the apply. "
+                         "This is expected on the apply path (it reproduces run to "
+                         "run) and is NOT expected after a plain power cycle — if "
+                         "the reboot-persistence settle below is also slow, the two "
+                         "are worth comparing")
 
             caps = self._device_caps()
             if not caps:
@@ -397,6 +427,32 @@ class TestRunner:
                 self.log("[runner] note: no apply banner seen. Either the console did "
                          "not come up, or this firmware predates the in-flash apply "
                          "log; the re-enumeration check above still passed")
+
+            # -- The other half of the board. -------------------------------
+            # Everything above this point is a statement about the MASTER. The
+            # slave reboots too, and only the split-link counters can say
+            # whether it came back; see the docstring.
+            link = LINK_NO_SUMMARY if not console else measure_split_link(
+                self._raw, self.log)
+            if link == LINK_OK:
+                self.log("[runner] the split link is carrying traffic again — both "
+                         "halves came back from the apply")
+            elif link == LINK_NO_SUMMARY:
+                # NOT a failure. The counters come from the firmware console, and
+                # the reader has to survive the apply's re-enumeration to see them
+                # (HIDConsole reopens for exactly this). No summary means the
+                # measurement did not happen — reporting that as a dead slave
+                # would be a false red on a console problem.
+                self.log("[runner] note: the post-apply split-link check could not "
+                         "read the firmware's 'Split link:' counters (console not "
+                         "up, or it did not reopen after the reboot) — the SLAVE IS "
+                         "UNVERIFIED for this run")
+            else:
+                raise RuntimeError(
+                    "the master came back but the split link did not: the slave is "
+                    "not answering, or the wire is corrupting frames. A firmware "
+                    "apply reboots both halves, so this is where a slave that "
+                    "failed to come back shows up")
 
             self.log(f"[test] PASS: {name} — applied {got} and the keyboard came back")
             return {"name": name, "status": "pass"}
