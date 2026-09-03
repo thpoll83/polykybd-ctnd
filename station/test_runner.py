@@ -9,7 +9,7 @@ from .flash import FlashController
 from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
-from .hil_tests import (parse_device_caps, skip_reason, measure_split_link,
+from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
                         LINK_OK, LINK_NO_SUMMARY)
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
@@ -88,6 +88,7 @@ class TestRunner:
         ``hil_tests.TIER_EXTENDED``.
         """
         results = []
+        begin_session()      # the crash scan reads the console from HERE
         try:
             self.flash_halves(left_uf2, right_uf2)
 

@@ -406,14 +406,20 @@ class CrashRecordTest(unittest.TestCase):
         ok, _ = hil_tests.classify_crash_lines(["Split link: 1 tx", "boot ok"])
         self.assertTrue(ok)
 
-    def test_scan_reads_the_shared_tap(self):
+    def test_scan_reads_the_shared_tap_from_the_session_mark(self):
         from station.console_log import TAP
-        mark_lines = TAP.find_all(hil_tests.CRASH_LINE_MARK)
+        # A crash line left by a PREVIOUS run must not fail this one...
+        TAP.feed("   " + self.LINE + "\n")
+        hil_tests.begin_session()
+        logged = []
+        self.assertTrue(hil_tests.test_no_crash_record(None, logged.append))
+        # ...while one printed inside this run (the slave's, here) does.
         TAP.feed("   " + self.LINE.replace("side=master", "side=slave") + "\n")
         logged = []
         self.assertFalse(hil_tests.test_no_crash_record(None, logged.append))
         self.assertTrue(any("side=slave" in ln for ln in logged))
-        self.assertEqual(len(TAP.find_all(hil_tests.CRASH_LINE_MARK)), len(mark_lines) + 1)
+        self.assertFalse(any("side=master" in ln for ln in logged))
+        hil_tests.begin_session()
 
     def test_membership_gates_and_order(self):
         names = [t["name"] for t in hil_tests.TESTS]
@@ -423,10 +429,8 @@ class CrashRecordTest(unittest.TestCase):
         self.assertIsNone(scan.get("tier"))
         self.assertEqual(cmd.get("min_protocol"), 16)
         self.assertIsNone(cmd.get("tier"))
-        # The scan comes after every other default-tier test that can crash the firmware.
-        i = names.index(scan["name"])
-        later = [t["name"] for t in hil_tests.TESTS[i + 1:] if not t.get("tier")]
-        self.assertEqual(later, [n for n in later if "font-pack" in n or "doom" in n.lower()])
+        # The scan is the LAST entry, so every test of every tier is in its window.
+        self.assertEqual(names[-1], scan["name"])
 
 
 class LayerNamesRetryTest(unittest.TestCase):

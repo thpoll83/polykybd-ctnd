@@ -2244,6 +2244,17 @@ CRASH_HID_FLAG_PRESENT = 1 << 0
 CRASH_HID_FLAG_FRESH   = 1 << 1
 CRASH_HID_BODY_LEN     = 49    # [flags][48-byte poly_crash_record_t]
 
+# Where THIS run's console history starts. The tap is process-global and rolls
+# across runs in the long-lived UI process, so a crash line left by a previous
+# run must not fail the next one: the runner stamps the mark before it flashes.
+_SESSION_MARK = 0
+
+
+def begin_session() -> None:
+    """Called by the runner at the start of a run, before the flash."""
+    global _SESSION_MARK
+    _SESSION_MARK = TAP.mark()
+
 
 def classify_crash_lines(lines) -> tuple:
     """(ok, message) for the crash lines the console produced in this run.
@@ -2260,13 +2271,14 @@ def classify_crash_lines(lines) -> tuple:
 def test_no_crash_record(raw: RawHID, log: Callable[[str], None]) -> bool:
     """No keyboard half crashed during this run (console ``crash:`` line absent).
 
-    Reads the console tap from the start of the session, so a fault anywhere in
-    the run — during the flash-and-enumerate, inside another test, on the SLAVE
-    (the master pulls the slave's record and prints it as ``side=slave``) — is
-    caught here even when every other test passed around it. Runs late so the
-    whole suite is inside its window. ``needs_console``: without the tap it can
+    Reads the console tap from the start of THIS run (``begin_session``), so a
+    fault anywhere in the run — during the flash-and-enumerate, inside another
+    test, on the SLAVE (the master pulls the slave's record and prints it as
+    ``side=slave``) — is caught here even when every other test passed around
+    it. It is the LAST entry of the suite, whatever tiers ran, so every other
+    test is inside its window. ``needs_console``: without the tap it can
     assert nothing and would report a green it did not earn."""
-    ok, msg = classify_crash_lines(TAP.find_all(CRASH_LINE_MARK))
+    ok, msg = classify_crash_lines(TAP.find_all(CRASH_LINE_MARK, mark=_SESSION_MARK))
     log(("  " if ok else "  FAIL: ") + msg)
     return ok
 
@@ -2918,14 +2930,11 @@ TESTS = [
     # deliberate traffic, so it is EXTENDED-tier.
     {"name": "split link health under a bridged soak (cmd 21)",
      "fn": test_split_link_health, "needs_console": True, "tier": TIER_EXTENDED},
-    # The firmware's own crash confession: cmd 39 first (a fresh record means the
-    # boot before this one faulted; also exercises clear), then the console line
-    # scan over the WHOLE session — after every other test so a crash inside any
-    # of them, or on the slave, lands here rather than reading as a flake.
+    # The firmware's own crash confession, half one: cmd 39 (a fresh record means
+    # the boot before this one faulted; also exercises clear). The console scan is
+    # the LAST entry of the list, below.
     {"name": "crash record command (v16 cmd 39)", "fn": test_crash_record_command,
      "min_protocol": 16},
-    {"name": "no firmware crash during the run (console crash: line)",
-     "fn": test_no_crash_record, "needs_console": True},
     # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
     # to slot 0 — exercises the flash transport + the COMMIT slot-present success gate.
     # LAST: it empties the 'symbol' bundle (a host re-flashes it on the next connect).
@@ -2964,4 +2973,9 @@ TESTS = [
     {"name": "doom unsigned pack refused (FW-9)",
      "fn": test_doompack_unsigned_refused, "min_protocol": 6,
      "needs_console": True, "tier": TIER_DOOM},
+    # LAST, whatever tiers ran: the console scan over this run's whole window, so
+    # a crash inside any test above — the flash tests and the doom set included —
+    # or on the slave lands here rather than reading as a flake.
+    {"name": "no firmware crash during the run (console crash: line)",
+     "fn": test_no_crash_record, "needs_console": True},
 ]
