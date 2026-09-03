@@ -534,6 +534,13 @@ class TestRunner:
             # — one master plus a dead link is a REAL slave failure and still
             # fails; two masters is this rig's own apply semantics and is
             # reported, not graded.
+            # Whether the UNVERIFIED outcome has already been explained. Without
+            # it the note below fires on every path and blames the console for a
+            # two-master run — which run 33745711432 disproved in its own log,
+            # since the apply banner it printed a second earlier is only readable
+            # THROUGH that console. A diagnostic that states something the same
+            # log falsifies is worse than none.
+            explained = False
             masters = self._masters_after_apply()
             if masters > 1:
                 self.log(f"[runner] note: {masters} Raw HID interfaces after the "
@@ -544,6 +551,7 @@ class TestRunner:
                          "UNVERIFIED for this run; it is NOT evidence of a firmware "
                          "fault. See the note in firmware_apply_roundtrip.")
                 link = LINK_NO_SUMMARY
+                explained = True
             else:
                 link = (measure_split_link(self._raw, self.log)
                         if console_live else LINK_NO_SUMMARY)
@@ -555,10 +563,17 @@ class TestRunner:
                 # gate that runs on every merge, which is the failure this
                 # whole commit exists to prevent.
                 if link != LINK_OK and self._masters_after_apply() > 1:
+                    # ⚠️ Only claim a measurement when one actually ran. With no
+                    # console there was nothing to measure, so saying the slave
+                    # rebooted "during the measurement" describes something that
+                    # did not happen.
+                    when = ("during the measurement" if console_live
+                            else "after the interface count settled")
                     self.log("[runner] note: the slave finished rebooting into "
-                             "the master's image during the measurement — see "
-                             "above; the SLAVE IS UNVERIFIED, not faulty")
+                             f"the master's image {when} — see above; the SLAVE "
+                             "IS UNVERIFIED, not faulty")
                     link = LINK_NO_SUMMARY
+                    explained = True
             if link == LINK_OK:
                 self.log("[runner] the split link is carrying traffic again — both "
                          "halves came back from the apply")
@@ -568,10 +583,27 @@ class TestRunner:
                 # (HIDConsole reopens for exactly this). No summary means the
                 # measurement did not happen — reporting that as a dead slave
                 # would be a false red on a console problem.
-                self.log("[runner] note: the post-apply split-link check could not "
-                         "read the firmware's 'Split link:' counters (the console "
-                         "did not reattach after the reboot) — the SLAVE IS "
-                         "UNVERIFIED for this run")
+                #
+                # ⚠️ The `explained` test belongs INSIDE this arm, not on it.
+                # Hung off the `elif`, an already-explained NO_SUMMARY falls
+                # through to the `else` and raises — turning the note fix into a
+                # hard failure of the whole apply test. Caught by
+                # test_two_masters_after_the_apply_is_reported_not_graded.
+                # ⚠️ A dead console is reported REGARDLESS of `explained`. It
+                # is its own fault, not an alternative explanation for this run:
+                # when the console does not come back the counters are unreadable
+                # for every later check too, and suppressing the note because the
+                # master count also explains this run's outcome loses the only
+                # signal that says so. Raised by Greptile on ctnd#88.
+                if not console_live:
+                    self.log("[runner] note: the post-apply split-link check could "
+                             "not read the firmware's 'Split link:' counters (the "
+                             "console did not reattach after the reboot) — the "
+                             "SLAVE IS UNVERIFIED for this run")
+                elif not explained:
+                    self.log("[runner] note: the console reattached but produced no "
+                             "'Split link:' summary, so the link could not be "
+                             "measured — the SLAVE IS UNVERIFIED for this run")
             else:
                 raise RuntimeError(
                     "the master came back but the split link did not: the slave is "
