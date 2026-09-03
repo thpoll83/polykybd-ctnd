@@ -299,10 +299,72 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
       graded.
     - ⚠️ **So the fwapply tier cannot answer "did the slave survive its own
       apply?" on this rig at all**, and no amount of assertion strength changes
-      that. Answering it would need the runner to re-flash the slave's own
-      `*_hil_right.uf2` after the apply and then measure — which tests something
-      different ("the applied master image can still talk to a slave") and is a
-      deliberate design choice, not a bug fix.
+      that. It is a property of the per-side images, not of the check.
+    - ✅ **The answerable half of that question IS now asked —
+      `post_apply_split_link` re-flashes the slave and measures.** It runs after
+      a passing apply whose own link check came back UNVERIFIED, re-flashes
+      `*_hil_right.uf2` over BOOTSEL, and bridges the same soak. What it proves
+      is deliberately narrower than the name suggests: **the applied master
+      image can bring a split link back up with a fresh slave** — a master that
+      returned subtly wrong (broken transport, mis-sized shared-memory struct,
+      dead PIO) fails here and passes every other assertion in the round-trip.
+      That is the other half of the 2026-09-03 field report, where the master
+      enumerated perfectly and the link stayed silent. It also restores the
+      rig's two-image invariant, which an apply otherwise leaves broken until
+      the next run's flash.
+      - ⚠️ **SETTLE before measuring, or the reconnect is graded as the fault.**
+        A master that exhausted `SPLIT_MAX_CONNECTION_ERRORS` (200 here)
+        throttles to one attempt per `SPLIT_CONNECTION_CHECK_TIMEOUT` (500 ms)
+        and zeroes its error count on the first success
+        (`quantum/split_common/split_util.c`, `transport_master_if_connected`) —
+        so the link does come back by itself, but every failing attempt before
+        it is a real `transport_fail`, and the soak tolerates only ~1% of ~450
+        frames. Hence `POST_APPLY_LINK_SETTLE_S`.
+      - ⚠️ **Two masters AFTER the re-flash is a RIG fault, not a firmware one**
+        — the flash did not take, so there is no link to measure and grading one
+        would report the rig's own failure as the applied image being unable to
+        talk to its slave. It fails, and says which.
+      - ⚠️ **`_masters_after_apply`'s enumeration-failure sentinel means OPPOSITE
+        things at its two callers, which is why it is a parameter.** It reports
+        `unknown` when it cannot enumerate at all; for the apply round-trip that
+        must read as **1** (a hiccup sends the run down the *measuring* path
+        rather than buying it a free pass), and for the re-flash check it must
+        **not**, because there the count is the evidence that the slave came back
+        as a slave. Reading it as a confirmed single master lets an unresolved
+        USB state be measured and its transport failures land on the applied
+        firmware — failing the release-gating job for a rig fault. The re-flash
+        check passes `MASTERS_UNKNOWN` and **SKIPs**, the same tri-state
+        reasoning as `LINK_NO_SUMMARY`. Raised by Greptile on ctnd#90.
+        - ⚠️ At the apply call site every branch tests `> 1`, so `1` and `-1`
+          are behaviourally identical there and a mutation between them is
+          **inert, not escaped**. The boundary mutation is `2`, which does make
+          it stop measuring and is caught.
+      - ⚠️ **OFF by default — `--reflash-slave` / `HIL_RESLAVE=1`, and that is a
+        RELEASE-GATE decision, not a cost one.** The obvious wiring is "it is
+        extended-only, and the apply round-trip is extended-only, so it rides
+        along" — but the fwapply job passes `--extended` and runs on **every
+        merge to `PolyKybd`**, so "extended" and "every merge" are the same set
+        here. And this check lives INSIDE that job, whose conclusion
+        `require_fwapply_run.py` requires to be `success` before a release can
+        publish (`covered_by()`). So anything that can fail here can refuse a
+        release — which is not a thing to switch on for code that has never
+        executed against the rig. Prove it with a dispatch first, then decide.
+        Cost when on: **~45–55 s**, not the ~25 s a flash alone suggests — the
+        BOOTSEL cycle plus `POST_APPLY_LINK_SETTLE_S` plus
+        `_masters_after_apply`, which has **no early exit for the expected count
+        of 1** and so always spends its full `_MASTERS_SETTLE_S`.
+      - ⚠️ **A ctnd branch CANNOT be proven on the rig before it merges** — every
+        rig job hard-checkouts ctnd `main` (`git checkout -q -f -B main
+        origin/main`, five times over in `qmk-test.yml`), so a dispatch runs
+        `main`'s station code no matter which branch you dispatch on. That is
+        why the opt-in exists at all rather than a "try it on the branch first"
+        plan: the only sequence that works is **merge off → dispatch on →
+        decide**.
+      - **`should_reflash_slave()` is the gate, extracted and pure** for the
+        reason `classify_link_health` and `decide_stale_bundles` are: a one-line
+        switch nobody exercises is exactly how the first cut of the post-apply
+        link check shipped inert. It needs the apply's `link` outcome, which is
+        why that result dict carries one.
   - ⚠️ **`measure_split_link` is TRI-state, and the third value is what keeps the
     check honest.** `LINK_NO_SUMMARY` means the console produced no `Split link:`
     line, i.e. the measurement did not happen — reporting that as a dead slave

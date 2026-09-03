@@ -33,6 +33,39 @@ ACK              = ord(".")
 VIA_DYNAMIC_KEYMAP_RESET = 0x06
 
 
+def should_reflash_slave(apply_result: dict, enabled: bool) -> bool:
+    """Whether to finish the link question by re-flashing the slave.
+
+    Pure, and extracted rather than left inline, because it is the switch that
+    decides whether :meth:`TestRunner.post_apply_split_link` runs at all — and a
+    one-line gate nobody exercises is how the first cut of the post-apply link
+    check shipped inert (it read a console the suite had already stopped, so it
+    returned UNVERIFIED on every run while looking correct in the diff).
+
+    Two conditions, and neither is cosmetic:
+
+    * a FAILED apply has nothing to follow up — the diagnosis is the apply's,
+      and re-flashing the slave would overwrite the state someone has to read;
+    * a link the apply already measured as healthy is answered. Re-flashing
+      there costs a full BOOTSEL cycle to learn what is already known.
+
+    On this rig the second is effectively always false (an apply converts the
+    slave into a second master, so the in-apply check can only report
+    UNVERIFIED), but that is a property of the rig's per-side images, not of the
+    contract — a single-image rig would take the skip.
+
+    ``enabled`` is the caller's opt-in and is checked FIRST, so the whole
+    follow-up is off unless asked for. It defaults off because this runs inside
+    the apply job, and ``require_fwapply_run.py`` gates publishing on that job's
+    conclusion being ``success`` — so anything that can fail here can refuse a
+    release. It has never executed against the rig; turning it on per-merge is a
+    decision to make after a clean proof run, not before one.
+    """
+    return (enabled
+            and apply_result.get("status") == "pass"
+            and apply_result.get("link") != LINK_OK)
+
+
 class TestRunner:
     def __init__(self, log: Callable[[str], None] = print):
         self.log = log
@@ -78,6 +111,7 @@ class TestRunner:
 
     def flash_and_test(self, left_uf2: str, right_uf2: str, tests: list = None,
                        bin_path: str = None, extended: bool = False,
+                       reflash_slave: bool = False,
                        doom: bool = False,
                        apply_bin: str = None) -> dict:
         """Flash both halves and run ``tests`` against the master.
@@ -243,8 +277,12 @@ class TestRunner:
                     self.log("[runner] skipping the firmware apply round-trip — the "
                              "suite already has a failure to diagnose first")
                 else:
-                    results.append(self.firmware_apply_roundtrip(
-                        apply_bin, left_uf2, console=console_started))
+                    applied = self.firmware_apply_roundtrip(
+                        apply_bin, left_uf2, console=console_started)
+                    results.append(applied)
+                    if should_reflash_slave(applied, reflash_slave):
+                        results.append(self.post_apply_split_link(
+                            right_uf2, console=console_started))
 
             # Persistence across a power cycle — LAST, because it reboots the
             # master (see reboot_persistence). Skipped when the suite already
@@ -283,6 +321,11 @@ class TestRunner:
         finally:
             self._flash.cleanup()
 
+    # How long to let the split link re-establish after re-flashing the slave,
+    # before measuring it. See post_apply_split_link for why measuring sooner
+    # grades the reconnect itself as a fault.
+    POST_APPLY_LINK_SETTLE_S = 5.0
+
     # The slave reboots a few seconds AFTER the master, so the post-apply master
     # count is a MOVING value for a short window. Long enough to cover that,
     # with an early exit once it has settled.
@@ -290,7 +333,13 @@ class TestRunner:
     _MASTERS_STABLE   = 3
     _MASTERS_SPACING  = 0.5
 
-    def _masters_after_apply(self) -> int:
+    # What `_masters_after_apply` reports when it cannot enumerate at all. The
+    # apply round-trip wants that to read as 1 (measure rather than exempt the
+    # run); the post-apply re-flash check must NOT, because there the count is
+    # evidence that the flash took. See the `unknown` parameter.
+    MASTERS_UNKNOWN = -1
+
+    def _masters_after_apply(self, unknown: int = 1) -> int:
         """How many halves enumerate as master, waiting for the count to SETTLE.
 
         Two IS both halves being master — the same signal ``test_single_master``
@@ -315,11 +364,18 @@ class TestRunner:
             try:
                 count = len(enumerate_raw_interfaces())
             except Exception as exc:
-                # Never let an enumeration hiccup decide a firmware verdict:
-                # report one master, which sends the caller down the *measuring*
-                # path rather than silently exempting the run.
+                # ⚠️ The two callers need OPPOSITE defaults here, which is why
+                # this is a parameter and not a constant. For the apply
+                # round-trip, reporting one master sends the caller down the
+                # *measuring* path rather than silently exempting the run — a
+                # hiccup must not buy a free pass. For post_apply_split_link the
+                # count is evidence that the RE-FLASH took, and an exception is
+                # evidence of nothing: reading it as 1 there lets an unresolved
+                # USB state be measured and its transport failures attributed to
+                # the applied firmware, failing the job that gates releases for
+                # a rig fault. Raised by Greptile on ctnd#90.
                 self.log(f"[runner] could not enumerate Raw HID interfaces: {exc}")
-                return 1
+                return unknown
             streak = streak + 1 if count == last else 1
             last = count
             # Early exit only on the state we are waiting FOR. A settled 1 is
@@ -612,7 +668,12 @@ class TestRunner:
                     "failed to come back shows up")
 
             self.log(f"[test] PASS: {name} — applied {got} and the keyboard came back")
-            return {"name": name, "status": "pass"}
+            # `link` rides along so the caller can tell a run that already
+            # measured a healthy link from one left UNVERIFIED — the second
+            # is what post_apply_split_link exists to finish, and re-flashing
+            # the slave for the first would cost a flash cycle to learn
+            # nothing.
+            return {"name": name, "status": "pass", "link": link}
         except Exception as exc:
             self.log(f"[test] FAIL: {name}: {exc}")
             return {"name": name, "status": "fail", "error": str(exc)}
@@ -620,6 +681,113 @@ class TestRunner:
             # Hand the console back in the state the caller left it: stopped for
             # the rest of the firmware section (reboot_persistence power-cycles
             # the master right after this).
+            try:
+                self._console.stop()
+                TAP.flush()
+            except Exception:
+                pass
+
+    def post_apply_split_link(self, right_uf2: str, console: bool = False) -> dict:
+        """Re-flash the SLAVE, then measure the split link against the applied master.
+
+        ⚠️ **Read what this proves narrowly.** It is NOT "the slave survived its
+        own apply". That question is structurally unanswerable on this rig and no
+        amount of assertion strength changes it: the slave installs its own
+        STAGED image, and the staged bytes are the master's (bridged during
+        CHUNK). On a real keyboard both halves run one identical image and the
+        role is decided at runtime by VBUS, so that is exactly right; here the
+        halves run DIFFERENT images by construction, so the slave comes back as a
+        second master. :meth:`firmware_apply_roundtrip` measures and reports that.
+
+        What this DOES answer is the other half of the field report that prompted
+        it (2026-09-03): the master enumerated perfectly while the link stayed
+        silent — ``transport_fail`` climbing on every frame with ``crc_err=0``.
+        Giving the master a freshly-flashed slave and then bridging real traffic
+        asks whether the **applied master image** can still bring a split link up
+        at all. A master that came back subtly wrong — a broken transport, a
+        mis-sized shared-memory struct, a dead PIO — fails here and passes every
+        other assertion in the apply round-trip.
+
+        It also restores the rig's two-image invariant, which an apply otherwise
+        leaves broken until the next run's flash.
+
+        Extended tier only, because its caller is: the apply round-trip needs
+        ``--extended`` (and the fwapply CI job passes it), so this costs the
+        default tier nothing.
+        """
+        name = "post-apply split link (slave re-flashed)"
+        self.log("[runner] re-flashing the slave with its own image so the split "
+                 "link can be measured against the applied master")
+        try:
+            self._flash.flash("right", right_uf2, self.log)
+        except Exception as exc:
+            self.log(f"[test] FAIL: {name}: could not re-flash the slave: {exc}")
+            return {"name": name, "status": "fail", "error": str(exc)}
+
+        try:
+            # ⚠️ Settle BEFORE measuring, or the reconnect lands INSIDE the
+            # window and is graded as the fault. A master that exhausted
+            # SPLIT_MAX_CONNECTION_ERRORS (200 here) throttles to one attempt per
+            # SPLIT_CONNECTION_CHECK_TIMEOUT (500 ms) and zeroes its error count
+            # on the first success — quantum/split_common/split_util.c
+            # transport_master_if_connected — so the link does come back on its
+            # own, but every failing attempt before it is a real transport_fail.
+            # The soak's tolerance is 1% of ~450 frames, i.e. about 4, which a
+            # reconnect window clears easily.
+            time.sleep(self.POST_APPLY_LINK_SETTLE_S)
+            self.wait_for_master_ready()
+
+            console_live = self._reattach_console() if console else False
+            if not console_live:
+                reason = ("the console did not reattach, so the firmware's "
+                          "'Split link:' counters cannot be read")
+                self.log(f"[test] SKIP: {name} ({reason})")
+                return {"name": name, "status": "skip", "reason": reason}
+
+            # One interface is the whole point of the re-flash: the slave is a
+            # slave again. Two means the flash did not take, and measuring a link
+            # that cannot exist would report a firmware fault for a rig problem.
+            masters = self._masters_after_apply(unknown=self.MASTERS_UNKNOWN)
+            if masters == self.MASTERS_UNKNOWN:
+                # SKIP, not FAIL. An unknown rig state is not evidence about the
+                # firmware, and this runs inside the job the release gate
+                # requires green — the same reason measure_split_link reports
+                # LINK_NO_SUMMARY rather than a dead slave when it cannot read
+                # the counters.
+                reason = ("could not enumerate Raw HID interfaces after the "
+                          "re-flash, so the rig state is unknown — measuring "
+                          "here would attribute a rig fault to the applied "
+                          "firmware")
+                self.log(f"[test] SKIP: {name} ({reason})")
+                return {"name": name, "status": "skip", "reason": reason}
+            if masters != 1:
+                self.log(f"[test] FAIL: {name}: {masters} Raw HID interfaces after "
+                         "re-flashing the slave — it did not come back as a slave, "
+                         "so there is no link to measure. This is a RIG fault, not "
+                         "a firmware one")
+                return {"name": name, "status": "fail",
+                        "error": f"{masters} masters after the slave re-flash"}
+
+            link = measure_split_link(self._raw, self.log)
+            if link == LINK_OK:
+                self.log(f"[test] PASS: {name} — the applied master image brought "
+                         "the split link back up with a fresh slave")
+                return {"name": name, "status": "pass"}
+            if link == LINK_NO_SUMMARY:
+                reason = ("no 'Split link:' summary — the counters could not be "
+                          "read, so the link was not measured")
+                self.log(f"[test] SKIP: {name} ({reason})")
+                return {"name": name, "status": "skip", "reason": reason}
+            self.log(f"[test] FAIL: {name}: the master is on the applied image and "
+                     "the slave was just re-flashed, yet the link is not carrying "
+                     "traffic — the applied image cannot talk to its own slave")
+            return {"name": name, "status": "fail", "error": "split link faulted"}
+        except Exception as exc:
+            self.log(f"[test] FAIL: {name}: {exc}")
+            return {"name": name, "status": "fail", "error": str(exc)}
+        finally:
+            # Same contract as the apply round-trip: hand the console back
+            # stopped, since reboot_persistence power-cycles the master next.
             try:
                 self._console.stop()
                 TAP.flush()
@@ -1042,9 +1210,17 @@ def write_github_summary(result: dict, label: str = "") -> None:
         print(f"[runner] could not write GITHUB_STEP_SUMMARY: {exc}")
 
 
-if __name__ == "__main__":
+def build_parser():
+    """The CLI, as a function so its DEFAULTS are reachable from a test.
+
+    Built inline under ``__main__`` until 2026-09-03, which meant no test
+    could assert what a flag defaults to — and ``--reflash-slave`` defaulting
+    off is the whole safety argument for it (it runs inside the job the
+    release gate requires green). A mutation flipping that default escaped
+    the suite; this is what closes it.
+    """
     import argparse
-    from .hil_tests import TESTS, set_doom_pack
+
     parser = argparse.ArgumentParser(description="Flash and test PolyKybd firmware")
     parser.add_argument("--left",  required=True, help="Path to left half UF2")
     parser.add_argument("--right", required=True, help="Path to right half UF2")
@@ -1070,6 +1246,18 @@ if __name__ == "__main__":
                              "reboot persistence). Adds roughly a minute; meant for "
                              "a release or a change big enough to want them. Also "
                              "settable with HIL_EXTENDED=1.")
+    parser.add_argument("--reflash-slave", dest="reflash_slave", action="store_true",
+                        default=os.environ.get("HIL_RESLAVE", "").lower()
+                        in ("1", "true", "yes"),
+                        help="after the firmware apply round-trip, re-flash the "
+                             "slave with its own image and measure the split link. "
+                             "Answers whether the APPLIED master image can bring a "
+                             "link back up (an apply on this rig necessarily turns "
+                             "the slave into a second master, so the in-apply check "
+                             "can only report UNVERIFIED). Adds ~45-55 s and a "
+                             "BOOTSEL cycle. Off by default: it runs inside the job "
+                             "the release gate requires to be green. Also settable "
+                             "with HIL_RESLAVE=1.")
     parser.add_argument("--doom", action="store_true",
                         default=os.environ.get("DOOM_HIL", "").lower()
                         in ("1", "true", "yes"),
@@ -1095,6 +1283,13 @@ if __name__ == "__main__":
                         help="run the graded suite as well as --probe. Off by default: "
                              "a debug loop wants the probe alone, and the suite costs "
                              "rig time on every iteration.")
+    return parser
+
+
+if __name__ == "__main__":
+    import argparse
+    from .hil_tests import TESTS, set_doom_pack
+    parser = build_parser()
     args = parser.parse_args()
     if args.doom and not args.plyx_valid:
         parser.error("--doom needs --plyx-valid (a signed .plyx built against the "
@@ -1120,6 +1315,7 @@ if __name__ == "__main__":
         result = runner.flash_and_test(args.left, args.right, tests=suite,
                                        bin_path=args.bin_path,
                                        extended=args.extended,
+                                       reflash_slave=args.reflash_slave,
                                        doom=args.doom,
                                        apply_bin=args.apply_bin)
     except Exception as exc:
