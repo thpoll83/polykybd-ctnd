@@ -58,12 +58,24 @@ def enumerate_raw_interfaces(
 class HIDConsole:
     """Reads QMK's built-in HID console output (equivalent to hid-listen)."""
 
+    # Consecutive read errors before the handle is treated as dead rather than
+    # hiccuping, and how long to wait between reopen attempts.
+    _REOPEN_AFTER_ERRORS = 5
+    _REOPEN_POLL_S = 0.5
+    # Comfortably above the loop's own worst-case wait (a 200 ms read plus one
+    # _REOPEN_POLL_S), but see stop() for why it is not treated as a guarantee.
+    _STOP_JOIN_S = 2.0
+
     def __init__(self, vendor_id: int = QMK_VENDOR_ID, product_id: int = QMK_PRODUCT_ID):
         self._vid = vendor_id
         self._pid = product_id
         self._dev = None
         self._thread: threading.Thread | None = None
         self._running = False
+        # Handles stop() declined to close because the reader was still alive.
+        # Non-zero means a reader thread overran its join — worth knowing, since
+        # the alternative to leaking was aborting the process.
+        self.abandoned_handles = 0
 
     def start(self, callback: Callable[[str], None]) -> None:
         path = _find_path(self._vid, self._pid, HID_CONSOLE_USAGE_PAGE, HID_CONSOLE_USAGE)
@@ -75,15 +87,71 @@ class HIDConsole:
         self._thread.start()
 
     def _loop(self, callback: Callable[[str], None]) -> None:
+        """Read forever, REOPENING the handle when the keyboard re-enumerates.
+
+        ⚠️ Without the reopen this reader dies silently at the first reboot and
+        never comes back: the hidraw node the handle was opened on disappears,
+        every subsequent ``read`` raises, and the old loop just slept on the
+        exception. Nothing logs it, so the console simply stops — which is why
+        the firmware-apply test's own banner assertion
+        (``last self-apply COMPLETED`` / ``written image MATCHED``) had *never*
+        fired: an APPLY reboots the master, so the one window that check exists
+        to read is exactly the window the reader was dead for. Both the 0.17.4
+        and 0.18.0 apply runs logged "no apply banner seen" and passed on the
+        weaker re-enumeration check alone.
+
+        The reopen is deliberately slow to trigger (``_REOPEN_AFTER_ERRORS``
+        consecutive failures, then a poll): a read error is also what a
+        momentary USB hiccup looks like, and re-enumerating on every one of
+        those would fight ``RawHID``, which opens its own handle per call.
+
+        Lines printed while the device is away are lost, and there is no way
+        around that — the firmware drops console output nobody is draining.
+        """
+        errors = 0
         while self._running:
+            dev = self._dev
             try:
-                data = self._dev.read(64, timeout=200)
+                data = dev.read(64, timeout=200) if dev is not None else None
+                errors = 0
                 if data:
                     msg = bytes(data).rstrip(b"\x00").decode("utf-8", errors="replace")
                     if msg.strip():
                         callback(msg)
             except Exception:
-                time.sleep(0.1)
+                errors += 1
+                if errors >= self._REOPEN_AFTER_ERRORS:
+                    self._reopen()
+                    errors = 0
+                else:
+                    time.sleep(0.1)
+            if dev is None:
+                self._reopen()
+
+    def _reopen(self) -> None:
+        """Close the dead handle and try to acquire a fresh one.
+
+        Runs on the reader thread ONLY. That is what makes it safe without a
+        lock: ``stop()`` clears ``_running``, joins this thread, and only then
+        touches ``_dev`` — so the close here and the close there can never race
+        (see the use-after-free note on ``stop``).
+        """
+        dev, self._dev = self._dev, None
+        if dev is not None:
+            try:
+                dev.close()
+            except Exception:
+                pass
+        time.sleep(self._REOPEN_POLL_S)
+        if not self._running:
+            return
+        try:
+            path = _find_path(self._vid, self._pid,
+                              HID_CONSOLE_USAGE_PAGE, HID_CONSOLE_USAGE)
+            if path is not None:
+                self._dev = hid.Device(path=path)
+        except Exception:
+            self._dev = None
 
     def stop(self) -> None:
         """Stop the reader thread and close the device, in that order."""
@@ -96,11 +164,27 @@ class HIDConsole:
         # (SIGABRT, exit 134). With CONSOLE_ENABLE on (the default firmware now
         # streams [qmk] lines) the reader is almost always mid-read at stop()
         # time, so this turned otherwise-green HIL runs into exit-134 CI
-        # failures. The loop's read timeout is 200 ms, so it observes the
-        # cleared _running and returns promptly; join with a margin above that.
+        # failures. The loop's read timeout is 200 ms, so it normally observes
+        # the cleared _running and returns promptly; join with a margin above
+        # that.
+        #
+        # ⚠️ A TIMED join is not a guarantee, and closing anyway would be the
+        # very use-after-free this ordering exists to prevent. The margin rested
+        # on "the loop only ever waits 200 ms", and two things break that
+        # premise: the callback runs on THIS thread (in the touch UI it is a
+        # SocketIO emit, an unbounded wait), and `_reopen` sleeps and then calls
+        # `hid.enumerate()` / `hid.Device()` at the precise moment the device is
+        # re-enumerating. So when the thread is still alive the handle is
+        # deliberately ABANDONED rather than closed: one leaked fd until the
+        # process exits is a trade worth making against SIGABRT, and the thread
+        # is a daemon, so it cannot hold the process open. (Found by CodeRabbit
+        # on ctnd#86.)
         thread, self._thread = self._thread, None
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            thread.join(timeout=self._STOP_JOIN_S)
+            if thread.is_alive():
+                self.abandoned_handles += 1
+                return
         if self._dev is not None:
             try:
                 self._dev.close()

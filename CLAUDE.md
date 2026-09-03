@@ -268,6 +268,85 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
   same `FW_VERSION` and the UF2 filenames carry no version. ⚠️ Compare the
   **version string only**: the running image is the HIL build and the `--bin` is the
   plain one, so `fw_size`/`fw_crc` legitimately differ between them.
+- [x] **The apply round-trip asserts the SLAVE too, not just the master.** An
+  apply reboots BOTH halves — the slave copies its own staged image and resets a
+  few seconds after the master — and until 2026-09-03 nothing looked at the link
+  afterwards: the suite's split-link soak runs long *before* the update, and the
+  only post-apply assertion was that the master re-enumerated on the right
+  version. A field report had exactly that gap's shape: the master came back
+  perfectly while the link went silent, `transport_fail` climbing on **201 of 201**
+  frames with `crc_err=0` — the slave answering nothing rather than answering
+  corrupt. Every assertion the test made would have passed. It now ends by
+  bridging the same cmd-21 soak and measuring the counters
+  (`hil_tests.measure_split_link`, shared with `test_split_link_health` so the two
+  cannot disagree about what a fault is).
+  - ⚠️ **`measure_split_link` is TRI-state, and the third value is what keeps the
+    check honest.** `LINK_NO_SUMMARY` means the console produced no `Split link:`
+    line, i.e. the measurement did not happen — reporting that as a dead slave
+    would turn a console problem into a false red on the firmware. The
+    distinction is sound because the **master** prints that summary from
+    `send_to_bridge` regardless of whether the slave answers, so a genuinely dead
+    slave still yields two summaries with `transport_fail` climbing. The graded
+    test carries `needs_console` and so may treat anything but `LINK_OK` as a
+    failure; the runner cannot, and says "the SLAVE IS UNVERIFIED for this run".
+- [x] ⚠️ **The console is STOPPED before the whole firmware-update section, so
+  anything after that point reads a `TAP` nothing is feeding — and that, not the
+  reader dying, is why the apply test's banner check had never fired.**
+  `flash_and_test` calls `self._console.stop()` before the `--bin` stage+verify
+  and the `--apply-bin` round-trip, deliberately: `BEGIN` tears USB down during
+  the master's staging erase. So `TAP.wait_for("last self-apply COMPLETED")`
+  could not possibly match, and both the 0.17.4 and the 0.18.0 runs printed *"no
+  apply banner seen … the re-enumeration check above still passed"* and went
+  green on the weaker assertion.
+  - ⚠️ **This is the trap for anything added to that section**, and the first cut
+    of the post-apply link check walked straight into it: it took the run-start
+    "did the console come up" flag and passed it through, so the measurement
+    would have returned `LINK_NO_SUMMARY` on **every** run — present, passing,
+    and asserting nothing, i.e. exactly the non-coverage the check was written to
+    remove. Caught by Greptile on ctnd#86, not by the suite; the test that pins it
+    now asserts the console is **live at the moment `measure_split_link` is
+    called**, not that the wiring reads correctly.
+  - `_reattach_console()` re-opens it after the reboot, which is necessarily
+    *after* boot — so a banner printed during boot is missed **by construction**
+    and its absence says nothing about the firmware. The old note offered "the
+    console did not come up, or this firmware predates the in-flash apply log";
+    neither was the reason, and that reading closed the question for months.
+- [x] **The console reader also never survived a re-enumeration**, which is a
+  second, independent defect: `HIDConsole` opened one hidraw handle at start, and
+  after any reboot that node is gone, every later `read` raises, and the old loop
+  just slept on the exception — silently, with nothing logged. `HIDConsole._loop` now reopens (after
+  `_REOPEN_AFTER_ERRORS` consecutive failures, so a momentary USB hiccup does not
+  make it fight `RawHID`, which opens its own handle per call). Lines printed
+  while the device is away are lost and always will be — the firmware drops
+  console output nobody is draining.
+  - ⚠️ **`stop()`'s join is TIMED, so it can return with the reader still alive —
+    and closing the handle anyway is the exact use-after-free the
+    join-before-close ordering exists to prevent** (SIGABRT, exit 134, which
+    once turned green HIL runs red). The 2 s margin rested on "the loop only
+    ever waits 200 ms"; the **callback runs on that same thread** (in the touch
+    UI it is a SocketIO emit, an unbounded wait), and the reopen sleeps and then
+    calls `hid.enumerate()`/`hid.Device()` at the precise moment the device is
+    re-enumerating. So when the thread is still alive the handle is
+    **abandoned, not closed** (`abandoned_handles` counts it): one leaked fd
+    until process exit beats aborting the process, and the reader is a daemon
+    thread so it cannot hold the process open. Found by CodeRabbit on ctnd#86 —
+    a latent hazard whose guard rested on a premise the reopen weakened.
+  - **Generalise: a best-effort diagnostic that fails silently reads as evidence
+    of absence.** The apply test's log line offered "the console did not come up"
+    as one of two explanations and nobody checked which; the *other* explanation
+    (a firmware predating the in-flash apply log) was plausible enough to close
+    the question for months.
+- **Post-apply the master does not settle, reproducibly — and that is REPORTED,
+  not failed.** Measured on two consecutive runs (merge run 33721791934 on 0.17.4,
+  dispatch 33726949359 on 0.18.0): after an APPLY the master answers GET_LANG in a
+  uniform ~450 ms for the whole 30 s settle window — **66 probes, worst 446 ms**,
+  byte-identical across both — where the same master after an ordinary RUN-pin
+  power cycle settles in 15 probes. ⚠️ **Do not theorise a mechanism from that.**
+  ~450 ms is in split-transaction retry territory and nothing on the rig measures
+  it; this file's history is full of confident mechanisms that turned out wrong.
+  Record the measurement, and note that the difference is between the two *reboot
+  paths*, not between two firmware versions.
+
 - **The slow checks are OPT-IN — `TIER_EXTENDED`.** The animation, the idle-engage
   + Eden screensaver, the split-link soak and the reboot power cycle add most of a
   minute to a gate every push pays for, so they are skipped unless the run asks:
