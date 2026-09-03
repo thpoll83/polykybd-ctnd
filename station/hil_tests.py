@@ -291,6 +291,17 @@ IDLE_ENGAGE_TIMEOUT_S = 25.0
 # its ~230 KB CRC + one SHA-512 before it logs a verdict — a touch longer than the
 # bare idle-engage window.
 DOOM_LOAD_TIMEOUT_S   = 30.0
+# If the loader's verdict + `attract screensaver up` has NOT arrived by this many
+# seconds into the load window, send a GET_ID to disambiguate the two ways the
+# accept path can go silent (FW-9 follow-up wedge):
+#   answered  -> core0 is alive, so this is dropped console output (the loader ran,
+#                but its printf was starved while the pack streams), not a hang;
+#   no answer -> core0 is likely stuck inside the pack's init() and never returned.
+# Chosen well past both the healthy accept (`up` at ~2-3 s) and the refusal
+# fire-demo fallback (`up` within ~10 s), so on those paths `wait_for` returns
+# first and the probe never fires — it is a diagnostic that only triggers when the
+# window is genuinely stalling, and it never changes a test's verdict.
+DOOM_PROBE_AT_S       = 15.0
 # The soak's frames are sent in a few hundred ms, but the firmware prints its
 # summary from send_to_bridge, i.e. as it drains them.
 LINK_SUMMARY_TIMEOUT_S = 30.0
@@ -2433,6 +2444,41 @@ def classify_doom_verdict(lines) -> str:
     return "none"
 
 
+def _wait_screensaver_with_probe(raw: RawHID, log: Callable[[str], None],
+                                 mark: int, timeout: float = DOOM_LOAD_TIMEOUT_S):
+    """Wait for `attract screensaver up` after `mark` (like TAP.wait_for), but if it
+    has not arrived by DOOM_PROBE_AT_S, fire ONE GET_ID liveness probe and log what
+    it means, then keep waiting out the rest of the window.
+
+    Returns the matching line or None, exactly like TAP.wait_for — the probe is
+    diagnostics only and never changes what the caller decides. On a healthy accept
+    or a refusal fire-demo the `up` line arrives before DOOM_PROBE_AT_S, so this
+    returns without ever probing; the probe fires only when the load window is
+    actually stalling, which is the FW-9 accept-path wedge this exists to pin down.
+    """
+    deadline = time.monotonic() + timeout
+    probe_at = time.monotonic() + DOOM_PROBE_AT_S
+    probed = False
+    while True:
+        for line in TAP.since(mark):
+            if "attract screensaver up" in line:
+                return line
+        now = time.monotonic()
+        if not probed and now >= probe_at:
+            probed = True
+            log(f"  no screensaver after {DOOM_PROBE_AT_S:.0f}s — probing core0 liveness "
+                "with a GET_ID mid-window")
+            if _master_alive(raw, log):
+                log("  PROBE: master answered GET_ID -> core0 is ALIVE; the loader's "
+                    "output was starved, not hung in init() (console-drop hypothesis)")
+            else:
+                log("  PROBE: master did NOT answer GET_ID -> core0 is unresponsive, "
+                    "consistent with a wedge inside the pack's init() (hang hypothesis)")
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.1)
+
+
 def _doom_idle_verdict(raw: RawHID, log: Callable[[str], None], pack: bytes):
     """Flash `pack` to the DOOMPACK slot, engage the IDDQD screensaver, and return
     ``(committed, lines)`` — whether COMMIT ACKed, and the console lines the loader
@@ -2457,7 +2503,7 @@ def _doom_idle_verdict(raw: RawHID, log: Callable[[str], None], pack: bytes):
         if not _resp_ok(start, CMD_IDLE_STATE, log, expect_status=ACK):
             return True, []
         log(f"  IDDQD idle started — waiting up to {DOOM_LOAD_TIMEOUT_S:.0f}s for the loader")
-        up = TAP.wait_for("attract screensaver up", mark, timeout=DOOM_LOAD_TIMEOUT_S)
+        up = _wait_screensaver_with_probe(raw, log, mark, timeout=DOOM_LOAD_TIMEOUT_S)
         lines = TAP.since(mark)
         if up is None:
             log("  (no 'attract screensaver up' line — the screensaver never engaged)")
