@@ -258,3 +258,30 @@ class ConsoleReopenTest(unittest.TestCase):
         console.stop()
         self.assertLess(_t.monotonic() - t0, 2.0,
                         "stop() hung waiting on the reopen poll")
+
+    def test_stop_does_not_close_a_handle_the_reader_still_holds(self):
+        """A timed join is not a guarantee, and closing anyway is the abort.
+
+        Closing a hidapi handle under an in-flight read is a use-after-free in
+        libhidapi's hidraw backend — SIGABRT, exit 134, which is what the
+        join-before-close ordering exists to prevent. The join has a timeout, so
+        it can return with the reader still inside ``read``, the callback (a
+        SocketIO emit in the touch UI, an unbounded wait) or ``_reopen``'s
+        device lookup. When that happens the handle is abandoned, not closed.
+        """
+        import time as _t
+
+        class SlowDevice(FakeHidDevice):
+            def read(self, size, timeout=0):
+                _t.sleep(5.0)          # overruns any join timeout
+                return b""
+
+        dev = SlowDevice([])
+        console, _opened = self._console([dev])
+        console._STOP_JOIN_S = 0.2      # keep the test quick; the shape is what matters
+        console.start(lambda _m: None)
+        _t.sleep(0.05)                  # let the reader get into the blocking read
+        console.stop()
+        self.assertFalse(dev.closed,
+                         "stop() closed a handle the reader thread was still using")
+        self.assertEqual(console.abandoned_handles, 1)

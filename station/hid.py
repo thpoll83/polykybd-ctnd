@@ -62,6 +62,9 @@ class HIDConsole:
     # hiccuping, and how long to wait between reopen attempts.
     _REOPEN_AFTER_ERRORS = 5
     _REOPEN_POLL_S = 0.5
+    # Comfortably above the loop's own worst-case wait (a 200 ms read plus one
+    # _REOPEN_POLL_S), but see stop() for why it is not treated as a guarantee.
+    _STOP_JOIN_S = 2.0
 
     def __init__(self, vendor_id: int = QMK_VENDOR_ID, product_id: int = QMK_PRODUCT_ID):
         self._vid = vendor_id
@@ -69,6 +72,10 @@ class HIDConsole:
         self._dev = None
         self._thread: threading.Thread | None = None
         self._running = False
+        # Handles stop() declined to close because the reader was still alive.
+        # Non-zero means a reader thread overran its join — worth knowing, since
+        # the alternative to leaking was aborting the process.
+        self.abandoned_handles = 0
 
     def start(self, callback: Callable[[str], None]) -> None:
         path = _find_path(self._vid, self._pid, HID_CONSOLE_USAGE_PAGE, HID_CONSOLE_USAGE)
@@ -157,11 +164,27 @@ class HIDConsole:
         # (SIGABRT, exit 134). With CONSOLE_ENABLE on (the default firmware now
         # streams [qmk] lines) the reader is almost always mid-read at stop()
         # time, so this turned otherwise-green HIL runs into exit-134 CI
-        # failures. The loop's read timeout is 200 ms, so it observes the
-        # cleared _running and returns promptly; join with a margin above that.
+        # failures. The loop's read timeout is 200 ms, so it normally observes
+        # the cleared _running and returns promptly; join with a margin above
+        # that.
+        #
+        # ⚠️ A TIMED join is not a guarantee, and closing anyway would be the
+        # very use-after-free this ordering exists to prevent. The margin rested
+        # on "the loop only ever waits 200 ms", and two things break that
+        # premise: the callback runs on THIS thread (in the touch UI it is a
+        # SocketIO emit, an unbounded wait), and `_reopen` sleeps and then calls
+        # `hid.enumerate()` / `hid.Device()` at the precise moment the device is
+        # re-enumerating. So when the thread is still alive the handle is
+        # deliberately ABANDONED rather than closed: one leaked fd until the
+        # process exits is a trade worth making against SIGABRT, and the thread
+        # is a daemon, so it cannot hold the process open. (Found by CodeRabbit
+        # on ctnd#86.)
         thread, self._thread = self._thread, None
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            thread.join(timeout=self._STOP_JOIN_S)
+            if thread.is_alive():
+                self.abandoned_handles += 1
+                return
         if self._dev is not None:
             try:
                 self._dev.close()

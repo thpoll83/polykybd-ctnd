@@ -301,6 +301,18 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
   make it fight `RawHID`, which opens its own handle per call). Lines printed
   while the device is away are lost and always will be — the firmware drops
   console output nobody is draining.
+  - ⚠️ **`stop()`'s join is TIMED, so it can return with the reader still alive —
+    and closing the handle anyway is the exact use-after-free the
+    join-before-close ordering exists to prevent** (SIGABRT, exit 134, which
+    once turned green HIL runs red). The 2 s margin rested on "the loop only
+    ever waits 200 ms"; the **callback runs on that same thread** (in the touch
+    UI it is a SocketIO emit, an unbounded wait), and the reopen sleeps and then
+    calls `hid.enumerate()`/`hid.Device()` at the precise moment the device is
+    re-enumerating. So when the thread is still alive the handle is
+    **abandoned, not closed** (`abandoned_handles` counts it): one leaked fd
+    until process exit beats aborting the process, and the reader is a daemon
+    thread so it cannot hold the process open. Found by CodeRabbit on ctnd#86 —
+    a latent hazard whose guard rested on a premise the reopen weakened.
   - **Generalise: a best-effort diagnostic that fails silently reads as evidence
     of absence.** The apply test's log line offered "the console did not come up"
     as one of two explanations and nobody checked which; the *other* explanation
