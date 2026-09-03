@@ -337,7 +337,7 @@ class _ApplyFixture(unittest.TestCase):
             setattr(self.tr, name, value)
 
     def _runner(self, console_ok=True, link=None, masters=1,
-                flash_raises=False):
+                flash_raises=False, enumerate_raises=False):
         """A runner with every device interaction stubbed out."""
         seen = {"console_live_at_measure": None, "measured": False}
 
@@ -386,6 +386,8 @@ class _ApplyFixture(unittest.TestCase):
         seen["enumerations"] = 0
 
         def fake_enumerate():
+            if enumerate_raises:
+                raise OSError("hidapi: could not enumerate")
             i = min(seen["enumerations"], len(counts) - 1)
             seen["enumerations"] += 1
             return [{"path": b"one"}] * counts[i]
@@ -682,6 +684,38 @@ class PostApplySlaveReflashTest(_ApplyFixture):
         runner, seen, _fc = self._runner(link=LINK_NO_SUMMARY)
         result = self._post(runner)
         self.assertEqual(result["status"], "skip")
+
+    def test_an_unenumerable_rig_SKIPS_rather_than_grading_the_firmware(self):
+        """An enumeration failure is not evidence the re-flash took.
+
+        ``_masters_after_apply`` reports 1 on an enumeration exception, which is
+        right for the apply round-trip (a hiccup must not buy the run a free
+        pass) and wrong here, where the count is the evidence that the slave
+        came back as a slave. Reading it as a confirmed single master lets an
+        unresolved USB state be measured, and its transport failures land on the
+        applied firmware — failing the job the release gate requires green, for
+        a rig fault. Raised by Greptile on ctnd#90.
+        """
+        runner, seen, _fc = self._runner(enumerate_raises=True)
+        result = self._post(runner)
+        self.assertEqual(result["status"], "skip")
+        self.assertFalse(seen["measured"],
+                         "measured while the rig state was unknown")
+
+    def test_the_apply_roundtrip_still_MEASURES_when_enumeration_fails(self):
+        """The other caller keeps the opposite default, deliberately.
+
+        There a hiccup must send the run down the measuring path rather than
+        silently exempting it — so the two call sites need opposite behaviour
+        from the same helper, which is why `unknown` is a parameter.
+        """
+        import tempfile
+        runner, seen, _fc = self._runner(enumerate_raises=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertTrue(seen["measured"],
+                        "an enumeration hiccup exempted the apply from measuring")
+        self.assertEqual(result["status"], "pass")
 
     def test_a_failed_reflash_fails_without_measuring(self):
         runner, seen, _fc = self._runner(flash_raises=True)

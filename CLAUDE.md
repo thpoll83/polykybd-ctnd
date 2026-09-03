@@ -324,6 +324,21 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
         — the flash did not take, so there is no link to measure and grading one
         would report the rig's own failure as the applied image being unable to
         talk to its slave. It fails, and says which.
+      - ⚠️ **`_masters_after_apply`'s enumeration-failure sentinel means OPPOSITE
+        things at its two callers, which is why it is a parameter.** It reports
+        `unknown` when it cannot enumerate at all; for the apply round-trip that
+        must read as **1** (a hiccup sends the run down the *measuring* path
+        rather than buying it a free pass), and for the re-flash check it must
+        **not**, because there the count is the evidence that the slave came back
+        as a slave. Reading it as a confirmed single master lets an unresolved
+        USB state be measured and its transport failures land on the applied
+        firmware — failing the release-gating job for a rig fault. The re-flash
+        check passes `MASTERS_UNKNOWN` and **SKIPs**, the same tri-state
+        reasoning as `LINK_NO_SUMMARY`. Raised by Greptile on ctnd#90.
+        - ⚠️ At the apply call site every branch tests `> 1`, so `1` and `-1`
+          are behaviourally identical there and a mutation between them is
+          **inert, not escaped**. The boundary mutation is `2`, which does make
+          it stop measuring and is caught.
       - ⚠️ **OFF by default — `--reflash-slave` / `HIL_RESLAVE=1`, and that is a
         RELEASE-GATE decision, not a cost one.** The obvious wiring is "it is
         extended-only, and the apply round-trip is extended-only, so it rides

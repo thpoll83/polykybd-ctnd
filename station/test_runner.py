@@ -333,7 +333,13 @@ class TestRunner:
     _MASTERS_STABLE   = 3
     _MASTERS_SPACING  = 0.5
 
-    def _masters_after_apply(self) -> int:
+    # What `_masters_after_apply` reports when it cannot enumerate at all. The
+    # apply round-trip wants that to read as 1 (measure rather than exempt the
+    # run); the post-apply re-flash check must NOT, because there the count is
+    # evidence that the flash took. See the `unknown` parameter.
+    MASTERS_UNKNOWN = -1
+
+    def _masters_after_apply(self, unknown: int = 1) -> int:
         """How many halves enumerate as master, waiting for the count to SETTLE.
 
         Two IS both halves being master — the same signal ``test_single_master``
@@ -358,11 +364,18 @@ class TestRunner:
             try:
                 count = len(enumerate_raw_interfaces())
             except Exception as exc:
-                # Never let an enumeration hiccup decide a firmware verdict:
-                # report one master, which sends the caller down the *measuring*
-                # path rather than silently exempting the run.
+                # ⚠️ The two callers need OPPOSITE defaults here, which is why
+                # this is a parameter and not a constant. For the apply
+                # round-trip, reporting one master sends the caller down the
+                # *measuring* path rather than silently exempting the run — a
+                # hiccup must not buy a free pass. For post_apply_split_link the
+                # count is evidence that the RE-FLASH took, and an exception is
+                # evidence of nothing: reading it as 1 there lets an unresolved
+                # USB state be measured and its transport failures attributed to
+                # the applied firmware, failing the job that gates releases for
+                # a rig fault. Raised by Greptile on ctnd#90.
                 self.log(f"[runner] could not enumerate Raw HID interfaces: {exc}")
-                return 1
+                return unknown
             streak = streak + 1 if count == last else 1
             last = count
             # Early exit only on the state we are waiting FOR. A settled 1 is
@@ -734,7 +747,19 @@ class TestRunner:
             # One interface is the whole point of the re-flash: the slave is a
             # slave again. Two means the flash did not take, and measuring a link
             # that cannot exist would report a firmware fault for a rig problem.
-            masters = self._masters_after_apply()
+            masters = self._masters_after_apply(unknown=self.MASTERS_UNKNOWN)
+            if masters == self.MASTERS_UNKNOWN:
+                # SKIP, not FAIL. An unknown rig state is not evidence about the
+                # firmware, and this runs inside the job the release gate
+                # requires green — the same reason measure_split_link reports
+                # LINK_NO_SUMMARY rather than a dead slave when it cannot read
+                # the counters.
+                reason = ("could not enumerate Raw HID interfaces after the "
+                          "re-flash, so the rig state is unknown — measuring "
+                          "here would attribute a rig fault to the applied "
+                          "firmware")
+                self.log(f"[test] SKIP: {name} ({reason})")
+                return {"name": name, "status": "skip", "reason": reason}
             if masters != 1:
                 self.log(f"[test] FAIL: {name}: {masters} Raw HID interfaces after "
                          "re-flashing the slave — it did not come back as a slave, "
