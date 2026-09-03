@@ -248,6 +248,19 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
   - The soak's `from` values are deliberately **off-screen** (>= 900): an on-screen
     one would make each of the 450 reports request a display refresh and the test
     would measure the renderer instead of the link.
+- [x] **A firmware crash anywhere in the run now FAILS the run — `test_no_crash_record`.**
+  The firmware announces a HardFault / unhandled exception / watchdog reboot as a
+  `crash: side=<master|slave> kind=… pc=… fw=…` console line on its next boot (qmk
+  `base/crash_record.*`, protocol v16 cmd 39). Until this the rig echoed it into the
+  log like any other line, so a crash inside a test read as a flake or a dead reply.
+  The scan runs `needs_console`, DEFAULT tier, **last among the default tests** so
+  its window covers them all, and reads `TAP.find_all("crash: side=")` from the start
+  of the session — the slave's record included, since the master pulls and prints
+  it. `test_crash_record_command` (`min_protocol: 16`) reads both halves over cmd 39,
+  fails on a **fresh** record (bit1 — the boot before this one crashed), notes an
+  archived one, checks the unknown-sub-op NACK and exercises the clear so the next
+  run starts clean. ⚠️ Neither has seen a real crash on the rig yet; a probe that
+  faults on purpose is the way to prove the chain end to end.
 - [x] **`reboot_persistence` is the only check that survives a power cycle**, and it
   is runner-level (it needs `FlashController.reset()` — which the rig had all along
   and no test had ever used). It sets the idle style, flushes with **cmd 26**
