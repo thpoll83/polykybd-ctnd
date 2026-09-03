@@ -99,6 +99,7 @@ CMD_GLYPH_SIZE              = 34  # get/set the keycap legend size (protocol v13
 CMD_MACRO_INFO              = 36  # count, label stride, capacity, bytes used (v15+)
 CMD_MACRO_BODY              = 37  # windowed read/write of the shared body buffer (v15+)
 CMD_MACRO_LOOK              = 38  # get/set one macro's whole keycap look (v15+)
+CMD_CRASH_RECORD            = 39  # read/clear the firmware crash record (v16+)
 MACRO_LOOK_HEADER           = 9   # id, caption length, style, 4 little-endian icon bytes
 MACRO_STYLE_INDEX           = 0   # "M3" above the caption -- the default
 MACRO_STYLE_ICON            = 1   # a chosen glyph above the caption
@@ -2229,6 +2230,112 @@ def test_split_link_health(raw: RawHID, log: Callable[[str], None]) -> bool:
     return measure_split_link(raw, log) == LINK_OK
 
 
+# --- firmware crash record (console line + cmd 39) ---------------------------
+#
+# The firmware records a HardFault / unhandled exception / watchdog timeout into
+# NOLOAD RAM, reboots, and announces it ONCE per boot on the console as
+# ``crash: side=<master|slave> kind=… pc=… … fw=…`` (base/crash_record.c). Until
+# now a crash on the rig looked like a boot-burst flake or a dead HID reply; the
+# console line is the firmware's own confession, and a run that shows it must
+# not go green whatever the other tests say.
+
+CRASH_LINE_MARK = "crash: side="
+CRASH_HID_FLAG_PRESENT = 1 << 0
+CRASH_HID_FLAG_FRESH   = 1 << 1
+CRASH_HID_BODY_LEN     = 49    # [flags][48-byte poly_crash_record_t]
+
+# Where THIS run's console history starts. The tap is process-global and rolls
+# across runs in the long-lived UI process, so a crash line left by a previous
+# run must not fail the next one: the runner stamps the mark before it flashes.
+_SESSION_MARK = 0
+
+
+def begin_session() -> None:
+    """Called by the runner at the start of a run, before the flash."""
+    global _SESSION_MARK
+    _SESSION_MARK = TAP.mark()
+
+
+def classify_crash_lines(lines) -> tuple:
+    """(ok, message) for the crash lines the console produced in this run.
+
+    Pure so it is unit-testable: any ``crash: side=`` line is a firmware crash
+    somewhere in the run — there is no benign shape of that line."""
+    lines = [ln.strip() for ln in lines if CRASH_LINE_MARK in ln]
+    if not lines:
+        return True, "no crash record announced on the console"
+    return False, (f"{len(lines)} firmware crash record line(s) on the console: "
+                   + " | ".join(lines))
+
+
+def test_no_crash_record(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """No keyboard half crashed during this run (console ``crash:`` line absent).
+
+    Reads the console tap from the start of THIS run (``begin_session``), so a
+    fault anywhere in the run — during the flash-and-enumerate, inside another
+    test, on the SLAVE (the master pulls the slave's record and prints it as
+    ``side=slave``) — is caught here even when every other test passed around
+    it. It is the LAST entry of the suite, whatever tiers ran, so every other
+    test is inside its window. ``needs_console``: without the tap it can
+    assert nothing and would report a green it did not earn."""
+    ok, msg = classify_crash_lines(TAP.find_all(CRASH_LINE_MARK, mark=_SESSION_MARK))
+    log(("  " if ok else "  FAIL: ") + msg)
+    return ok
+
+
+def test_crash_record_command(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """CRASH_RECORD (cmd 39, protocol v16+): read both halves, clear, read back.
+
+    ``data[2]`` 0 = this half's archived record, 1 = the slave's (as pulled over
+    the split link), 2 = clear the archive; anything else NACKs. A reply carries
+    ``[flags][48-byte record]``; bit0 = a record is present, bit1 = it is FRESH
+    (recorded by the boot before this one). A fresh record on the rig IS a crash
+    in this run's flash-and-boot and fails; an archived (non-fresh) one is older
+    history, logged and then cleared so the next run starts clean and the clear
+    sub-op is exercised for real."""
+    def read(which: int):
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_CRASH_RECORD, which]))
+        log(f"crash-record read {which} -> {resp[:8]!r}…" if resp else f"crash-record read {which} -> None")
+        if not _resp_ok(resp, CMD_CRASH_RECORD, log, expect_status=ACK):
+            return None
+        if len(resp) < 3 + CRASH_HID_BODY_LEN:
+            log(f"  FAIL: reply body is {len(resp) - 3} bytes, expected {CRASH_HID_BODY_LEN}")
+            return None
+        return resp[3]
+
+    ok = True
+    for which, side in ((0, "master"), (1, "slave")):
+        flags = read(which)
+        if flags is None:
+            return False
+        if flags & CRASH_HID_FLAG_FRESH:
+            log(f"  FAIL: the {side} half reports a FRESH crash record (it crashed on the boot before this one)")
+            ok = False
+        elif flags & CRASH_HID_FLAG_PRESENT:
+            log(f"  note: the {side} half holds an older (archived) crash record — clearing it")
+        else:
+            log(f"  {side}: no crash record")
+
+    bad = raw.send(bytes([POLY_CHANNEL, CMD_CRASH_RECORD, 3]))
+    log(f"crash-record sub-op 3 -> {bad!r}")
+    if not _resp_ok(bad, CMD_CRASH_RECORD, log, expect_status=NACK):
+        log("  FAIL: an unknown sub-op must NACK")
+        return False
+
+    clear = raw.send(bytes([POLY_CHANNEL, CMD_CRASH_RECORD, 2]))
+    log(f"crash-record clear -> {clear!r}")
+    if not _resp_ok(clear, CMD_CRASH_RECORD, log, expect_status=ACK):
+        return False
+    flags = read(0)
+    if flags is None:
+        return False
+    if flags & CRASH_HID_FLAG_PRESENT:
+        log("  FAIL: the master still reports a record after the clear")
+        return False
+    log("  clear round-tripped")
+    return ok
+
+
 def _build_empty_fontpack() -> bytes:
     """A minimal valid 32-byte 'empty' PlyF pack (font_count 0) — the wipe sentinel.
     Mirrors PolyKybdHost hid_fontpack.build_empty_pack(): header only, body CRC of an
@@ -2823,6 +2930,11 @@ TESTS = [
     # deliberate traffic, so it is EXTENDED-tier.
     {"name": "split link health under a bridged soak (cmd 21)",
      "fn": test_split_link_health, "needs_console": True, "tier": TIER_EXTENDED},
+    # The firmware's own crash confession, half one: cmd 39 (a fresh record means
+    # the boot before this one faulted; also exercises clear). The console scan is
+    # the LAST entry of the list, below.
+    {"name": "crash record command (v16 cmd 39)", "fn": test_crash_record_command,
+     "min_protocol": 16},
     # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
     # to slot 0 — exercises the flash transport + the COMMIT slot-present success gate.
     # LAST: it empties the 'symbol' bundle (a host re-flashes it on the next connect).
@@ -2861,4 +2973,9 @@ TESTS = [
     {"name": "doom unsigned pack refused (FW-9)",
      "fn": test_doompack_unsigned_refused, "min_protocol": 6,
      "needs_console": True, "tier": TIER_DOOM},
+    # LAST, whatever tiers ran: the console scan over this run's whole window, so
+    # a crash inside any test above — the flash tests and the doom set included —
+    # or on the slave lands here rather than reading as a flake.
+    {"name": "no firmware crash during the run (console crash: line)",
+     "fn": test_no_crash_record, "needs_console": True},
 ]

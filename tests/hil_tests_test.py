@@ -382,6 +382,57 @@ class SuiteTierGateTest(unittest.TestCase):
             self.assertIsNone(test.get("tier"), name)
 
 
+class CrashRecordTest(unittest.TestCase):
+    """The console crash line is a failure whatever else passed; the two tests
+    sit in the DEFAULT tier (a crash is never a slow check) and the scan runs
+    after every other default-tier test so its window covers them all."""
+
+    LINE = ("crash: side=master kind=hardfault core=0 pc=0x10012345 lr=0x1000abcd "
+            "sp=0x20040ff0 psr=0x21000003 icsr=0x00000003 phase=3:0x0015 "
+            "up=123456ms n=1 reason=0x22 fw=0.18.0")
+
+    def test_no_lines_is_ok(self):
+        ok, msg = hil_tests.classify_crash_lines([])
+        self.assertTrue(ok)
+        self.assertIn("no crash", msg)
+
+    def test_any_crash_line_fails_and_is_quoted(self):
+        ok, msg = hil_tests.classify_crash_lines(["   " + self.LINE])
+        self.assertFalse(ok)
+        self.assertIn("1 firmware crash", msg)
+        self.assertIn("side=master", msg)
+
+    def test_unrelated_lines_are_ignored(self):
+        ok, _ = hil_tests.classify_crash_lines(["Split link: 1 tx", "boot ok"])
+        self.assertTrue(ok)
+
+    def test_scan_reads_the_shared_tap_from_the_session_mark(self):
+        from station.console_log import TAP
+        # A crash line left by a PREVIOUS run must not fail this one...
+        TAP.feed("   " + self.LINE + "\n")
+        hil_tests.begin_session()
+        logged = []
+        self.assertTrue(hil_tests.test_no_crash_record(None, logged.append))
+        # ...while one printed inside this run (the slave's, here) does.
+        TAP.feed("   " + self.LINE.replace("side=master", "side=slave") + "\n")
+        logged = []
+        self.assertFalse(hil_tests.test_no_crash_record(None, logged.append))
+        self.assertTrue(any("side=slave" in ln for ln in logged))
+        self.assertFalse(any("side=master" in ln for ln in logged))
+        hil_tests.begin_session()
+
+    def test_membership_gates_and_order(self):
+        names = [t["name"] for t in hil_tests.TESTS]
+        scan = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_no_crash_record)
+        cmd = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_crash_record_command)
+        self.assertTrue(scan.get("needs_console"))
+        self.assertIsNone(scan.get("tier"))
+        self.assertEqual(cmd.get("min_protocol"), 16)
+        self.assertIsNone(cmd.get("tier"))
+        # The scan is the LAST entry, so every test of every tier is in its window.
+        self.assertEqual(names[-1], scan["name"])
+
+
 class LayerNamesRetryTest(unittest.TestCase):
     """test_layer_names must ride out a deaf window but never retry a real fault.
 
