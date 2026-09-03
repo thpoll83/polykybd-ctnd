@@ -563,9 +563,15 @@ class TestRunner:
                 # gate that runs on every merge, which is the failure this
                 # whole commit exists to prevent.
                 if link != LINK_OK and self._masters_after_apply() > 1:
+                    # ⚠️ Only claim a measurement when one actually ran. With no
+                    # console there was nothing to measure, so saying the slave
+                    # rebooted "during the measurement" describes something that
+                    # did not happen.
+                    when = ("during the measurement" if console_live
+                            else "after the interface count settled")
                     self.log("[runner] note: the slave finished rebooting into "
-                             "the master's image during the measurement — see "
-                             "above; the SLAVE IS UNVERIFIED, not faulty")
+                             f"the master's image {when} — see above; the SLAVE "
+                             "IS UNVERIFIED, not faulty")
                     link = LINK_NO_SUMMARY
                     explained = True
             if link == LINK_OK:
@@ -583,11 +589,21 @@ class TestRunner:
                 # through to the `else` and raises — turning the note fix into a
                 # hard failure of the whole apply test. Caught by
                 # test_two_masters_after_the_apply_is_reported_not_graded.
-                if not explained:
+                # ⚠️ A dead console is reported REGARDLESS of `explained`. It
+                # is its own fault, not an alternative explanation for this run:
+                # when the console does not come back the counters are unreadable
+                # for every later check too, and suppressing the note because the
+                # master count also explains this run's outcome loses the only
+                # signal that says so. Raised by Greptile on ctnd#88.
+                if not console_live:
                     self.log("[runner] note: the post-apply split-link check could "
                              "not read the firmware's 'Split link:' counters (the "
                              "console did not reattach after the reboot) — the "
                              "SLAVE IS UNVERIFIED for this run")
+                elif not explained:
+                    self.log("[runner] note: the console reattached but produced no "
+                             "'Split link:' summary, so the link could not be "
+                             "measured — the SLAVE IS UNVERIFIED for this run")
             else:
                 raise RuntimeError(
                     "the master came back but the split link did not: the slave is "

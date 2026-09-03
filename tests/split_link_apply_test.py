@@ -547,3 +547,25 @@ class ApplyRoundTripWiringTest(unittest.TestCase):
             self._apply(runner, tmp)
         self.assertTrue([ln for ln in seen["log"] if "did not reattach" in ln],
                         "the console failure was not reported")
+
+    def test_a_dead_console_is_reported_even_when_two_masters_explain_the_run(self):
+        """A dead console is its own fault, not an alternative explanation.
+
+        With no console there is nothing to measure, so the late master-count
+        re-check can set `explained` and suppress the console note — losing the
+        only signal that says the counters will be unreadable for every later
+        check too. The message must also not claim a measurement that never ran.
+        """
+        import tempfile
+        # Console never comes back; the count settles at 1, then goes to 2 on the
+        # post-measurement re-check.
+        runner, seen, _fc = self._runner(console_ok=False, masters=[1] * 40 + [2])
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._apply(runner, tmp)
+        self.assertFalse(seen["measured"])
+        self.assertTrue([ln for ln in seen["log"] if "did not reattach" in ln],
+                        "the console failure was suppressed")
+        self.assertEqual(
+            [ln for ln in seen["log"] if "during the measurement" in ln], [],
+            "claimed a measurement that never ran")
+        self.assertEqual(result["status"], "pass")
