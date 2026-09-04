@@ -22,11 +22,16 @@ if "hid" not in sys.modules:  # pragma: no cover - environment shim
     _hid.Device = object
     sys.modules["hid"] = _hid
 
+from station import hil_tests  # noqa: E402
+from station.console_log import TAP  # noqa: E402
 from station.hil_tests import (  # noqa: E402
     DOOM_SIG_SIZE,
+    POLY_CHANNEL,
+    CMD_GET_ID,
     TIER_DOOM,
     _doom_strip_sig,
     _doom_tamper_sig,
+    _wait_screensaver_with_probe,
     classify_doom_verdict,
     skip_reason,
 )
@@ -116,6 +121,62 @@ class DoomTierGateTest(unittest.TestCase):
         # doom opted in but console down -> still skip (needs_console wins first).
         caps = {"protocol": 15, "console": False, "doom": True}
         self.assertIsNotNone(skip_reason(self._t(), caps))
+
+
+class _FakeRaw:
+    """A raw-HID stand-in whose GET_ID reply is fixed — a valid `P\\x06.` reply for
+    an alive master, or None for a hung one. Counts sends so a test can assert the
+    probe fires exactly once."""
+
+    def __init__(self, alive: bool):
+        self._reply = bytes([POLY_CHANNEL, CMD_GET_ID, ord(".")]) if alive else None
+        self.sends = 0
+
+    def send(self, _data):
+        self.sends += 1
+        return self._reply
+
+
+class WaitScreensaverProbeTest(unittest.TestCase):
+    """The FW-9 accept-path liveness probe: it disambiguates a stalled load window
+    into "core0 alive, output starved" vs "hung in init()", but must never fire when
+    the screensaver comes up in time, and never more than once."""
+
+    def _run(self, alive, feed=None, probe_at=0.0, timeout=0.3):
+        raw = _FakeRaw(alive)
+        logs = []
+        mark = TAP.mark()
+        if feed:
+            TAP.feed(feed)
+        saved = hil_tests.DOOM_PROBE_AT_S
+        hil_tests.DOOM_PROBE_AT_S = probe_at
+        try:
+            up = _wait_screensaver_with_probe(raw, logs.append, mark, timeout=timeout)
+        finally:
+            hil_tests.DOOM_PROBE_AT_S = saved
+        return up, raw, "\n".join(logs)
+
+    def test_screensaver_up_returns_without_probing(self):
+        # `up` already in the buffer wins on the first loop iteration even with
+        # probe_at=0 — a healthy accept / refusal fire-demo never triggers a probe.
+        up, raw, text = self._run(True, feed="doom: attract screensaver up\n")
+        self.assertIsNotNone(up)
+        self.assertEqual(0, raw.sends)
+        self.assertNotIn("PROBE", text)
+
+    def test_stall_with_alive_master_logs_console_drop(self):
+        up, raw, text = self._run(True)  # nothing feeds "up" -> stalls -> probes
+        self.assertIsNone(up)
+        self.assertEqual(1, raw.sends)   # fires exactly once, and master answers first try
+        self.assertIn("core0 is ALIVE", text)
+        self.assertNotIn("did NOT answer", text)
+
+    def test_stall_with_hung_master_logs_wedge(self):
+        up, raw, text = self._run(False)  # stalls, master never answers
+        self.assertIsNone(up)
+        self.assertEqual(3, raw.sends)    # _master_alive retries 3x, then gives up
+        self.assertIn("did NOT answer", text)
+        self.assertIn("init()", text)
 
 
 if __name__ == "__main__":
