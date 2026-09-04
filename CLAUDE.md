@@ -259,8 +259,25 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
   it. `test_crash_record_command` (`min_protocol: 16`) reads both halves over cmd 39,
   fails on a **fresh** record (bit1 — the boot before this one crashed), notes an
   archived one, checks the unknown-sub-op NACK and exercises the clear so the next
-  run starts clean. ⚠️ Neither has seen a real crash on the rig yet; a probe that
-  faults on purpose is the way to prove the chain end to end.
+  run starts clean. ⚠️ No **deliberate** fault has been driven through the naked
+  handler on the rig yet; a probe that faults on purpose is the way to close that.
+  - ✅ **Both tests earned their keep on their FIRST run (33809919200, 2026-09-03)
+    by catching a phantom, not a crash.** Both halves reported a fresh
+    `kind=watchdog … n=3 reason=0x12` straight after the rig's flash: the bootrom's
+    reboot after a UF2 copy is itself a watchdog reboot, so `WATCHDOG.REASON.TIMER`
+    reads set on the first boot after every BOOTSEL flash, and the pre-fix firmware
+    counted each rig flash as a hang — two more and it would have halted the rig in
+    `wfi`. Fixed firmware-side (qmk#271: a timeout counts only while the SDK's
+    `watchdog_enable()` scratch marker is present). That run also drove the whole
+    reporting chain end to end — boot capture, console line on both halves, the
+    slave pull over the split link, cmd 39 read and clear — so "never fired" is no
+    longer true of anything but the fault handler itself.
+  - **The slave keeps its archived record across a reflash** — the archive is a
+    flash sector a UF2 copy does not touch — so the run after a red one logs
+    `note: the slave half holds an older (archived) crash record — clearing it`.
+    That is the test doing its job (an archived record is a note, a fresh one is a
+    failure), not a second crash; the master's had already been cleared by the
+    previous run's clear sub-op.
 - [x] **`reboot_persistence` is the only check that survives a power cycle**, and it
   is runner-level (it needs `FlashController.reset()` — which the rig had all along
   and no test had ever used). It sets the idle style, flushes with **cmd 26**
