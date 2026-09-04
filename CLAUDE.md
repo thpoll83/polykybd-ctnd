@@ -390,6 +390,31 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
         of 1** and so always spends its full `_MASTERS_SETTLE_S`. ⚠️ That figure
         read **~45–55 s** here until it was measured — an estimate assembled from
         the constants, and wrong by a third. Take the number from a run.
+        - ⚠️ **One green run is not a base rate — do NOT read "proven" above as
+          "flip the default".** The proof establishes that the path works; it
+          says almost nothing about how often it fails, and the asymmetry is
+          what decides this: a flake costs a **refused release** (recovery is a
+          manual dispatch), while the coverage bought is narrow — the apply
+          round-trip already catches a master that fails to come back or reports
+          the wrong version, so this adds specifically *a `fw_staging` copy
+          corruption that spares USB/HID and breaks the split transport*. Worth
+          having; not worth a false refusal on one sample. It also lands
+          downstream of the **unexplained post-apply settle anomaly** (slow in
+          4 of 5 runs, worst ~365–450 ms, against 15 probes after a plain power
+          cycle), so `POST_APPLY_LINK_SETTLE_S = 5` is validated by exactly one
+          observation in a neighbourhood nobody has explained.
+        - **Accrue the evidence WITHOUT touching the default**: `HIL_RESLAVE` is
+          already true for the `hil-fwapply` label and the `[hil-fwapply]` commit
+          marker, so any PR touching the apply path can opt in and costs nobody
+          else anything. **Flip it after ~5 clean executions**, or earlier if you
+          want the coverage now and accept a manual dispatch as the recovery. A
+          flake found that way is a red PR check; the same flake found after the
+          flip is a blocked release.
+        - **Open question, deliberately not a plan**: decoupling the check from
+          the release gate would make the default uncontroversial, but a check
+          that cannot fail is one people learn to ignore (the reasoning the perf
+          job accepts and a correctness check should not). Nobody has thought
+          this through — do not treat the sentence as a design.
       - ⚠️ **A ctnd branch CANNOT be proven on the rig before it merges** — every
         rig job hard-checkouts ctnd `main` (`git checkout -q -f -B main
         origin/main`, five times over in `qmk-test.yml`), so a dispatch runs
