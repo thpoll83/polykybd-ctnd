@@ -362,10 +362,17 @@ firmware/               Drop UF2 files here; the UI picks them up automatically
         publish (`covered_by()`). So anything that can fail here can refuse a
         release — which is not a thing to switch on for code that has never
         executed against the rig. Prove it with a dispatch first, then decide.
-        Cost when on: **~45–55 s**, not the ~25 s a flash alone suggests — the
-        BOOTSEL cycle plus `POST_APPLY_LINK_SETTLE_S` plus
+        ✅ **Proven 2026-09-03**, dispatch run #987 (`tier: fwapply`, the first
+        execution with `HIL_RESLAVE=true`): the apply reported UNVERIFIED as
+        designed, the re-flash fired, and the soak came back `crc_err +0,
+        transport_fail +0` over 200 frames against a tolerance of 2 — PASS, with
+        the settle comfortable rather than marginal (master ready in 3 probes).
+        **Cost measured at ~39 s**, not the ~25 s a flash alone suggests: BOOTSEL
+        + picotool 12 s, reboot-to-ready 8 s, then `POST_APPLY_LINK_SETTLE_S` and
         `_masters_after_apply`, which has **no early exit for the expected count
-        of 1** and so always spends its full `_MASTERS_SETTLE_S`.
+        of 1** and so always spends its full `_MASTERS_SETTLE_S`. ⚠️ That figure
+        read **~45–55 s** here until it was measured — an estimate assembled from
+        the constants, and wrong by a third. Take the number from a run.
       - ⚠️ **A ctnd branch CANNOT be proven on the rig before it merges** — every
         rig job hard-checkouts ctnd `main` (`git checkout -q -f -B main
         origin/main`, five times over in `qmk-test.yml`), so a dispatch runs
