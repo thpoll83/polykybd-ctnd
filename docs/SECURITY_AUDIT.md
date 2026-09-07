@@ -59,6 +59,7 @@ signing the firmware image alone was not enough.**
 | HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 (1) fixed; (2) deferred by decision |
 | HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk | ✅ fixed (PR #251) |
 | HOST-4 | `Pillow` unpinned — CVE-2026-54058 reachable via overlay image open-by-filename | host | ✅ fixed (PR #201) |
+| HOST-5 | Window-report endpoint has no post-handshake message integrity — a forged reply can raise a window | host | 🟡 accepted + documented |
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
 
 ---
@@ -188,6 +189,45 @@ the user's decision time, and the failure mode is an honest error rather than a 
 answer (see the `polyctl fw version` note in `PolyKybdHost/CLAUDE.md` — returning a cached
 value instead was the actual bug). Worth revisiting only if the daemon ever needs to serve
 something time-critical during a flash.
+
+
+### HOST-5 — the window-report endpoint authenticates the handshake, not the messages
+
+Raised **2026-09-07** by CodeRabbit on PolyKybdHost#216, twice: once against the outbound
+`ai.state` push (`polyctl ai state … --host`) and once against the AI relay the forwarder
+reads off a `window.report` reply. Both are the same underlying fact, and the fact is
+correct: `multiprocessing.connection` uses its HMAC challenge/response **only** to
+establish that both ends hold the authkey. After that the stream is plain
+length-prefixed data — no encryption, no per-message authentication tag. An on-path
+attacker can therefore tamper with a frame, or forge a reply carrying the current
+request id.
+
+**This is not new, and it is not the AI key's.** It is a property of the H4d endpoint as
+shipped, so it applies equally to `window.report` itself, which has carried window titles
+and browser URLs over that connection since the feature landed. It is also why the
+endpoint is **off by default** (`window_report_network_enabled`), why it holds a
+**separate authkey** from the local control socket, and why its method registry is a
+hand-listed pair reached through injected callbacks with no `PolyCore` reference — the
+design assumes the transport is only as good as the LAN it runs on and limits the blast
+radius instead.
+
+**Accepted, with the AI key's marginal addition stated plainly.** What the relay adds is
+a new *consequence* rather than a new exposure: previously a forged reply could at most
+corrupt which overlay set was shown, and now it can also **activate a window** on the
+forwarder's machine — raise it to the front. It cannot choose which window (the target is
+local configuration, never on the wire), cannot type, cannot read anything back, and the
+relay it rides carries a counter and a bool and no title. An attacker positioned to forge
+that reply is already on the path of the window feed.
+
+**What would actually fix it** is wrapping the endpoint in authenticated TLS — a change
+to the transport for *all* of its methods, not something the AI key should bolt on for
+itself. Worth doing if this endpoint is ever recommended outside a trusted LAN. Until
+then the honest guidance, which the docs now give, is: this is a LAN feature, and over
+anything else run it through a VPN.
+
+⚠️ Do **not** "fix" this by adding a bespoke MAC to the AI messages only. It would leave
+`window.report` — the bigger and more sensitive payload — unprotected while implying the
+endpoint is secure, which is worse than the current state being written down.
 
 
 ### HOST-3 — usage telemetry is a new outbound surface, and it is on by default
