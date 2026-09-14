@@ -1,6 +1,7 @@
 # Firmware performance harness
 
-Moved out of `CLAUDE.md` 2026-09-14. Verbatim.
+Extracted from `CLAUDE.md` 2026-09-14. The prose is unchanged; only heading levels
+and relative links were adjusted to suit a standalone file.
 
 ## Performance measurement (`station/perf.py`, `station/perf_runner.py`)
 
@@ -50,7 +51,7 @@ poke the keyboard, paste the `LoopProf:` block from the console".
 - **Reuse, don't duplicate, the readiness gates.** `PerfRunner` composes
   `TestRunner` and calls its (now public) `flash_halves()`, `wait_for_master_ready()`
   and `settle_master()`. The sustained-settle logic is subtle and load-bearing (see
-  the stale-rig warning above); a perf run that skipped it would measure the
+  the stale-rig warning in `CLAUDE.md` § Development workflow); a perf run that skipped it would measure the
   master's boot-time busy window instead of the workload.
 - ⚠️ **A `HIDConsole` read is a report-sized FRAGMENT, not a line.** QMK's console
   delivers whatever fitted in one 32/64-byte report, so a long line (a `LoopProf:`

@@ -1,6 +1,7 @@
 # Ad-hoc rig probes (`--probe`)
 
-Moved out of `CLAUDE.md` 2026-09-14. Verbatim.
+Extracted from `CLAUDE.md` 2026-09-14. The prose is unchanged; only heading levels
+and relative links were adjusted to suit a standalone file.
 
 ## Debug loop: running an ad-hoc probe on the rig (`--probe`)
 
@@ -29,7 +30,7 @@ def probe(raw, log):
 inherits the per-side flash, the readiness gates, the console tap, the capability
 gates and the pass/fail reporting. That reuse is the point: a parallel code path
 would drift from the suite's hard-won startup sequencing (`wait_for_master_ready`
-/ `settle_master` are load-bearing, see the stale-rig warning above).
+/ `settle_master` are load-bearing, see the stale-rig warning in `CLAUDE.md` § Development workflow).
 
 ```bash
 python -m station.test_runner --left … --right … \

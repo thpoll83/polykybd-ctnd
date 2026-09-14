@@ -1,6 +1,7 @@
 # Rig self-update mechanism
 
-Moved out of `CLAUDE.md` 2026-09-14. Verbatim.
+Extracted from `CLAUDE.md` 2026-09-14. The prose is unchanged; only heading levels
+and relative links were adjusted to suit a standalone file.
 
 ## Self-update mechanism
 
@@ -32,7 +33,7 @@ Moved out of `CLAUDE.md` 2026-09-14. Verbatim.
   failed with `Unit polykybd-update.service not found`, i.e. the rig predates the
   self-update feature, so **the timer was missing too and unattended updates had
   never run there** (HIL was unaffected only because `qmk-test.yml` force-syncs
-  the station to `origin/main` itself — see the stale-rig warning above). The unit
+  the station to `origin/main` itself — see the stale-rig warning in `CLAUDE.md` § Development workflow). The unit
   is just the *carrier*; `scripts/self-update.sh` is the actuator, so `update_now`
   now falls back to running it in-process (`--no-restart`, then a separate
   `systemctl restart` — the script's own restart would tear down the UI's cgroup

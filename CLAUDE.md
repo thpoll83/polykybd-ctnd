@@ -136,7 +136,9 @@ bug can be chased without a human flashing a `.bin` and pasting a console log ba
 is a Python file in the **firmware** repo under
 `keyboards/polykybd/tools/hil_probes/`, so the probe and the firmware it probes are
 one commit on one branch. The file shape, the CLI and the containment rules are in
-[`docs/PROBES.md`](docs/PROBES.md); the `debug-firmware-on-rig` skill drives it.
+[`docs/PROBES.md`](docs/PROBES.md); the `debug-firmware-on-rig` skill drives it
+(that skill lives in `qmk_firmware`, so it is only reachable when that repo is
+attached to the session too).
 
 - **A probe REPLACES the suite** unless `--probe-with-suite` is passed.
 - ⚠️ **The console cannot see the flash window** — QMK drops output nobody drains, and
@@ -175,7 +177,7 @@ cmd 32** (RESET -> workload -> READ), an idle baseline, overlay bursts in both
 flavours, HID round-trip latency, and boot-to-first-stable-HID. Workloads, CI wiring,
 the baseline procedure and the offline wire-format contract test are in
 [`docs/PERF_HARNESS.md`](docs/PERF_HARNESS.md); the `measure-firmware-perf` skill
-drives a run.
+drives a run (it lives in `qmk_firmware` — attach that repo to reach it).
 
 - ⚠️ **cmd 32 NACKs on a normal build, by design** — the whole `case 32` is inside
   `#ifdef POLYKYBD_LOOP_PROFILE`, and that NACK is the capability signal rather than a
