@@ -2,7 +2,7 @@
 
 Moved out of `CLAUDE.md` 2026-09-14. Verbatim.
 
-### Self-update mechanism
+## Self-update mechanism
 
 - **`scripts/self-update.sh`** is the single actuator, run by both the timer
   (unattended) and the UI button. It fetches the tracked branch (`update.branch`

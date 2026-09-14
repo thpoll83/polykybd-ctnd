@@ -2,7 +2,7 @@
 
 Moved out of `CLAUDE.md` 2026-09-14. Verbatim.
 
-### Reset / BOOTSEL driver circuit (per pin)
+## Reset / BOOTSEL driver circuit (per pin)
 
 ```
               RP2040
