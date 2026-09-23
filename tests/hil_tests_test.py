@@ -554,5 +554,81 @@ class DoomSlotFlashBeginTest(unittest.TestCase):
         self.assertGreater(dev.begin_calls, hil_tests.DOOM_BEGIN_NO_REPLY_MAX)
 
 
+class ClassifyHandLine(unittest.TestCase):
+    """classify_hand_line() — the boot banner's handedness self-consistency check.
+
+    Pure, so the whole gate is testable without a keyboard. The cases that matter
+    are the DISAGREEMENTS: a source claiming a record while the descriptors say
+    the sector is empty (or the reverse) is the "display and effect disagree" bug
+    this firmware keeps producing, and on hardware it is invisible — handedness
+    resolves to something either way and the board comes up looking fine.
+    """
+
+    def ok(self, line):
+        return hil_tests.classify_hand_line([line])
+
+    def test_a_stamped_half_is_accepted(self):
+        ok, msg = self.ok("   hand: LEFT (flash stamp) slot=0/1 writer=0x55")
+        self.assertTrue(ok, msg)
+        self.assertIn("self-consistent", msg)
+
+    def test_an_unstamped_half_is_accepted(self):
+        ok, msg = self.ok("   hand: RIGHT (EEPROM, UNSTAMPED) slot=255/0 writer=0x00")
+        self.assertTrue(ok, msg)
+
+    def test_a_migrated_half_is_accepted(self):
+        """After a migration the firmware re-scans, so the record it just wrote
+        must be described — slot=255/0 here would be the pre-write scan leaking
+        into the banner."""
+        ok, msg = self.ok("   hand: LEFT (stamped from EEPROM) slot=0/1 writer=0x00")
+        self.assertTrue(ok, msg)
+
+    def test_a_source_claiming_a_record_the_sector_does_not_have_fails(self):
+        ok, msg = self.ok("   hand: LEFT (flash stamp) slot=255/0 writer=0x00")
+        self.assertFalse(ok)
+        self.assertIn("outside the sector's 0..15 pages", msg)
+
+    def test_a_zero_count_with_a_real_slot_fails(self):
+        ok, msg = self.ok("   hand: LEFT (flash stamp) slot=3/0 writer=0x00")
+        self.assertFalse(ok)
+        self.assertIn("0 valid records", msg)
+
+    def test_an_unstamped_source_claiming_a_record_fails(self):
+        ok, msg = self.ok("   hand: RIGHT (EEPROM, UNSTAMPED) slot=0/1 writer=0x55")
+        self.assertFalse(ok)
+        self.assertIn("expected 255/0", msg)
+
+    def test_an_unknown_writer_fails(self):
+        """Only the firmware (0x00) and make_hand_uf2.py (0x55) write records; a
+        third value means pad[0] is carrying something nobody wrote deliberately."""
+        ok, msg = self.ok("   hand: LEFT (flash stamp) slot=0/1 writer=0xAA")
+        self.assertFalse(ok)
+        self.assertIn("neither firmware", msg)
+
+    def test_an_old_banner_without_the_fields_fails_to_parse(self):
+        """Pre-0.27.4 firmware prints a bare line. The min_fw gate should SKIP
+        such a run, but if it ever reaches here it must FAIL loudly rather than
+        pass by finding nothing to check."""
+        ok, msg = self.ok("   hand: LEFT (flash stamp)")
+        self.assertFalse(ok)
+        self.assertIn("does not parse", msg)
+
+    def test_a_missing_line_fails(self):
+        ok, msg = hil_tests.classify_hand_line([])
+        self.assertFalse(ok)
+        self.assertIn("did not report handedness", msg)
+
+    def test_the_last_line_wins(self):
+        """The tap spans the whole run, and the board reboots inside it (the
+        reboot-persistence check power-cycles the master), so more than one
+        banner can be present. The current boot is the last one."""
+        ok, msg = hil_tests.classify_hand_line([
+            "   hand: LEFT (EEPROM, UNSTAMPED) slot=255/0 writer=0x00",
+            "   hand: LEFT (flash stamp) slot=0/1 writer=0x55",
+        ])
+        self.assertTrue(ok, msg)
+        self.assertIn("slot=0/1", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

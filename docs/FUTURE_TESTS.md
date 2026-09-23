@@ -209,8 +209,14 @@ unattended rig now has a test. Covered:
 
 - [ ] **GPIO key-matrix injection** — a way to simulate key presses on either half from the Pi so
   split-link and per-half tests don't need a human. Tracked in `CLAUDE.md` → "What still needs doing".
-- [ ] **EEPROM read-back / flash-time handedness set** — needed for the handedness tests and to make
-  language/layer round-trips deterministic.
+- [~] **EEPROM read-back / flash-time handedness set** — needed to make language/layer round-trips
+  deterministic, and formerly the blocker for any handedness test at all. ⚠️ The READ-BACK half is
+  no longer missing for handedness specifically: the boot banner now carries
+  `hand: <SIDE> (<source>) slot=N/M writer=0xNN` (qmk `poly_hand_stamp_slot`/`_count`/`_writer`,
+  firmware ≥ 0.27.4), so `handedness resolution is self-consistent (boot banner)` checks the
+  resolution from the console with no EEPROM access and no device writes. What is still blocked is
+  SETTING it: cmd 25 writes the stamp sector — which survives a reflash, so a failed test would
+  leave the rig stamped — and then reboots. That half stays runner-level and needs `FlashController`.
 - [x] **HID console (CONSOLE_ENABLE)** — ⚠️ this said "currently off in the PolyKybd build", and
   that has been stale for a while: `split72/keyboard.json` sets `"console": true`, so the rig has
   been receiving firmware diagnostics all along and merely echoing them. `station/console_log.py`
