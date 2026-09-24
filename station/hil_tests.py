@@ -45,8 +45,8 @@ the master alive; rapid GET_ID stress; a bridged soak read against the firmware'
 own split-link health counter). Commands that can't be asserted without side
 effects or extra infrastructure are catalogued in ``docs/FUTURE_TESTS.md``
 (host-driven KEYPRESS injects real keystrokes; ENTER_BOOTLOADER ends the session;
-overlay *render* checks need a camera or firmware read-back; handedness needs
-flash control). Two checks live in the runner rather than here because they need
+overlay *render* checks need a camera or firmware read-back; SETTING handedness
+needs flash control -- READING it no longer does, see the banner test below). Two checks live in the runner rather than here because they need
 the GPIO or the flashed image: the reboot-persistence power cycle and the
 firmware-update stage+verify.
 
@@ -2268,6 +2268,105 @@ def classify_crash_lines(lines) -> tuple:
                    + " | ".join(lines))
 
 
+HAND_LINE_MARK = "hand: "
+# ⚠️ ANCHORED, and the optional tail is NOT decoration. boot_diag.c prints
+#   "hand: %s (%s) slot=%u/%u writer=0x%02X%s"
+# where the last %s is " [EEPROM byte repaired from the stamp]" whenever
+# poly_hand_ee_repaired() is true — a real state, seen on hardware, not a
+# hypothetical. Anchoring with a bare `$` (as a review suggested) would turn
+# every EEPROM-repair boot into a graded FAIL, and nothing here would have
+# caught it: no test covered that banner until this comment was written.
+# Anchoring anyway, WITH the suffix spelled out, is what rejects a trailing
+# garbage line such as `writer=0x550` while keeping the repaired form passing.
+_HAND_RE = re.compile(
+    r"hand:\s+(LEFT|RIGHT)\s+\((flash stamp|stamped from EEPROM|EEPROM, UNSTAMPED)\)"
+    r"\s+slot=(\d+)/(\d+)\s+writer=0x([0-9A-Fa-f]{2})"
+    r"(?:\s+\[EEPROM byte repaired from the stamp\])?$")
+
+# base/hand_stamp.c: no record leaves the descriptors at 0xFF / 0, and a page
+# index can only be 0..15 (STAMP_PAGES = 4096 / 256) — so the sector can hold
+# at most 16 valid records. Both ends are bounded: an impossible descriptor
+# (slot=0/17) must not pass as self-consistent just because it is non-zero.
+_HAND_NO_RECORD_SLOT = 255
+_HAND_MAX_SLOT = 15
+_HAND_MAX_COUNT = 16
+# make_hand_uf2.py writes 0x55 into pad[0]; stamp_write() leaves 0x00.
+_HAND_WRITERS = {0x00, 0x55}
+
+
+def classify_hand_line(lines) -> tuple:
+    """(ok, message) for the boot banner's ``hand:`` line.
+
+    Pure, so it is unit-testable without a keyboard.
+
+    The assertion is INTERNAL CONSISTENCY, not a particular side: the rig's
+    halves take whatever handedness their flash holds, and the HIL role is fixed
+    at compile time anyway (``POLYKYBD_HIL=left|right``), so demanding LEFT or
+    RIGHT here would be asserting the bench's state rather than the firmware's
+    behaviour.
+
+    What must hold is that the SOURCE and the record descriptors agree:
+
+    * ``flash stamp`` / ``stamped from EEPROM`` — a record answered or was just
+      written, so it has a real page index and the sector holds at least one.
+    * ``EEPROM, UNSTAMPED`` — nothing was found, so the descriptors must still
+      read "no record" (slot 255, count 0).
+
+    That is exactly the class of bug this firmware keeps producing: a state whose
+    display and effect disagree. A ``stamp_read()`` that reported a hit while the
+    descriptors said "nothing there" (or the reverse) is a broken CRC check, a
+    broken slot scan, or a migration that did not re-scan — and all three would
+    otherwise be invisible, because handedness resolves to *something* either way
+    and the board comes up looking fine.
+    """
+    hits = [ln.strip() for ln in lines if HAND_LINE_MARK in ln]
+    if not hits:
+        return False, "no `hand:` line on the console — the boot banner did not report handedness"
+    m = _HAND_RE.search(hits[-1])
+    if not m:
+        return False, (f"`hand:` line does not parse: {hits[-1]!r} "
+                       "(expected `hand: <SIDE> (<source>) slot=N/M writer=0xNN`)")
+    side, source, slot, count, writer = (
+        m.group(1), m.group(2), int(m.group(3)), int(m.group(4)), int(m.group(5), 16))
+    if writer not in _HAND_WRITERS:
+        return False, f"writer=0x{writer:02X} is neither firmware (0x00) nor the UF2 tool (0x55)"
+    if source == "EEPROM, UNSTAMPED":
+        if slot != _HAND_NO_RECORD_SLOT or count != 0:
+            return False, (f"source says no stamp but the descriptors claim one: "
+                           f"slot={slot}/{count} (expected 255/0)")
+    else:
+        if slot > _HAND_MAX_SLOT:
+            return False, f"source is `{source}` but slot={slot} is outside the sector's 0..15 pages"
+        if not 1 <= count <= _HAND_MAX_COUNT:
+            return False, (f"source is `{source}` but the sector reports {count} valid "
+                           f"records (the sector holds at most {_HAND_MAX_COUNT})")
+    return True, f"hand: {side} ({source}) slot={slot}/{count} writer=0x{writer:02X} — self-consistent"
+
+
+def test_handedness_banner(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Handedness resolution reports itself consistently (boot banner ``hand:``).
+
+    READ-ONLY: it parses a line the firmware already printed at boot. No device
+    writes, no reboot, and nothing persistent is touched — which matters because
+    the handedness stamp lives in its own flash sector and SURVIVES a reflash, so
+    a test that wrote it would leave the rig stamped until someone noticed.
+
+    ``docs/FUTURE_TESTS.md`` listed handedness as blocked on "EEPROM read-back /
+    flash-time handedness set". The read-back half of that is no longer missing:
+    the banner now carries ``slot=N/M writer=0xNN`` (qmk ``poly_hand_stamp_slot``
+    / ``_count`` / ``_writer``), so the resolution can be checked from the console
+    without EEPROM access. Setting handedness still needs flash control, and cmd
+    25 additionally reboots, so the write half stays on the backlog.
+
+    ``min_fw`` because those fields did not exist before; older firmware prints a
+    bare ``hand: LEFT (flash stamp)`` and would fail the parse rather than SKIP.
+    ``needs_console`` because without the tap it asserts nothing.
+    """
+    ok, msg = classify_hand_line(TAP.find_all(HAND_LINE_MARK, mark=_SESSION_MARK))
+    log(("  " if ok else "  FAIL: ") + msg)
+    return ok
+
+
 def test_no_crash_record(raw: RawHID, log: Callable[[str], None]) -> bool:
     """No keyboard half crashed during this run (console ``crash:`` line absent).
 
@@ -2973,6 +3072,8 @@ TESTS = [
     {"name": "doom unsigned pack refused (FW-9)",
      "fn": test_doompack_unsigned_refused, "min_protocol": 6,
      "needs_console": True, "tier": TIER_DOOM},
+    {"name": "handedness resolution is self-consistent (boot banner)",
+     "fn": test_handedness_banner, "needs_console": True, "min_fw": "0.27.4"},
     # LAST, whatever tiers ran: the console scan over this run's whole window, so
     # a crash inside any test above — the flash tests and the doom set included —
     # or on the slave lands here rather than reading as a flake.
