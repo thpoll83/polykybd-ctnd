@@ -605,6 +605,45 @@ class ClassifyHandLine(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("neither firmware", msg)
 
+    def test_the_eeprom_repair_suffix_is_accepted(self):
+        """⚠️ The banner is NOT always the bare field list.
+
+        `boot_diag.c` appends " [EEPROM byte repaired from the stamp]" whenever
+        `poly_hand_ee_repaired()` is true — the stamp outranked the EEPROM byte
+        and the firmware put the byte back. That is a real boot, seen on
+        hardware, and it must PASS.
+
+        This case exists because a review asked to anchor `_HAND_RE` with a bare
+        `$`, which would have failed every repaired boot. Nothing covered the
+        suffix at the time, so the suite would have gone green on a change that
+        breaks a real state on the rig.
+        """
+        ok, msg = self.ok("   hand: LEFT (flash stamp) slot=0/1 writer=0x55"
+                          " [EEPROM byte repaired from the stamp]")
+        self.assertTrue(ok, msg)
+        self.assertIn("self-consistent", msg)
+
+    def test_trailing_garbage_after_the_writer_fails_to_parse(self):
+        """The regex is anchored, so `writer=0x550` is not read as `0x55`.
+
+        The firmware cannot emit it (`%02X` of a uint8 is exactly two chars), so
+        this is a corrupt console line — which is precisely what a validator
+        exists to reject rather than silently truncate.
+        """
+        ok, msg = self.ok("   hand: LEFT (flash stamp) slot=0/1 writer=0x550")
+        self.assertFalse(ok)
+        self.assertIn("does not parse", msg)
+
+    def test_a_count_above_the_sector_capacity_fails(self):
+        """STAMP_PAGES is 4096/256 = 16, so 17 valid records is impossible.
+
+        Symmetrical with the slot bound: a descriptor that cannot exist must not
+        pass as self-consistent merely for being non-zero.
+        """
+        ok, msg = self.ok("   hand: LEFT (flash stamp) slot=0/17 writer=0x00")
+        self.assertFalse(ok)
+        self.assertIn("at most 16", msg)
+
     def test_an_old_banner_without_the_fields_fails_to_parse(self):
         """Pre-0.27.4 firmware prints a bare line. The min_fw gate should SKIP
         such a run, but if it ever reaches here it must FAIL loudly rather than

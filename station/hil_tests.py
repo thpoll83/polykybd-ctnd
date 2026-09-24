@@ -2269,14 +2269,27 @@ def classify_crash_lines(lines) -> tuple:
 
 
 HAND_LINE_MARK = "hand: "
+# ⚠️ ANCHORED, and the optional tail is NOT decoration. boot_diag.c prints
+#   "hand: %s (%s) slot=%u/%u writer=0x%02X%s"
+# where the last %s is " [EEPROM byte repaired from the stamp]" whenever
+# poly_hand_ee_repaired() is true — a real state, seen on hardware, not a
+# hypothetical. Anchoring with a bare `$` (as a review suggested) would turn
+# every EEPROM-repair boot into a graded FAIL, and nothing here would have
+# caught it: no test covered that banner until this comment was written.
+# Anchoring anyway, WITH the suffix spelled out, is what rejects a trailing
+# garbage line such as `writer=0x550` while keeping the repaired form passing.
 _HAND_RE = re.compile(
     r"hand:\s+(LEFT|RIGHT)\s+\((flash stamp|stamped from EEPROM|EEPROM, UNSTAMPED)\)"
-    r"\s+slot=(\d+)/(\d+)\s+writer=0x([0-9A-Fa-f]{2})")
+    r"\s+slot=(\d+)/(\d+)\s+writer=0x([0-9A-Fa-f]{2})"
+    r"(?:\s+\[EEPROM byte repaired from the stamp\])?$")
 
 # base/hand_stamp.c: no record leaves the descriptors at 0xFF / 0, and a page
-# index can only be 0..15 (STAMP_PAGES = 4096 / 256).
+# index can only be 0..15 (STAMP_PAGES = 4096 / 256) — so the sector can hold
+# at most 16 valid records. Both ends are bounded: an impossible descriptor
+# (slot=0/17) must not pass as self-consistent just because it is non-zero.
 _HAND_NO_RECORD_SLOT = 255
 _HAND_MAX_SLOT = 15
+_HAND_MAX_COUNT = 16
 # make_hand_uf2.py writes 0x55 into pad[0]; stamp_write() leaves 0x00.
 _HAND_WRITERS = {0x00, 0x55}
 
@@ -2324,8 +2337,9 @@ def classify_hand_line(lines) -> tuple:
     else:
         if slot > _HAND_MAX_SLOT:
             return False, f"source is `{source}` but slot={slot} is outside the sector's 0..15 pages"
-        if count < 1:
-            return False, f"source is `{source}` but the sector reports {count} valid records"
+        if not 1 <= count <= _HAND_MAX_COUNT:
+            return False, (f"source is `{source}` but the sector reports {count} valid "
+                           f"records (the sector holds at most {_HAND_MAX_COUNT})")
     return True, f"hand: {side} ({source}) slot={slot}/{count} writer=0x{writer:02X} — self-consistent"
 
 
