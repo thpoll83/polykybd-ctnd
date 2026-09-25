@@ -437,7 +437,8 @@ class CrashRecordTest(unittest.TestCase):
     def _body(kind, phase, arg, flags=0x03):
         import struct
         rec = struct.pack(hil_tests._CRASH_REC_FMT, 0xC4A5C0DE, kind, 0, 1, 0x10,
-                          0, 0, 0, 0, 0, 0, phase, arg, b"0.29.3", 0)
+                          0x10001234, 0x10005678, 0x20040FF0, 0x21000003, 0, 0,
+                          phase, arg, b"0.29.3", 0)
         return bytes([flags]) + rec
 
     def test_record_is_48_bytes_like_the_firmware_struct(self):
@@ -450,6 +451,9 @@ class CrashRecordTest(unittest.TestCase):
         self.assertIn("kind=watchdog", msg)
         self.assertIn("phase=boot 6.0xE1", msg)
         self.assertIn("fw=0.29.3", msg)
+        # Every register the record carries: the clear that follows destroys it.
+        for want in ("pc=0x10001234", "lr=0x10005678", "sp=0x20040FF0", "xpsr=0x21000003"):
+            self.assertIn(want, msg)
 
     def test_non_boot_phase_prints_the_raw_argument(self):
         msg = hil_tests.describe_crash_record(self._body(1, 3, 0x0015))

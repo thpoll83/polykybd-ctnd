@@ -2265,7 +2265,7 @@ def describe_crash_record(body: bytes) -> str:
     rec = body[1:1 + struct.calcsize(_CRASH_REC_FMT)]
     if len(rec) < struct.calcsize(_CRASH_REC_FMT):
         return f"record too short ({len(rec)} bytes)"
-    (_magic, kind, core, consecutive, reset_reason, pc, lr, _sp, _xpsr, icsr,
+    (_magic, kind, core, consecutive, reset_reason, pc, lr, sp, xpsr, icsr,
      uptime_ms, phase, arg, fw, _crc) = struct.unpack(_CRASH_REC_FMT, rec)
     if phase == 1 and arg & 0xFF00:
         where = f"boot {arg >> 8}.0x{arg & 0xFF:02X}"
@@ -2273,7 +2273,8 @@ def describe_crash_record(body: bytes) -> str:
         where = f"{_CRASH_PHASES.get(phase, phase)} arg=0x{arg:04X}"
     return (f"kind={_CRASH_KINDS.get(kind, kind)} phase={where} core={core} "
             f"consecutive={consecutive} reset=0x{reset_reason:02X} pc=0x{pc:08X} "
-            f"lr=0x{lr:08X} icsr=0x{icsr:08X} uptime={uptime_ms}ms "
+            f"lr=0x{lr:08X} sp=0x{sp:08X} xpsr=0x{xpsr:08X} icsr=0x{icsr:08X} "
+            f"uptime={uptime_ms}ms "
             f"fw={fw.rstrip(bytes(1)).decode('ascii', 'replace')}")
 
 # Where THIS run's console history starts. The tap is process-global and rolls
