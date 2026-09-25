@@ -2244,6 +2244,38 @@ CRASH_HID_FLAG_PRESENT = 1 << 0
 CRASH_HID_FLAG_FRESH   = 1 << 1
 CRASH_HID_BODY_LEN     = 49    # [flags][48-byte poly_crash_record_t]
 
+# The 48-byte record, as qmk base/crash_record.h lays it out (packed, little-endian):
+# magic, kind, core, consecutive, reset_reason, pc, lr, sp, xpsr, icsr, uptime_ms,
+# phase, phase_arg, fw[8], crc.
+_CRASH_REC_FMT   = "<IBBBBIIIIIIHH8sI"
+_CRASH_KINDS     = {0: "none", 1: "hardfault", 2: "unhandled", 3: "watchdog", 4: "halt"}
+_CRASH_PHASES    = {0: "unknown", 1: "boot", 2: "loop", 3: "hid", 4: "bridge",
+                    5: "core1_wait", 6: "flash", 7: "suspend", 8: "apply"}
+
+
+def describe_crash_record(body: bytes) -> str:
+    """One line naming what a cmd 39 record says: kind, phase and its argument.
+
+    The test used to log only the first 8 reply bytes and then CLEAR the record,
+    so a fresh record failed the run while destroying the one thing that says
+    where the board stopped. A BOOT-phase argument is ``step << 8 | sub`` (sub
+    0xE1..0xE3 = the status-panel paint, the keycap logo, the final dwell), so
+    it is printed as ``step.sub`` to match ``polyctl crash show``."""
+    import struct
+    rec = body[1:1 + struct.calcsize(_CRASH_REC_FMT)]
+    if len(rec) < struct.calcsize(_CRASH_REC_FMT):
+        return f"record too short ({len(rec)} bytes)"
+    (_magic, kind, core, consecutive, reset_reason, pc, lr, _sp, _xpsr, icsr,
+     uptime_ms, phase, arg, fw, _crc) = struct.unpack(_CRASH_REC_FMT, rec)
+    if phase == 1 and arg & 0xFF00:
+        where = f"boot {arg >> 8}.0x{arg & 0xFF:02X}"
+    else:
+        where = f"{_CRASH_PHASES.get(phase, phase)} arg=0x{arg:04X}"
+    return (f"kind={_CRASH_KINDS.get(kind, kind)} phase={where} core={core} "
+            f"consecutive={consecutive} reset=0x{reset_reason:02X} pc=0x{pc:08X} "
+            f"lr=0x{lr:08X} icsr=0x{icsr:08X} uptime={uptime_ms}ms "
+            f"fw={fw.rstrip(bytes(1)).decode('ascii', 'replace')}")
+
 # Where THIS run's console history starts. The tap is process-global and rolls
 # across runs in the long-lived UI process, so a crash line left by a previous
 # run must not fail the next one: the runner stamps the mark before it flashes.
@@ -2400,6 +2432,8 @@ def test_crash_record_command(raw: RawHID, log: Callable[[str], None]) -> bool:
         if len(resp) < 3 + CRASH_HID_BODY_LEN:
             log(f"  FAIL: reply body is {len(resp) - 3} bytes, expected {CRASH_HID_BODY_LEN}")
             return None
+        if resp[3] & CRASH_HID_FLAG_PRESENT:
+            log(f"  record: {describe_crash_record(bytes(resp[3:3 + CRASH_HID_BODY_LEN]))}")
         return resp[3]
 
     ok = True

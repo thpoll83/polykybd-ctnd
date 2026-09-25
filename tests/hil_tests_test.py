@@ -433,6 +433,32 @@ class CrashRecordTest(unittest.TestCase):
         self.assertEqual(names[-1], scan["name"])
 
 
+    @staticmethod
+    def _body(kind, phase, arg, flags=0x03):
+        import struct
+        rec = struct.pack(hil_tests._CRASH_REC_FMT, 0xC4A5C0DE, kind, 0, 1, 0x10,
+                          0, 0, 0, 0, 0, 0, phase, arg, b"0.29.3", 0)
+        return bytes([flags]) + rec
+
+    def test_record_is_48_bytes_like_the_firmware_struct(self):
+        import struct
+        self.assertEqual(1 + struct.calcsize(hil_tests._CRASH_REC_FMT),
+                         hil_tests.CRASH_HID_BODY_LEN)
+
+    def test_boot_watchdog_names_step_and_sub(self):
+        msg = hil_tests.describe_crash_record(self._body(3, 1, 0x06E1))
+        self.assertIn("kind=watchdog", msg)
+        self.assertIn("phase=boot 6.0xE1", msg)
+        self.assertIn("fw=0.29.3", msg)
+
+    def test_non_boot_phase_prints_the_raw_argument(self):
+        msg = hil_tests.describe_crash_record(self._body(1, 3, 0x0015))
+        self.assertIn("kind=hardfault", msg)
+        self.assertIn("phase=hid arg=0x0015", msg)
+
+    def test_short_body_is_reported_not_raised(self):
+        self.assertIn("too short", hil_tests.describe_crash_record(b"\x03\x00"))
+
 class LayerNamesRetryTest(unittest.TestCase):
     """test_layer_names must ride out a deaf window but never retry a real fault.
 
