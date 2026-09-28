@@ -371,9 +371,15 @@ def replay_app_switch(raw: RawHID, ops: list, pace: bool = True) -> dict:
     out on one handle. ``request`` ops wait for the reply like
     ``send_and_read_validate``. ``pause`` ops are the host's rate-limit sleeps and
     are honoured when ``pace`` is set, because they are part of what a user waits
-    for."""
+    for.
+
+    A request counts as answered only when the reply echoes its command with the
+    ACK marker. A NACK or no reply stops the replay there: after a failed prepare
+    the uploads would land against a mapping nobody reset, and after a failed
+    enable the phase did not happen. ``failed_request`` names the op index."""
     pending: list = []
-    stats = {"writes": 0, "requests": 0, "unanswered": 0, "pauses": 0, "pause_s": 0.0}
+    stats = {"writes": 0, "requests": 0, "unanswered": 0, "pauses": 0, "pause_s": 0.0,
+             "failed_request": None}
 
     def flush():
         if pending:
@@ -381,16 +387,22 @@ def replay_app_switch(raw: RawHID, ops: list, pace: bool = True) -> dict:
             stats["writes"] += len(pending)
             pending.clear()
 
-    for op in ops:
+    for index, op in enumerate(ops):
         kind = op["op"]
         if kind == "write":
             pending.append(bytes.fromhex(op["hex"]))
         elif kind == "request":
             flush()
             stats["requests"] += 1
-            resp = raw.send(bytes.fromhex(op["hex"]), timeout_ms=1000, attempts=1)
-            if not resp:
-                stats["unanswered"] += 1
+            data = bytes.fromhex(op["hex"])
+            resp = raw.send(data, timeout_ms=1000, attempts=1)
+            acked = (bool(resp) and len(resp) >= 3 and resp[0] == POLY_CHANNEL
+                     and resp[1] == data[1] and resp[2] == ACK)
+            if not acked:
+                if not resp:
+                    stats["unanswered"] += 1
+                stats["failed_request"] = index
+                break
         elif kind == "pause":
             flush()
             stats["pauses"] += 1
@@ -435,7 +447,14 @@ def measure_app_switch(raw: RawHID, profiler: Profiler, log: Callable[[str], Non
         "host_wall_ms": round(wall_ms, 1),
         "host_wall_excl_pause_ms": round(wall_ms - stats["pause_s"] * 1000.0, 1),
         "settled": settled,
+        # Only a phase that ran to its enable and let the master answer again
+        # measured a whole app switch. Anything else is clipped, and must not
+        # reach a baseline comparison (see perf_runner.metric_is_usable).
+        "valid": settled and stats["failed_request"] is None,
     })
+    if stats["failed_request"] is not None:
+        log(f"[perf]   WARNING: request #{stats['failed_request']} was not ACKed — "
+            "replay stopped, this phase is not a valid measurement")
     log(f"[perf]   host {out['host_wall_ms']} ms ({stats['pause_s']} s paused), "
         f"overlay {out['ovl_wall_ms']} ms: bridge {out['ovl_bridge_ms']} / "
         f"render {out['ovl_render_ms']} / rest {out['ovl_rest_ms']} ms, "
