@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -46,6 +47,23 @@ class _RecordingHid:
     def send_and_read_validate(self, data, timeout=100, expected_prefix=None):
         self.ops.append({"op": "request", "hex": bytes(data).hex()})
         return True, bytearray(b"P\x0b.")
+
+
+class _SleepRecordingTime:
+    """Replaces poly_kybd's module-level ``time`` reference only.
+
+    Every attribute is the real ``time`` module's except ``sleep``, which records
+    the host's rate-limit pause instead of waiting. Assigning to ``time.sleep``
+    itself would change the shared standard-library module for the whole process."""
+
+    def __init__(self, record):
+        self._record = record
+
+    def sleep(self, seconds):
+        self._record(seconds)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
 
 
 class _Settings(dict):
@@ -76,15 +94,18 @@ def capture(host_dir: str, stem: str) -> dict:
     kb.protocol_version = 18
     rec = _RecordingHid()
     kb.hid = rec
-    pk.time.sleep = lambda s: rec.ops.append({"op": "pause", "s": s})
-
-    cache = OverlayMRUCache(600)
-    phases = {}
-    for phase in ("cold", "warm"):
-        rec.ops = []
-        if not kb.send_overlays_mru(files, cache):
-            raise SystemExit(f"send_overlays_mru failed for {stem} ({phase})")
-        phases[phase] = rec.ops
+    real_time = pk.time
+    pk.time = _SleepRecordingTime(lambda s: rec.ops.append({"op": "pause", "s": s}))
+    try:
+        cache = OverlayMRUCache(600)
+        phases = {}
+        for phase in ("cold", "warm"):
+            rec.ops = []
+            if not kb.send_overlays_mru(files, cache):
+                raise SystemExit(f"send_overlays_mru failed for {stem} ({phase})")
+            phases[phase] = rec.ops
+    finally:
+        pk.time = real_time
 
     commit = subprocess.run(["git", "-C", host_dir, "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
