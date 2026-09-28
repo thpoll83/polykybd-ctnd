@@ -35,8 +35,8 @@ import time
 
 from .hid import HIDConsole
 from .perf import (
-    Profiler, ProfilerUnavailable, measure_hid_latency, measure_idle_overhead,
-    measure_overlay_burst,
+    Profiler, ProfilerUnavailable, load_app_switch_fixtures, measure_app_switch,
+    measure_hid_latency, measure_idle_overhead, measure_overlay_burst,
 )
 from .test_runner import (
     POLY_CHANNEL, CMD_GET_ID, TestRunner, _derive_label,
@@ -60,6 +60,11 @@ TRACKED_METRICS = [
     ("overlay_plain.ovl_render_ms",       "Overlay burst (plain) — render (keycaps)",  "ms",   True),
     ("overlay_compressed.worst_iter_ms",  "Overlay burst (RLE/core1) — worst iteration", "ms", True),
     ("overlay_compressed.ovl_wall_ms",    "Overlay burst (RLE/core1) — total overlay time", "ms", True),
+    ("app_switch.word.cold.host_wall_ms", "App switch Word (cold) — host wall",     "ms",   True),
+    ("app_switch.word.cold.ovl_wall_ms",  "App switch Word (cold) — overlay time",  "ms",   True),
+    ("app_switch.word.warm.host_wall_ms", "App switch Word (warm) — host wall",     "ms",   True),
+    ("app_switch.word.warm.ovl_wall_ms",  "App switch Word (warm) — overlay time",  "ms",   True),
+    ("app_switch.jetbrains.cold.host_wall_ms", "App switch JetBrains (cold) — host wall", "ms", True),
     ("hid_latency.p50",                   "HID round-trip p50",                        "ms",   True),
     ("hid_latency.p95",                   "HID round-trip p95",                        "ms",   True),
     ("hid_latency.max",                   "HID round-trip max",                        "ms",   True),
@@ -217,6 +222,25 @@ def format_markdown(report: dict, comparison: list = None,
                   f"Iterations ≥ 10 ms (a fast tap can be missed inside one): "
                   f"**{section.get('long_iters_ge_10ms', 0)}**", "", "</details>", ""]
 
+    apps = report.get("app_switch") or {}
+    if apps:
+        lines += ["### Recorded app switches", "",
+                  "Replayed from `perf/fixtures/app_switch_*.json` (PolyKybdHost's own "
+                  "report stream). **cold** uploads every image; **warm** finds every image "
+                  "in the pool and sends only prepare + mapping + enable.", "",
+                  "| app | phase | reports | host wall | of which paused | overlay | "
+                  "bridge | render | rest | worst iter | iters ≥ 10 ms |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for name, phases in apps.items():
+            for phase, r in phases.items():
+                lines.append(
+                    f"| {name} | {phase} | {r['reports']} | {r['host_wall_ms']} ms "
+                    f"| {r['pause_s'] * 1000:.0f} ms | {r['ovl_wall_ms']} ms "
+                    f"| {r['ovl_bridge_ms']} ms | {r['ovl_render_ms']} ms "
+                    f"| {r['ovl_rest_ms']} ms | {r['worst_iter_ms']} ms "
+                    f"| {r['long_iters_ge_10ms']} |")
+        lines.append("")
+
     tail = report.get("console_tail") or []
     if tail:
         lines += ["<details><summary>Firmware console (profiler + split link)</summary>",
@@ -293,7 +317,7 @@ class PerfRunner:
 
     def run(self, left_uf2: str = None, right_uf2: str = None, *,
             label: str = "", keys: int = 8, latency_n: int = 100,
-            idle_s: float = 3.0) -> dict:
+            idle_s: float = 3.0, app_switch: bool = True) -> dict:
         timing = {}
         console_started = False
         try:
@@ -356,6 +380,16 @@ class PerfRunner:
                 "overlay_compressed": measure_overlay_burst(raw, profiler, self.log,
                                                             kind="compressed", keys=keys),
             }
+            # Real app switches after the synthetic bursts, cold before warm: the warm
+            # replay is only "warm" in what the host sends, since the pool the cold
+            # phase filled is exactly what the warm mapping points at.
+            fixtures = load_app_switch_fixtures() if app_switch else {}
+            if fixtures:
+                report["app_switch"] = {
+                    name: {phase: measure_app_switch(raw, profiler, self.log, fx, phase)
+                           for phase in ("cold", "warm")}
+                    for name, fx in fixtures.items()
+                }
             # Latency last: it is the only workload with no profiler window, and
             # running it after the bursts also samples the post-overlay recovery
             # the host actually experiences on a program switch.

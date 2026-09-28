@@ -27,6 +27,18 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   in both flavours (plain cmd 10, and RLE/core1 cmd 16), and a host-side **HID
   round-trip latency** burst (p50/p95/p99/max). Boot-to-first-stable-HID comes
   from the runner, which owns the flash timing.
+- **Recorded app switches** (`perf/fixtures/app_switch_<name>.json`): the exact
+  report stream PolyKybdHost's `send_overlays_mru` sends for a real overlay set,
+  recorded by `perf/fixtures/capture_app_switch.py` against a recording fake of
+  the HID helper. Each is replayed twice, each phase in its own window: **cold**
+  (every image uploaded, as on the first switch and after every reconnect) and
+  **warm** (every image already in the pool: prepare + mapping + enable). The
+  host's 0.3 s rate-limit pauses are replayed too, because they are part of what a
+  user waits for; `host_wall_excl_pause_ms` subtracts them. Word (39 images, 71
+  reports, 4 pauses) is the typical app, JetBrains (99 images, 208 reports, 12
+  pauses) the heaviest. Re-record when the host's encoder, mapping packing or
+  pacing changes, and say so in the commit. The synthetic 8-key bursts stay:
+  they are the long-running comparable series.
 - **Run it**: `python -m station.perf_runner --left …_perf_hil_left.uf2 --right
   …_perf_hil_right.uf2 --json perf.json --markdown perf.md`. `--no-flash`
   measures whatever is already on the rig (handy when iterating on the harness).

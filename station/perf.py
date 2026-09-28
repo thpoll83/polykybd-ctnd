@@ -36,6 +36,9 @@ Everything that decodes or derives numbers is a pure function so it can be
 unit-tested without hardware; only ``Profiler`` and the ``measure_*`` helpers
 touch the device.
 """
+import glob
+import json
+import os
 import statistics
 import struct
 import time
@@ -336,6 +339,108 @@ def measure_overlay_burst(raw: RawHID, profiler: Profiler, log: Callable[[str], 
         f"{out['ovl_iters']} overlay iterations, "
         f"bridge {out['ovl_bridge_ms']} / render {out['ovl_render_ms']} / "
         f"rest {out['ovl_rest_ms']} ms")
+    return out
+
+
+# --- recorded app switches ------------------------------------------------------
+#
+# The bursts above send blank images to 8 keys. A real app switch uploads 30-100
+# images in the smallest of four encodings, maps ~40-120 display positions, and
+# pauses 0.3 s after every 15 image reports. These fixtures are that stream,
+# recorded from PolyKybdHost's own send_overlays_mru (perf/fixtures/
+# capture_app_switch.py), so the replay is exactly what a user's host sends.
+
+FIXTURE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "perf", "fixtures")
+
+
+def load_app_switch_fixtures(directory: str = FIXTURE_DIR) -> dict:
+    """``{name: fixture}`` for every ``app_switch_<name>.json`` in ``directory``."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(directory, "app_switch_*.json"))):
+        name = os.path.basename(path)[len("app_switch_"):-len(".json")]
+        with open(path, encoding="utf-8") as fh:
+            out[name] = json.load(fh)
+    return out
+
+
+def replay_app_switch(raw: RawHID, ops: list, pace: bool = True) -> dict:
+    """Send one recorded phase in order.
+
+    ``write`` ops are fire-and-forget like ``send_multiple``; consecutive writes go
+    out on one handle. ``request`` ops wait for the reply like
+    ``send_and_read_validate``. ``pause`` ops are the host's rate-limit sleeps and
+    are honoured when ``pace`` is set, because they are part of what a user waits
+    for."""
+    pending: list = []
+    stats = {"writes": 0, "requests": 0, "unanswered": 0, "pauses": 0, "pause_s": 0.0}
+
+    def flush():
+        if pending:
+            raw.write_reports(list(pending))
+            stats["writes"] += len(pending)
+            pending.clear()
+
+    for op in ops:
+        kind = op["op"]
+        if kind == "write":
+            pending.append(bytes.fromhex(op["hex"]))
+        elif kind == "request":
+            flush()
+            stats["requests"] += 1
+            resp = raw.send(bytes.fromhex(op["hex"]), timeout_ms=1000, attempts=1)
+            if not resp:
+                stats["unanswered"] += 1
+        elif kind == "pause":
+            flush()
+            stats["pauses"] += 1
+            stats["pause_s"] += op["s"]
+            if pace:
+                time.sleep(op["s"])
+        else:
+            raise ValueError(f"unknown fixture op: {kind!r}")
+    flush()
+    stats["pause_s"] = round(stats["pause_s"], 2)
+    return stats
+
+
+def measure_app_switch(raw: RawHID, profiler: Profiler, log: Callable[[str], None],
+                       fixture: dict, phase: str) -> dict:
+    """Replay one phase (``cold`` or ``warm``) of a recorded app switch inside a
+    profiler window.
+
+    ``cold`` uploads every image, as the first switch into an app does and as
+    every switch after a reconnect does. ``warm`` is the same switch with every
+    image already in the pool: prepare + mapping + enable only. ``warm`` is also
+    the lower bound for a switch whose images come from a flash icon library
+    (qmk_firmware OVERLAY_ICON_LIBRARY_DESIGN.md), which adds only its fill
+    reports on top."""
+    ops = fixture[phase]
+    name = fixture.get("stem", "?")
+    reports = sum(1 for o in ops if o["op"] != "pause")
+    log(f"[perf] app switch {name} ({phase}): {reports} reports")
+    profiler.reset()
+    t0 = time.perf_counter()
+    stats = replay_app_switch(raw, ops)
+    settled = _settle_after_burst(raw, log)
+    wall_ms = (time.perf_counter() - t0) * 1000.0
+    prof = profiler.read()
+
+    out = prof.to_dict()
+    out.update(stats)
+    out.update({
+        "stem": name,
+        "phase": phase,
+        "reports": reports,
+        "host_wall_ms": round(wall_ms, 1),
+        "host_wall_excl_pause_ms": round(wall_ms - stats["pause_s"] * 1000.0, 1),
+        "settled": settled,
+    })
+    log(f"[perf]   host {out['host_wall_ms']} ms ({stats['pause_s']} s paused), "
+        f"overlay {out['ovl_wall_ms']} ms: bridge {out['ovl_bridge_ms']} / "
+        f"render {out['ovl_render_ms']} / rest {out['ovl_rest_ms']} ms, "
+        f"worst iteration {out['worst_iter_ms']} ms, "
+        f"{out['long_iters_ge_10ms']} iteration(s) >= 10 ms")
     return out
 
 
