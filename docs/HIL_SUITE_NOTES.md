@@ -75,6 +75,21 @@ and relative links were adjusted to suit a standalone file.
       long after the firmware dropped to 12. It is only a sanity bound on the
       default-layer read, so nothing failed — the same silent-staleness class as the
       host's `layer_names.yaml`, and the reason that file is now only a fallback.
+  - The two **PRC overlay** tests (cmd 41, `min_protocol: 19`) cover the
+    Predictive Range Coding upload. `test_prc_overlay_keeps_master_alive` is a
+    **liveness guard**, like cmd 33: two real records in one report (KC_A decoded
+    on the master, KC_P bridged to the slave on the compressed transaction with
+    `PRC_BRIDGE_FLAG`), a full 72x40 box with an empty payload (the longest decode
+    one record can ask for), and the three records the parser refuses. It cannot
+    tell a refusal from a record decoded into garbage, so
+    `test_prc_malformed_record_is_refused` (`needs_console`) reads the firmware's
+    `Warning: malformed PRC record at byte N` line (a `uprintf`, not debug-gated)
+    for each malformed record, and asserts a valid report produces no PRC warning.
+    Whether the decoded PIXELS are right is not the rig's question: the firmware
+    unit test `make test:polykybd_prc_codec` decodes the host's golden vectors
+    and compares all 360 bytes. The payloads here are copied from those vectors,
+    and `tests/hil_tests_test.py` pins the rig's packer against a host-packed
+    record and a port of `prc_parse_record()`.
   - The **`overlay mapping widths (v12)`** test (`test_overlay_mapping_widths`,
     `min_protocol: 12`) covers HID cmd 33 (`SEND_OVERLAY_MAPPING_W`), the
     variable-width mapping command. ⚠️ **It is a liveness guard, not a
