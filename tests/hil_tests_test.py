@@ -313,6 +313,14 @@ class PrcRecordTest(unittest.TestCase):
             labels.append(label)
         self.assertEqual(len(labels), 3)
 
+    def test_the_warning_pattern_matches_every_firmware_prc_warning(self):
+        # Rendered forms of the three uprintf()s in fill_overlay.c.
+        for line in ["Warning: malformed PRC record at byte 12; rest of the report dropped.",
+                     "Warning: PRC overlay for unsupported keycode 0xe8 dropped.",
+                     "Warning: PRC overlay for keycode 0x13 (idx 19) did not reach the slave."]:
+            self.assertTrue(hil_tests.PRC_WARNING_RE.search(line), line)
+        self.assertIsNone(hil_tests.PRC_WARNING_RE.search("Received overlay for keycode 0x4"))
+
     def test_both_tests_are_registered_and_gated_on_v19(self):
         by_name = {t["fn"].__name__: t for t in hil_tests.TESTS}
         alive = by_name["test_prc_overlay_keeps_master_alive"]

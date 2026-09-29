@@ -1815,6 +1815,10 @@ PRC_MIN_PROTOCOL = 19
 PRC_RECORD_HDR   = 6
 PRC_REPORT_BYTES = 64 - 2        # records after 'P' + the command byte
 PRC_MALFORMED_LINE = "malformed PRC record"   # fill_overlay.c, uprintf (not debug-gated)
+# Every PRC warning fill_overlay.c can print: malformed record, unsupported
+# keycode, and a bridge give-up ("PRC overlay for keycode … did not reach the slave").
+PRC_WARNING_RE = re.compile(r"malformed PRC record|PRC overlay for")
+PRC_SETTLE_S = 3.0
 
 # Real PRC payloads from the host's golden vectors (tests/util/prc_codec_vectors.json,
 # table v1): what the host encoder produced for these shapes. The firmware decodes
@@ -1934,12 +1938,15 @@ def test_prc_malformed_record_is_refused(raw: RawHID, log: Callable[[str], None]
                                    _prc_record(KC_P, 0, *PRC_CHECKER_BOX, PRC_CHECKER))])
     if not _master_alive(raw, log):
         return False
-    time.sleep(1.0)
-    bad = TAP.find_all(PRC_MALFORMED_LINE, mark) + TAP.find_all("PRC overlay", mark)
-    if bad:
-        log(f"  FAIL: a valid PRC report produced warnings: {bad}")
+    # The firmware warns while decoding, before it answers the GET_ID above, but the
+    # console drains on the main loop and can lag the HID reply. So poll for the
+    # whole settle window rather than snapshotting once: any PRC warning that
+    # arrives inside it fails the test.
+    warning = TAP.wait_for(PRC_WARNING_RE, mark, timeout=PRC_SETTLE_S)
+    if warning is not None:
+        log(f"  FAIL: a valid PRC report produced a warning: {warning.strip()}")
         return False
-    log("  a valid 2-record report produced no PRC warning")
+    log(f"  a valid 2-record report produced no PRC warning within {PRC_SETTLE_S:.0f}s")
     return True
 
 
