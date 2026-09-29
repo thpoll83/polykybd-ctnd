@@ -101,6 +101,7 @@ CMD_MACRO_BODY              = 37  # windowed read/write of the shared body buffe
 CMD_MACRO_LOOK              = 38  # get/set one macro's whole keycap look (v15+)
 CMD_CRASH_RECORD            = 39  # read/clear the firmware crash record (v16+)
 CMD_SEND_PRC_OVERLAY        = 41  # PRC (Predictive Range Coding) overlay records (v19+; no ACK)
+CMD_FILL_POOL_FROM_ICON     = 42  # fill pool slots from the flash icon library (v20+; REPLIED)
 MACRO_LOOK_HEADER           = 9   # id, caption length, style, 4 little-endian icon bytes
 MACRO_STYLE_INDEX           = 0   # "M3" above the caption -- the default
 MACRO_STYLE_ICON            = 1   # a chosen glyph above the caption
@@ -1804,6 +1805,84 @@ def _overlay_map_w_report(width: int) -> tuple[bytes, int]:
     return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W, width]) + data, pairs
 
 
+# --- Icon library fills (cmd 42, protocol v20) ------------------------------------
+#
+# (pool slot, icon id) pairs in cmd 33's packing; each half draws the icon from its
+# own flash (the PlyI bundle in font-pack slot 8). Unlike the other bulk overlay
+# commands it is REPLIED: 'P' 42 '.' when every pair applied on both halves, else
+# 'P' 42 '!' and byte 3 = the first pair the host must upload itself.
+ICON_FILL_MIN_PROTOCOL = 20
+ICONS_BUNDLE_SLOT      = 8
+NUM_OVERLAY_SLOTS      = 600
+
+
+def _icon_fill_report(pairs: list[tuple[int, int]], width: int) -> bytes:
+    """One cmd 42 report, padded by repeating the last pair (there is no count)."""
+    n = (OVERLAY_MAP_W_BYTES * 8 // width) // 2
+    padded = pairs + [pairs[-1]] * (n - len(pairs))
+    values = [v for pair in padded[:n] for v in pair]
+    return (bytes([POLY_CHANNEL, CMD_FILL_POOL_FROM_ICON, width])
+            + _pack_mapping_values(values, OVERLAY_MAP_W_BYTES, width))
+
+
+def _icon_fill_verdict(response) -> tuple[str, int] | None:
+    """('.', 0xFF) / ('!', first unapplied pair), or None for a malformed reply."""
+    if response is None or len(response) < 4 or response[0] != ord("P") \
+            or response[1] != CMD_FILL_POOL_FROM_ICON or response[2] not in (ord("."), ord("!")):
+        return None
+    return chr(response[2]), response[3]
+
+
+def test_icon_fill_replies(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """cmd 42 (v20) answers every report with the verdict the host acts on.
+
+    The rig flashes firmware by UF2 and may or may not hold ``icons.plyi`` in slot 8,
+    so the assertions hold either way and the test says which case it ran:
+
+    1. GET_ID's version block lists slot 8 (nine bundles on v20). Without it the
+       host never flashes the icon library at all.
+    2. One pair (slot 0, icon 0): '.' when the library is present on both halves,
+       else '!' at pair 0 -- the host then uploads the image itself.
+    3. A width outside 8..16 is refused at pair 0, before any pair is read.
+    4. A pool slot past the pool (700 of 600), as pair 1 behind a good pair 0: '!'
+       at pair 0 either way. With the library the master stops at pair 1, but the
+       slave refuses the whole report (its ack is one byte, no index), and a refused
+       bridge is reported as pair 0 -- the conservative answer, since re-uploading a
+       good pair only costs a report.
+
+    ⚠️ Pixels are not checked: nothing reads the pool back. The blit and the pair
+    decoding are the firmware unit test's job (``make test:polykybd_icon_lib``).
+    Side effect undone in a finally: the mapping and usage bits go back to the
+    power-on identity (cmd 11 ``MAPPING_RESET|USAGE_RESET``).
+    """
+    response = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    versions = parse_fontpack_versions(response)
+    if versions is None or ICONS_BUNDLE_SLOT not in versions:
+        log(f"  FAIL: the GET_ID version block does not list the icon slot "
+            f"{ICONS_BUNDLE_SLOT}: {versions}")
+        return False
+    have = versions[ICONS_BUNDLE_SLOT] > 0
+    log(f"icon library in slot {ICONS_BUNDLE_SLOT}: "
+        + (f"present, v{versions[ICONS_BUNDLE_SLOT]}" if have else "absent (v0)"))
+    cases = [
+        ("one pair (slot 0, icon 0) at 9 bits", _icon_fill_report([(0, 0)], 9),
+         (".", 0xFF) if have else ("!", 0)),
+        ("width 7, below the codec", _icon_fill_report([(0, 0)], 7), ("!", 0)),
+        ("pool slot 700 as pair 1", _icon_fill_report([(0, 0), (NUM_OVERLAY_SLOTS + 100, 0)], 10),
+         ("!", 0)),
+    ]
+    try:
+        for label, report, want in cases:
+            got = _icon_fill_verdict(raw.send(report))
+            log(f"{label}: reply {got}, expected {want}")
+            if got != want:
+                log(f"  FAIL: {label} answered {got}, expected {want}")
+                return False
+        return _master_alive(raw, log)
+    finally:
+        raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON, OVERLAY_MAPPING_RESET_BITS]))
+
+
 # --- PRC overlays (cmd 41, protocol v19) ----------------------------------------
 #
 # A cmd 41 report carries whole images as records: a 6-byte big-endian bit field
@@ -3213,6 +3292,9 @@ TESTS = [
     {"name": "PRC malformed record is refused (v19 cmd 41, console)",
      "fn": test_prc_malformed_record_is_refused, "min_protocol": PRC_MIN_PROTOCOL,
      "needs_console": True},
+    # Icon library fills (cmd 42): the replied verdict the host's fallback acts on.
+    {"name": "icon fill replies (v20 cmd 42)",
+     "fn": test_icon_fill_replies, "min_protocol": ICON_FILL_MIN_PROTOCOL},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
     # Deliberate bridged-traffic soak + the firmware's own link health counter.
     # After the stress burst (which wants a quiet master) and before the flash
