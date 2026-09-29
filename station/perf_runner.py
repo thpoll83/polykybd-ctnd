@@ -35,8 +35,8 @@ import time
 
 from .hid import HIDConsole
 from .perf import (
-    Profiler, ProfilerUnavailable, measure_hid_latency, measure_idle_overhead,
-    measure_overlay_burst,
+    Profiler, ProfilerUnavailable, load_app_switch_fixtures, measure_app_switch,
+    measure_hid_latency, measure_idle_overhead, measure_overlay_burst,
 )
 from .test_runner import (
     POLY_CHANNEL, CMD_GET_ID, TestRunner, _derive_label,
@@ -60,6 +60,11 @@ TRACKED_METRICS = [
     ("overlay_plain.ovl_render_ms",       "Overlay burst (plain) — render (keycaps)",  "ms",   True),
     ("overlay_compressed.worst_iter_ms",  "Overlay burst (RLE/core1) — worst iteration", "ms", True),
     ("overlay_compressed.ovl_wall_ms",    "Overlay burst (RLE/core1) — total overlay time", "ms", True),
+    ("app_switch.word.cold.host_wall_ms", "App switch Word (cold) — host wall",     "ms",   True),
+    ("app_switch.word.cold.ovl_wall_ms",  "App switch Word (cold) — overlay time",  "ms",   True),
+    ("app_switch.word.warm.host_wall_ms", "App switch Word (warm) — host wall",     "ms",   True),
+    ("app_switch.word.warm.ovl_wall_ms",  "App switch Word (warm) — overlay time",  "ms",   True),
+    ("app_switch.jetbrains.cold.host_wall_ms", "App switch JetBrains (cold) — host wall", "ms", True),
     ("hid_latency.p50",                   "HID round-trip p50",                        "ms",   True),
     ("hid_latency.p95",                   "HID round-trip p95",                        "ms",   True),
     ("hid_latency.max",                   "HID round-trip max",                        "ms",   True),
@@ -97,6 +102,41 @@ def dig(data: dict, path: str):
     return cur
 
 
+def metric_is_usable(data: dict, path: str) -> bool:
+    """False when the section holding ``path`` marks itself invalid.
+
+    An app-switch phase whose replay stopped on a NACK, or whose master never
+    answered again, carries ``"valid": False``. Its numbers describe a clipped
+    window, so they must neither be compared nor stored as a baseline.
+
+    >>> metric_is_usable({"a": {"b": {"valid": False, "x": 1}}}, "a.b.x")
+    False
+    >>> metric_is_usable({"a": {"b": {"x": 1}}}, "a.b.x")
+    True
+    """
+    parent = dig(data, path.rsplit(".", 1)[0]) if "." in path else data
+    return not (isinstance(parent, dict) and parent.get("valid") is False)
+
+
+def baseline_safe(report: dict) -> dict:
+    """A copy of ``report`` without the app-switch phases marked invalid.
+
+    >>> r = {"app_switch": {"w": {"cold": {"valid": False}, "warm": {"valid": True}}}}
+    >>> baseline_safe(r)["app_switch"]
+    {'w': {'warm': {'valid': True}}}
+    >>> r["app_switch"]["w"]["cold"]   # the report itself is untouched
+    {'valid': False}
+    """
+    out = dict(report)
+    apps = report.get("app_switch")
+    if apps:
+        out["app_switch"] = {
+            name: {ph: r for ph, r in phases.items() if r.get("valid") is not False}
+            for name, phases in apps.items()
+        }
+    return out
+
+
 def compare_to_baseline(report: dict, baseline: dict,
                         tolerance_pct: float = DEFAULT_TOLERANCE_PCT) -> list:
     """Diff the tracked metrics against a baseline report.
@@ -121,6 +161,8 @@ def compare_to_baseline(report: dict, baseline: dict,
     """
     out = []
     for path, label, unit, higher_is_worse in TRACKED_METRICS:
+        if not (metric_is_usable(report, path) and metric_is_usable(baseline, path)):
+            continue
         cur, base = dig(report, path), dig(baseline, path)
         if cur is None or base is None:
             continue
@@ -217,6 +259,35 @@ def format_markdown(report: dict, comparison: list = None,
                   f"Iterations ≥ 10 ms (a fast tap can be missed inside one): "
                   f"**{section.get('long_iters_ge_10ms', 0)}**", "", "</details>", ""]
 
+    apps = report.get("app_switch") or {}
+    if apps:
+        lines += ["### Recorded app switches", "",
+                  "Replayed from `perf/fixtures/app_switch_*.json` (PolyKybdHost's own "
+                  "report stream). **cold** uploads every image; **warm** finds every image "
+                  "in the pool and sends only prepare + mapping + enable.", "",
+                  "| app | phase | reports | host wall | of which paused | overlay | "
+                  "bridge | render | rest | worst iter | iters ≥ 10 ms |",
+                  "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        invalid = []
+        for name, phases in apps.items():
+            for phase, r in phases.items():
+                mark = ""
+                if r.get("valid") is False:
+                    mark = " ⚠️"
+                    invalid.append(f"{name} {phase}")
+                lines.append(
+                    f"| {name} | {phase}{mark} | {r['reports']} | {r['host_wall_ms']} ms "
+                    f"| {r['pause_s'] * 1000:.0f} ms | {r['ovl_wall_ms']} ms "
+                    f"| {r['ovl_bridge_ms']} ms | {r['ovl_render_ms']} ms "
+                    f"| {r['ovl_rest_ms']} ms | {r['worst_iter_ms']} ms "
+                    f"| {r['long_iters_ge_10ms']} |")
+        lines.append("")
+        if invalid:
+            lines += [f"> ⚠️ Not a valid measurement: {', '.join(invalid)}. The replay "
+                      "stopped on an unacknowledged request, or the master did not answer "
+                      "again afterwards. These rows are excluded from the baseline "
+                      "comparison and from `--update-baseline`.", ""]
+
     tail = report.get("console_tail") or []
     if tail:
         lines += ["<details><summary>Firmware console (profiler + split link)</summary>",
@@ -293,7 +364,7 @@ class PerfRunner:
 
     def run(self, left_uf2: str = None, right_uf2: str = None, *,
             label: str = "", keys: int = 8, latency_n: int = 100,
-            idle_s: float = 3.0) -> dict:
+            idle_s: float = 3.0, app_switch: bool = True) -> dict:
         timing = {}
         console_started = False
         try:
@@ -356,6 +427,16 @@ class PerfRunner:
                 "overlay_compressed": measure_overlay_burst(raw, profiler, self.log,
                                                             kind="compressed", keys=keys),
             }
+            # Real app switches after the synthetic bursts, cold before warm: the warm
+            # replay is only "warm" in what the host sends, since the pool the cold
+            # phase filled is exactly what the warm mapping points at.
+            fixtures = load_app_switch_fixtures() if app_switch else {}
+            if fixtures:
+                report["app_switch"] = {
+                    name: {phase: measure_app_switch(raw, profiler, self.log, fx, phase)
+                           for phase in ("cold", "warm")}
+                    for name, fx in fixtures.items()
+                }
             # Latency last: it is the only workload with no profiler window, and
             # running it after the bursts also samples the post-overlay recovery
             # the host actually experiences on a program switch.
@@ -497,7 +578,7 @@ def main(argv=None) -> int:
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(baseline_path, "w", encoding="utf-8") as fh:
-            json.dump(report, fh, indent=2, sort_keys=True)
+            json.dump(baseline_safe(report), fh, indent=2, sort_keys=True)
         print(f"[perf] baseline updated: {baseline_path}")
 
     return 0

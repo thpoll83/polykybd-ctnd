@@ -244,6 +244,91 @@ class TestOverlayWorkloads(unittest.TestCase):
             perf.measure_overlay_burst(dev, perf.Profiler(dev, _quiet), _quiet, kind="nope")
 
 
+class TestAppSwitchWorkload(unittest.TestCase):
+    OPS = [
+        {"op": "request", "hex": "500bc4"},
+        {"op": "write", "hex": "5012" + "00" * 10},
+        {"op": "write", "hex": "5013" + "00" * 10},
+        {"op": "pause", "s": 0.3},
+        {"op": "write", "hex": "5021" + "00" * 10},
+        {"op": "request", "hex": "500b01"},
+    ]
+
+    def test_replay_keeps_order_and_counts(self):
+        dev = FakeProfilerDevice()
+        sent = []
+        dev.send = lambda data, timeout_ms=3000, attempts=3: sent.append(bytes(data)) or b"P\x0b."
+        stats = perf.replay_app_switch(dev, self.OPS, pace=False)
+        self.assertEqual(stats, {"writes": 3, "requests": 2, "unanswered": 0,
+                                 "pauses": 1, "pause_s": 0.3, "failed_request": None})
+        self.assertEqual([r[1] for r in dev.reports_written], [0x12, 0x13, 0x21])
+        self.assertEqual([r[2] for r in sent], [0xC4, 0x01])
+
+    def test_unanswered_prepare_stops_the_replay(self):
+        dev = FakeProfilerDevice()
+        dev.send = lambda data, timeout_ms=3000, attempts=3: None
+        stats = perf.replay_app_switch(dev, self.OPS, pace=False)
+        self.assertEqual(stats["unanswered"], 1)
+        self.assertEqual(stats["failed_request"], 0)
+        self.assertEqual(dev.reports_written, [], "no upload after a failed prepare")
+
+    def test_nacked_enable_fails_the_phase(self):
+        dev = FakeProfilerDevice()
+        replies = iter([b"P\x0b.", b"P\x0b!"])
+        dev.send = lambda data, timeout_ms=3000, attempts=3: next(replies)
+        stats = perf.replay_app_switch(dev, self.OPS, pace=False)
+        self.assertEqual(stats["failed_request"], 5)
+        self.assertEqual(stats["unanswered"], 0)
+
+    def test_reply_to_another_command_is_not_an_ack(self):
+        dev = FakeProfilerDevice()
+        dev.send = lambda data, timeout_ms=3000, attempts=3: b"P\x06."
+        stats = perf.replay_app_switch(dev, self.OPS, pace=False)
+        self.assertEqual(stats["failed_request"], 0)
+
+    def test_failed_phase_is_marked_invalid(self):
+        dev = FakeProfilerDevice()
+        fixture = {"stem": "t", "cold": self.OPS}
+        real_send = dev.send
+        dev.send = lambda data, timeout_ms=3000, attempts=3: (
+            b"P\x0b!" if data[1] == 0x0B else real_send(data, timeout_ms, attempts))
+        out = perf.measure_app_switch(dev, perf.Profiler(dev, _quiet), _quiet, fixture, "cold")
+        self.assertFalse(out["valid"])
+
+    def test_unknown_op_is_rejected(self):
+        with self.assertRaises(ValueError):
+            perf.replay_app_switch(FakeProfilerDevice(), [{"op": "nope"}], pace=False)
+
+    def test_measure_app_switch_brackets_the_replay(self):
+        dev = FakeProfilerDevice()
+        fixture = {"stem": "t", "cold": [o for o in self.OPS if o["op"] != "pause"]}
+        out = perf.measure_app_switch(dev, perf.Profiler(dev, _quiet), _quiet, fixture, "cold")
+        self.assertEqual(dev.reset_count, 1)
+        self.assertEqual(out["reports"], 5)
+        self.assertEqual(out["phase"], "cold")
+        self.assertTrue(out["settled"])
+        self.assertTrue(out["valid"])
+        self.assertIn("ovl_render_ms", out)
+
+    def test_committed_fixtures_are_well_formed(self):
+        """The recorded streams must look like a real send_overlays_mru: prepare
+        first, enable last, and a warm phase that uploads no image at all."""
+        fixtures = perf.load_app_switch_fixtures()
+        self.assertIn("word", fixtures)
+        image_cmds = {10, 16, 17, 18, 19}
+        for name, fx in fixtures.items():
+            for phase in ("cold", "warm"):
+                ops = [o for o in fx[phase] if o["op"] != "pause"]
+                self.assertTrue(all(o["op"] in ("write", "request") for o in ops), name)
+                self.assertTrue(all(len(bytes.fromhex(o["hex"])) <= 64 for o in ops), name)
+                self.assertEqual(ops[0]["hex"][:4], "500b", f"{name} {phase}: prepare first")
+                self.assertEqual(ops[-1]["op"], "request", f"{name} {phase}: enable last")
+            cold_cmds = {int(o["hex"][2:4], 16) for o in fx["cold"] if "hex" in o}
+            warm_cmds = {int(o["hex"][2:4], 16) for o in fx["warm"] if "hex" in o}
+            self.assertTrue(cold_cmds & image_cmds, f"{name}: cold uploads images")
+            self.assertFalse(warm_cmds & image_cmds, f"{name}: warm uploads nothing")
+
+
 class TestLatencyStats(unittest.TestCase):
     def test_percentiles_are_observed_samples(self):
         out = perf.percentiles([10.0, 20.0, 30.0, 40.0, 50.0])
@@ -281,6 +366,11 @@ class TestBaselineComparison(unittest.TestCase):
             "hid_latency": {"p50": 4.0, "p95": 7.0, "max": 20.0},
             "idle": {"worst_iter_ms": 2.0, "iters_per_s": 1000.0},
             "timing": {"boot_to_ready_s": 6.0},
+            "app_switch": {
+                "word": {"cold": {"host_wall_ms": 1500.0, "ovl_wall_ms": 400.0},
+                         "warm": {"host_wall_ms": 60.0, "ovl_wall_ms": 30.0}},
+                "jetbrains": {"cold": {"host_wall_ms": 4500.0}},
+            },
         }
         for path, value in over.items():
             section, _, key = path.partition("__")
@@ -325,6 +415,16 @@ class TestBaselineComparison(unittest.TestCase):
         metrics = {c["metric"] for c in compare_to_baseline(self._report(), base)}
         self.assertNotIn("hid_latency.max", metrics)
         self.assertIn("hid_latency.p95", metrics)
+
+    def test_invalid_app_switch_phase_is_not_compared(self):
+        """A clipped phase must not produce a verdict, on either side."""
+        cur = self._report()
+        cur["app_switch"]["word"]["cold"].update(valid=False, host_wall_ms=99999.0)
+        metrics = {c["metric"] for c in compare_to_baseline(cur, self._report())}
+        self.assertNotIn("app_switch.word.cold.host_wall_ms", metrics)
+        self.assertIn("app_switch.word.warm.host_wall_ms", metrics)
+        metrics = {c["metric"] for c in compare_to_baseline(self._report(), cur)}
+        self.assertNotIn("app_switch.word.cold.host_wall_ms", metrics)
 
     def test_every_tracked_metric_path_is_reachable(self):
         """Guards against a typo'd dotted path silently dropping a metric."""
