@@ -100,6 +100,7 @@ CMD_MACRO_INFO              = 36  # count, label stride, capacity, bytes used (v
 CMD_MACRO_BODY              = 37  # windowed read/write of the shared body buffer (v15+)
 CMD_MACRO_LOOK              = 38  # get/set one macro's whole keycap look (v15+)
 CMD_CRASH_RECORD            = 39  # read/clear the firmware crash record (v16+)
+CMD_SEND_PRC_OVERLAY        = 41  # PRC (Predictive Range Coding) overlay records (v19+; no ACK)
 MACRO_LOOK_HEADER           = 9   # id, caption length, style, 4 little-endian icon bytes
 MACRO_STYLE_INDEX           = 0   # "M3" above the caption -- the default
 MACRO_STYLE_ICON            = 1   # a chosen glyph above the caption
@@ -229,6 +230,7 @@ MAX_LAYERS           = 12    # DYNAMIC_KEYMAP_LAYER_COUNT (split72/config.h). Wa
                              # class as the host's layer_names.yaml.
 DISPLAY_OVERLAYS_BIT = 0x01  # overlay_flag DISPLAY_OVERLAYS (base/com.h)
 KC_A                 = 0x04  # QMK keycode for 'A'; A..Z = 0x04..0x1D
+KC_P                 = 0x13  # 'P': on the RIGHT half of split72, so its upload is bridged
 NUM_SEGMENTS         = 6     # NUM_SEGMENTS_PER_OVERLAY
 PLAIN_SEG_BYTES      = 60    # data bytes per plain overlay report (64 - 4 header, protocol 11)
 OVERLAY_BYTES        = 360   # NUM_SEGMENTS_PER_OVERLAY * BYTES_PER_SEGMENT
@@ -1802,6 +1804,145 @@ def _overlay_map_w_report(width: int) -> tuple[bytes, int]:
     return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W, width]) + data, pairs
 
 
+# --- PRC overlays (cmd 41, protocol v19) ----------------------------------------
+#
+# A cmd 41 report carries whole images as records: a 6-byte big-endian bit field
+#   keycode 8 | modifier 4 | top 6 | left 7 | height-1 6 | width-1 7 | len 6 | 0 4
+# then `len` payload bytes. A keycode byte of 0 (the zero padding) ends the list.
+# Mirrors the firmware's prc_parse_record() (base/prc_codec.c) and the host's
+# prc_codec.pack_record(); tests/hil_tests_test.py pins it against both.
+PRC_MIN_PROTOCOL = 19
+PRC_RECORD_HDR   = 6
+PRC_REPORT_BYTES = 64 - 2        # records after 'P' + the command byte
+PRC_MALFORMED_LINE = "malformed PRC record"   # fill_overlay.c, uprintf (not debug-gated)
+
+# Real PRC payloads from the host's golden vectors (tests/util/prc_codec_vectors.json,
+# table v1): what the host encoder produced for these shapes. The firmware decodes
+# them to the vector's overlay; the rig cannot see pixels, so the bytes matter only
+# as a realistic record, not as a check of the decode (the firmware unit test is).
+PRC_SQUARE_BOX   = (10, 30, 10, 10)                      # top, left, height, width
+PRC_SQUARE       = bytes.fromhex("ffffe512e915")         # solid 10x10 square
+PRC_CHECKER_BOX  = (16, 60, 8, 8)
+PRC_CHECKER      = bytes.fromhex("fc8b0d09d324a77598e846e4aba9b7c12d52bc2465")
+
+
+def _prc_record(keycode: int, modifier: int, top: int, left: int, height: int,
+                width: int, payload: bytes, reserved: int = 0, length: int | None = None) -> bytes:
+    """One cmd 41 record. ``reserved`` and ``length`` exist only to build the
+    malformed records the firmware must refuse; normal callers leave them alone."""
+    n = len(payload) if length is None else length
+    f = modifier & 0x0F
+    f = (f << 6) | (top & 0x3F)
+    f = (f << 7) | (left & 0x7F)
+    f = (f << 6) | ((height - 1) & 0x3F)
+    f = (f << 7) | ((width - 1) & 0x7F)
+    f = (f << 6) | (n & 0x3F)
+    f = (f << 4) | (reserved & 0x0F)
+    return bytes([keycode & 0xFF]) + f.to_bytes(5, "big") + payload
+
+
+def _prc_report(*records: bytes) -> bytes:
+    body = b"".join(records)
+    if len(body) > PRC_REPORT_BYTES:
+        raise ValueError(f"{len(body)} bytes of records do not fit one report")
+    return bytes([POLY_CHANNEL, CMD_SEND_PRC_OVERLAY]) + body
+
+
+def _prc_malformed_reports() -> list:
+    """(label, report) for the three refusals prc_parse_record() makes."""
+    return [
+        ("reserved bits set", _prc_report(_prc_record(KC_A, 0, *PRC_SQUARE_BOX, PRC_SQUARE, reserved=0x1))),
+        ("box past the frame (top 39 + height 2)", _prc_report(_prc_record(KC_A, 0, 39, 0, 2, 1, b""))),
+        ("length past the report (63 of 56)",
+         _prc_report(_prc_record(KC_A, 0, *PRC_SQUARE_BOX, PRC_SQUARE, length=63))),
+    ]
+
+
+def test_prc_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """PRC overlay records (cmd 41, v19) decode on both halves without wedging.
+
+    ⚠️ **A liveness guard, not a pixel check.** cmd 41 is silent and nothing reads
+    the pool back, so success is "the master still answers GET_ID". Whether the
+    decode is RIGHT is the firmware unit test's job (``make test:polykybd_prc_codec``
+    decodes the host's golden vectors and compares all 360 bytes).
+
+    Three shapes:
+
+    1. Two real records in one report: KC_A (decoded on the master) and KC_P (a
+       right-half key on split72's base layer, so with the default layout the
+       record crosses the split link on USER_SYNC_COMPRESSED_DATA with
+       PRC_BRIDGE_FLAG and the slave decodes it; a language that remaps P through
+       translate_a_to_z can move it).
+    2. A full 72x40 box with an empty payload: every pixel is decoded from zero
+       bytes, the longest decode a single record can ask for.
+    3. The three malformed records the parser refuses (reserved bits, a box past
+       the frame, a length past the report).
+    """
+    both = _prc_report(_prc_record(KC_A, 0, *PRC_SQUARE_BOX, PRC_SQUARE),
+                       _prc_record(KC_P, 0, *PRC_CHECKER_BOX, PRC_CHECKER))
+    raw.write_reports([both])
+    log(f"sent one cmd 41 report with 2 records ({len(both) - 2} bytes): KC_A square "
+        f"({len(PRC_SQUARE)} B payload, master) + KC_P checkerboard "
+        f"({len(PRC_CHECKER)} B, bridged to the slave)")
+    if not _master_alive(raw, log):
+        log("  FAIL: master unresponsive after two PRC records — the decode or the "
+            "PRC_BRIDGE_FLAG hand-off to the slave hung")
+        return False
+
+    full = _prc_report(_prc_record(KC_A, 0, 0, 0, 40, 72, b""))
+    raw.write_reports([full])
+    log("sent a full-frame 72x40 PRC record with an empty payload (2880 pixels decoded)")
+    if not _master_alive(raw, log):
+        log("  FAIL: master unresponsive after a full-frame PRC decode")
+        return False
+
+    for label, report in _prc_malformed_reports():
+        raw.write_reports([report])
+        log(f"sent a malformed PRC record: {label}")
+        if not _master_alive(raw, log):
+            log(f"  FAIL: master unresponsive after a malformed record ({label}) — "
+                "prc_parse_record() did not refuse it")
+            return False
+    log("  master still answering GET_ID after every PRC shape")
+    return True
+
+
+def test_prc_malformed_record_is_refused(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """The firmware REFUSES a malformed PRC record, and says so on the console.
+
+    The liveness test above shows a malformed record does not wedge the master; it
+    cannot tell a refusal from a record decoded into garbage. The firmware logs
+    ``Warning: malformed PRC record at byte N`` (uprintf, not debug-gated) when it
+    stops at a record it cannot parse, so the console can. The inverse is checked
+    too: a valid report must produce no such line, or the parser would be refusing
+    good records and every PRC keycap would stay blank. ``needs_console``.
+    """
+    for label, report in _prc_malformed_reports():
+        mark = TAP.mark()
+        raw.write_reports([report])
+        line = TAP.wait_for(PRC_MALFORMED_LINE, mark, timeout=3.0)
+        if line is None:
+            log(f"  FAIL: no '{PRC_MALFORMED_LINE}' line after a record with {label} — "
+                "the firmware accepted a record it must refuse")
+            return False
+        log(f"refused ({label}): {line.strip()}")
+        if not _master_alive(raw, log):
+            return False
+
+    mark = TAP.mark()
+    raw.write_reports([_prc_report(_prc_record(KC_A, 0, *PRC_SQUARE_BOX, PRC_SQUARE),
+                                   _prc_record(KC_P, 0, *PRC_CHECKER_BOX, PRC_CHECKER))])
+    if not _master_alive(raw, log):
+        return False
+    time.sleep(1.0)
+    bad = TAP.find_all(PRC_MALFORMED_LINE, mark) + TAP.find_all("PRC overlay", mark)
+    if bad:
+        log(f"  FAIL: a valid PRC report produced warnings: {bad}")
+        return False
+    log("  a valid 2-record report produced no PRC warning")
+    return True
+
+
 def test_overlay_mapping_widths(raw: RawHID, log: Callable[[str], None]) -> bool:
     """Variable-width overlay mapping (cmd 33, v12) survives every width it uses.
 
@@ -3057,6 +3198,14 @@ TESTS = [
      "fn": test_roi_overlay_keeps_master_alive},
     {"name": "overlay mapping widths 8/9/10/11 (v12 cmd 33)", "fn": test_overlay_mapping_widths,
      "min_protocol": 12},
+    # PRC overlays (cmd 41): real records decoded on both halves, the longest
+    # decode, and the three malformed records. The console twin proves the
+    # malformed ones are REFUSED rather than merely survived.
+    {"name": "PRC overlay records keep master alive (v19 cmd 41)",
+     "fn": test_prc_overlay_keeps_master_alive, "min_protocol": PRC_MIN_PROTOCOL},
+    {"name": "PRC malformed record is refused (v19 cmd 41, console)",
+     "fn": test_prc_malformed_record_is_refused, "min_protocol": PRC_MIN_PROTOCOL,
+     "needs_console": True},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
     # Deliberate bridged-traffic soak + the firmware's own link health counter.
     # After the stress burst (which wants a quiet master) and before the flash

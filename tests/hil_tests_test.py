@@ -246,6 +246,83 @@ class RoiHeaderTest(unittest.TestCase):
         self.assertGreater(got["yy"], hil_tests.SCREEN_HEIGHT)
 
 
+def prc_parse_records(buf: bytes) -> list:
+    """Port of the firmware's prc_parse_record() loop (base/prc_codec.c +
+    receive_prc_overlay_report): records until a keycode of 0, too few bytes for a
+    header, or a record the firmware refuses. Returns (fields, refused_at) where
+    refused_at is the byte offset of a refused record, or None."""
+    out, pos = [], 0
+    while len(buf) - pos >= 6 and buf[pos] != 0:
+        f = int.from_bytes(buf[pos + 1:pos + 6], "big")
+        top, left = (f >> 30) & 0x3F, (f >> 23) & 0x7F
+        h, w, n = ((f >> 17) & 0x3F) + 1, ((f >> 10) & 0x7F) + 1, (f >> 4) & 0x3F
+        if f & 0x0F or top + h > 40 or left + w > 72 or n > len(buf) - pos - 6:
+            return out, pos
+        out.append((buf[pos], (f >> 36) & 0x0F, top, left, h, w, bytes(buf[pos + 6:pos + 6 + n])))
+        pos += 6 + n
+    return out, None
+
+
+class PrcRecordTest(unittest.TestCase):
+    """cmd 41 records as the rig builds them, checked against the firmware parser
+    and against a record the HOST packed (PolyKybdHost tests/util/prc_codec_vectors.json)."""
+
+    def test_matches_a_host_packed_record(self):
+        # Vector "solid 10x10 block": keycode 6, modifier 6, host-packed bytes.
+        rec = hil_tests._prc_record(6, 6, *hil_tests.PRC_SQUARE_BOX, hil_tests.PRC_SQUARE)
+        self.assertEqual(rec.hex(), "06628f122460ffffe512e915")
+        # Vector "8x8 checkerboard": keycode 7, modifier 9.
+        rec = hil_tests._prc_record(7, 9, *hil_tests.PRC_CHECKER_BOX, hil_tests.PRC_CHECKER)
+        self.assertEqual(rec[:6].hex(), "07941e0e1d50")
+
+    def test_every_field_round_trips_through_the_parser(self):
+        for kc, mod, top, left, h, w in [(4, 0, 0, 0, 1, 1), (0xE7, 15, 39, 71, 1, 1),
+                                         (4, 5, 0, 0, 40, 72), (0x13, 8, 12, 33, 7, 21)]:
+            payload = bytes(range(1, 11))
+            recs, refused = prc_parse_records(hil_tests._prc_record(kc, mod, top, left, h, w, payload))
+            self.assertIsNone(refused)
+            self.assertEqual(recs, [(kc, mod, top, left, h, w, payload)])
+
+    def test_the_two_record_report_parses_as_two_then_stops(self):
+        report = hil_tests._prc_report(
+            hil_tests._prc_record(hil_tests.KC_A, 0, *hil_tests.PRC_SQUARE_BOX, hil_tests.PRC_SQUARE),
+            hil_tests._prc_record(hil_tests.KC_P, 0, *hil_tests.PRC_CHECKER_BOX, hil_tests.PRC_CHECKER))
+        self.assertEqual(report[:2], bytes([ord("P"), 41]))
+        # The HID layer zero-pads to 62 bytes; the firmware stops at the padding.
+        recs, refused = prc_parse_records(report[2:].ljust(hil_tests.PRC_REPORT_BYTES, b"\0"))
+        self.assertIsNone(refused)
+        self.assertEqual([r[0] for r in recs], [hil_tests.KC_A, hil_tests.KC_P])
+
+    def test_a_report_refuses_records_that_do_not_fit(self):
+        rec = hil_tests._prc_record(4, 0, 0, 0, 40, 72, bytes(56))   # 62 bytes: fits exactly
+        self.assertEqual(len(hil_tests._prc_report(rec)), 64)
+        with self.assertRaises(ValueError):
+            hil_tests._prc_report(rec, hil_tests._prc_record(4, 0, 0, 0, 1, 1, b""))
+
+    def test_the_full_frame_record_is_accepted(self):
+        recs, refused = prc_parse_records(hil_tests._prc_record(4, 0, 0, 0, 40, 72, b""))
+        self.assertIsNone(refused)
+        self.assertEqual(recs[0][4:6], (40, 72))
+
+    def test_every_malformed_report_is_refused_at_its_first_record(self):
+        labels = []
+        for label, report in hil_tests._prc_malformed_reports():
+            self.assertEqual(report[:2], bytes([ord("P"), 41]), label)
+            recs, refused = prc_parse_records(report[2:].ljust(hil_tests.PRC_REPORT_BYTES, b"\0"))
+            self.assertEqual((recs, refused), ([], 0), label)
+            labels.append(label)
+        self.assertEqual(len(labels), 3)
+
+    def test_both_tests_are_registered_and_gated_on_v19(self):
+        by_name = {t["fn"].__name__: t for t in hil_tests.TESTS}
+        alive = by_name["test_prc_overlay_keeps_master_alive"]
+        refused = by_name["test_prc_malformed_record_is_refused"]
+        self.assertEqual(alive["min_protocol"], 19)
+        self.assertEqual(refused["min_protocol"], 19)
+        self.assertTrue(refused.get("needs_console"))
+        self.assertFalse(alive.get("needs_console", False))
+
+
 class TwoPacketOverlayTest(unittest.TestCase):
     """The compressed-overlay stream must genuinely need the cmd-17 continuation."""
 
