@@ -361,6 +361,38 @@ class IconFillReportTest(unittest.TestCase):
         self.assertIsNone(hil_tests._icon_fill_verdict(bytes([0x50, 42, ord("?"), 0])))
 
 
+class IconFillCleanupTest(unittest.TestCase):
+    """The rig test must clear the pool slot it wrote, and a cleanup the keyboard
+    does not ACK must fail it (Sourcery on ctnd#101)."""
+
+    class _Raw:
+        def __init__(self, cleanup_ok):
+            self.cleanup_ok = cleanup_ok
+            self.sent = []
+
+        def send(self, data, *a, **k):
+            self.sent.append(bytes(data))
+            cmd = data[1]
+            if cmd == hil_tests.CMD_GET_ID:
+                return (b"P\x06.Split72 1.2.0 P20 HW1 \x00V\x09" + bytes(18)).ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_FILL_POOL_FROM_ICON:
+                return bytes([0x50, cmd, ord("!"), 0]).ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_OVERLAY_FLAGS_ON:
+                return bytes([0x50, cmd, ord(".") if self.cleanup_ok else ord("!")]).ljust(64, b"\x00")
+            return None
+
+    def test_passes_and_clears_the_pool(self):
+        raw = self._Raw(cleanup_ok=True)
+        self.assertTrue(hil_tests.test_icon_fill_replies(raw, lambda *_a: None))
+        cleanup = [d for d in raw.sent if d[1] == hil_tests.CMD_OVERLAY_FLAGS_ON]
+        self.assertEqual(len(cleanup), 1)
+        self.assertTrue(cleanup[0][2] & (1 << 5), "RESET_BUFFERS clears the filled slot")
+
+    def test_a_refused_cleanup_fails_the_test(self):
+        self.assertFalse(hil_tests.test_icon_fill_replies(self._Raw(cleanup_ok=False),
+                                                          lambda *_a: None))
+
+
 class TwoPacketOverlayTest(unittest.TestCase):
     """The compressed-overlay stream must genuinely need the cmd-17 continuation."""
 

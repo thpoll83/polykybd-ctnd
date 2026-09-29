@@ -1814,6 +1814,9 @@ def _overlay_map_w_report(width: int) -> tuple[bytes, int]:
 ICON_FILL_MIN_PROTOCOL = 20
 ICONS_BUNDLE_SLOT      = 8
 NUM_OVERLAY_SLOTS      = 600
+# cmd 11 cleanup: RESET_BUFFERS (1<<5, base/com.h) clears the pool the fill wrote,
+# on top of the mapping + usage reset the other overlay tests use. Self-clearing.
+ICON_FILL_CLEANUP_BITS = OVERLAY_MAPPING_RESET_BITS | (1 << 5)
 
 
 def _icon_fill_report(pairs: list[tuple[int, int]], width: int) -> bytes:
@@ -1852,8 +1855,10 @@ def test_icon_fill_replies(raw: RawHID, log: Callable[[str], None]) -> bool:
 
     ⚠️ Pixels are not checked: nothing reads the pool back. The blit and the pair
     decoding are the firmware unit test's job (``make test:polykybd_icon_lib``).
-    Side effect undone in a finally: the mapping and usage bits go back to the
-    power-on identity (cmd 11 ``MAPPING_RESET|USAGE_RESET``).
+    Side effects undone in a finally, and a cleanup the keyboard does not ACK
+    fails the test: cmd 11 ``RESET_BUFFERS|MAPPING_RESET|USAGE_RESET`` clears the
+    pool slot the fill wrote (there is no way to read the old image back) and
+    returns the mapping and usage bits to the power-on identity.
     """
     response = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
     versions = parse_fontpack_versions(response)
@@ -1871,6 +1876,7 @@ def test_icon_fill_replies(raw: RawHID, log: Callable[[str], None]) -> bool:
         ("pool slot 700 as pair 1", _icon_fill_report([(0, 0), (NUM_OVERLAY_SLOTS + 100, 0)], 10),
          ("!", 0)),
     ]
+    passed = False
     try:
         for label, report, want in cases:
             got = _icon_fill_verdict(raw.send(report))
@@ -1878,9 +1884,14 @@ def test_icon_fill_replies(raw: RawHID, log: Callable[[str], None]) -> bool:
             if got != want:
                 log(f"  FAIL: {label} answered {got}, expected {want}")
                 return False
-        return _master_alive(raw, log)
+        passed = _master_alive(raw, log)
     finally:
-        raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON, OVERLAY_MAPPING_RESET_BITS]))
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON,
+                                  ICON_FILL_CLEANUP_BITS]))
+        cleaned = _resp_ok(restore, CMD_OVERLAY_FLAGS_ON, lambda *_a: None, expect_status=ACK)
+        log("  reset pool, mapping and usage bits: "
+            + ("ok" if cleaned else "FAILED — rig left with the filled slot until next boot"))
+    return passed and cleaned
 
 
 # --- PRC overlays (cmd 41, protocol v19) ----------------------------------------
