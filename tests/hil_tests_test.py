@@ -331,6 +331,68 @@ class PrcRecordTest(unittest.TestCase):
         self.assertFalse(alive.get("needs_console", False))
 
 
+class IconFillReportTest(unittest.TestCase):
+    """cmd 42's report and verdict, pinned off the rig (the firmware's twin is
+    base/tests/icon_lib_tests.cpp)."""
+
+    def _values(self, report, width):
+        bits = int.from_bytes(report[3:], "little")
+        n = (hil_tests.OVERLAY_MAP_W_BYTES * 8 // width)
+        return [(bits >> (i * width)) & ((1 << width) - 1) for i in range(n)]
+
+    def test_the_header_names_the_command_and_the_width(self):
+        r = hil_tests._icon_fill_report([(3, 7)], 9)
+        self.assertEqual(r[:3], bytes([hil_tests.POLY_CHANNEL, 42, 9]))
+        self.assertEqual(len(r), 64)
+
+    def test_pairs_are_padded_by_repeating_the_last(self):
+        for width in (8, 9, 10, 11):
+            vals = self._values(hil_tests._icon_fill_report([(1, 2), (700, 5)], width), width)
+            pairs = list(zip(vals[0::2], vals[1::2]))
+            self.assertEqual(pairs[0], (1, 2 & ((1 << width) - 1)))
+            if width >= 10:
+                self.assertEqual(set(pairs[1:]), {(700, 5)})
+
+    def test_the_verdict_is_parsed_and_anything_else_is_None(self):
+        self.assertEqual(hil_tests._icon_fill_verdict(bytes([0x50, 42, ord("."), 0xFF]) + bytes(60)), (".", 0xFF))
+        self.assertEqual(hil_tests._icon_fill_verdict(bytes([0x50, 42, ord("!"), 1]) + bytes(60)), ("!", 1))
+        self.assertIsNone(hil_tests._icon_fill_verdict(None))
+        self.assertIsNone(hil_tests._icon_fill_verdict(bytes([0x50, 41, ord("."), 0])))
+        self.assertIsNone(hil_tests._icon_fill_verdict(bytes([0x50, 42, ord("?"), 0])))
+
+
+class IconFillCleanupTest(unittest.TestCase):
+    """The rig test must clear the pool slot it wrote, and a cleanup the keyboard
+    does not ACK must fail it (Sourcery on ctnd#101)."""
+
+    class _Raw:
+        def __init__(self, cleanup_ok):
+            self.cleanup_ok = cleanup_ok
+            self.sent = []
+
+        def send(self, data, *a, **k):
+            self.sent.append(bytes(data))
+            cmd = data[1]
+            if cmd == hil_tests.CMD_GET_ID:
+                return (b"P\x06.Split72 1.2.0 P20 HW1 \x00V\x09" + bytes(18)).ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_FILL_POOL_FROM_ICON:
+                return bytes([0x50, cmd, ord("!"), 0]).ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_OVERLAY_FLAGS_ON:
+                return bytes([0x50, cmd, ord(".") if self.cleanup_ok else ord("!")]).ljust(64, b"\x00")
+            return None
+
+    def test_passes_and_clears_the_pool(self):
+        raw = self._Raw(cleanup_ok=True)
+        self.assertTrue(hil_tests.test_icon_fill_replies(raw, lambda *_a: None))
+        cleanup = [d for d in raw.sent if d[1] == hil_tests.CMD_OVERLAY_FLAGS_ON]
+        self.assertEqual(len(cleanup), 1)
+        self.assertTrue(cleanup[0][2] & (1 << 5), "RESET_BUFFERS clears the filled slot")
+
+    def test_a_refused_cleanup_fails_the_test(self):
+        self.assertFalse(hil_tests.test_icon_fill_replies(self._Raw(cleanup_ok=False),
+                                                          lambda *_a: None))
+
+
 class TwoPacketOverlayTest(unittest.TestCase):
     """The compressed-overlay stream must genuinely need the cmd-17 continuation."""
 
