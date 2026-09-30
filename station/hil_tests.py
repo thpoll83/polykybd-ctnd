@@ -2563,7 +2563,10 @@ def describe_crash_record(body: bytes) -> str:
     so a fresh record failed the run while destroying the one thing that says
     where the board stopped. A BOOT-phase argument is ``step << 8 | sub`` (sub
     0xE1..0xE3 = the status-panel paint, the keycap logo, the final dwell), so
-    it is printed as ``step.sub`` to match ``polyctl crash show``."""
+    it is printed as ``step.sub`` to match ``polyctl crash show``. Bit 12 is not
+    part of the step: boot_diag.c sets it once core1 has reached core1_entry()
+    (on the sub-step paint marks, and on 0xE1..0xE3 since fw 1.3.2), so 0x15E2
+    prints as ``boot 5.0xE2 core1=1``, not ``boot 21.0xE2``."""
     import struct
     rec = body[1:1 + struct.calcsize(_CRASH_REC_FMT)]
     if len(rec) < struct.calcsize(_CRASH_REC_FMT):
@@ -2571,7 +2574,8 @@ def describe_crash_record(body: bytes) -> str:
     (_magic, kind, core, consecutive, reset_reason, pc, lr, sp, xpsr, icsr,
      uptime_ms, phase, arg, fw, _crc) = struct.unpack(_CRASH_REC_FMT, rec)
     if phase == 1 and arg & 0xFF00:
-        where = f"boot {arg >> 8}.0x{arg & 0xFF:02X}"
+        where = (f"boot {(arg >> 8) & 0x0F}.0x{arg & 0xFF:02X} "
+                 f"core1={(arg >> 12) & 1}")
     else:
         where = f"{_CRASH_PHASES.get(phase, phase)} arg=0x{arg:04X}"
     return (f"kind={_CRASH_KINDS.get(kind, kind)} phase={where} core={core} "

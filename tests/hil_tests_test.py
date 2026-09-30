@@ -661,6 +661,13 @@ class CrashRecordTest(unittest.TestCase):
         for want in ("pc=0x10001234", "lr=0x10005678", "sp=0x20040FF0", "xpsr=0x21000003"):
             self.assertIn(want, msg)
 
+    def test_boot_core1_flag_is_not_part_of_the_step(self):
+        # 0x15E2: step 5 logo draw with core1 in core1_entry() (bit 12).
+        msg = hil_tests.describe_crash_record(self._body(3, 1, 0x15E2))
+        self.assertIn("phase=boot 5.0xE2 core1=1", msg)
+        msg = hil_tests.describe_crash_record(self._body(3, 1, 0x05E2))
+        self.assertIn("phase=boot 5.0xE2 core1=0", msg)
+
     def test_non_boot_phase_prints_the_raw_argument(self):
         msg = hil_tests.describe_crash_record(self._body(1, 3, 0x0015))
         self.assertIn("kind=hardfault", msg)
