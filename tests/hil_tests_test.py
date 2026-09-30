@@ -393,6 +393,65 @@ class IconFillCleanupTest(unittest.TestCase):
                                                           lambda *_a: None))
 
 
+class MappingFlagsTest(unittest.TestCase):
+    """The v21 rig test against a model of each decoder: a v21 firmware masks the
+    width byte with 0x1F, a v20 one reads it whole."""
+
+    class _Raw:
+        def __init__(self, mask, cleanup_ok=True, console=True):
+            self.mask, self.cleanup_ok, self.console = mask, cleanup_ok, console
+            self.sent = []
+
+        def write_reports(self, reports):
+            from station.console_log import TAP
+            for r in reports:
+                self.sent.append(bytes(r))
+                width = r[2] & self.mask
+                if self.console and not 8 <= width <= 16:
+                    TAP.feed(f"{hil_tests.MAPPING_BAD_WIDTH_LINE} {width}\n")
+
+        def send(self, data, *a, **k):
+            self.sent.append(bytes(data))
+            cmd = data[1]
+            if cmd == hil_tests.CMD_GET_ID:
+                return b"P\x06.Split72 1.3.0 P21 HW1 \x00".ljust(64, b"\x00")
+            if cmd in (hil_tests.CMD_OVERLAY_FLAGS_ON, hil_tests.CMD_OVERLAY_FLAGS_OFF):
+                return bytes([0x50, cmd, ord(".") if self.cleanup_ok else ord("!")]).ljust(64, b"\x00")
+            return None
+
+    def setUp(self):
+        self._settle = hil_tests.PRC_SETTLE_S
+        hil_tests.PRC_SETTLE_S = 0.2
+
+    def tearDown(self):
+        hil_tests.PRC_SETTLE_S = self._settle
+
+    def _run(self, raw):
+        return hil_tests.test_mapping_flags_ride_cmd_33(raw, lambda *_a: None)
+
+    def test_a_v21_decoder_passes_and_cleans_up(self):
+        raw = self._Raw(mask=0x1F)
+        self.assertTrue(self._run(raw))
+        flagged = next(r for r in raw.sent if r[1] == hil_tests.CMD_SEND_OVERLAY_MAPPING_W)
+        self.assertEqual(flagged[2], 0x60 | 9)
+        off = [r for r in raw.sent if r[1] == hil_tests.CMD_OVERLAY_FLAGS_OFF]
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0][2], hil_tests.DISPLAY_OVERLAYS_BIT | hil_tests.MIRROR_OVERLAYS_BIT)
+
+    def test_a_v20_decoder_fails(self):
+        self.assertFalse(self._run(self._Raw(mask=0xFF)))
+
+    def test_a_silent_console_fails_rather_than_passing(self):
+        self.assertFalse(self._run(self._Raw(mask=0x1F, console=False)))
+
+    def test_a_refused_cleanup_fails(self):
+        self.assertFalse(self._run(self._Raw(mask=0x1F, cleanup_ok=False)))
+
+    def test_entry_is_gated_on_v21_and_the_console(self):
+        entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_mapping_flags_ride_cmd_33)
+        self.assertEqual(entry["min_protocol"], 21)
+        self.assertTrue(entry.get("needs_console"))
+
 class TwoPacketOverlayTest(unittest.TestCase):
     """The compressed-overlay stream must genuinely need the cmd-17 continuation."""
 
