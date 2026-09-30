@@ -2101,6 +2101,71 @@ def test_overlay_mapping_widths(raw: RawHID, log: Callable[[str], None]) -> bool
             f"{'ok' if ok else 'FAILED — rig left with test mappings until next boot'}")
 
 
+# --- Mapping flags on cmd 33 (protocol v21) ----------------------------------------
+#
+# Bits 5/6 of cmd 33's width byte run the enable / prepare steps that used to take
+# their own cmd 11 reports; the firmware masks the width with 0x1F before decoding.
+MAPPING_FLAGS_MIN_PROTOCOL = 21
+MAPPING_FLAG_SHOW          = 0x20   # OVERLAY_MAP_W_SHOW: DISPLAY_OVERLAYS after the pairs
+MAPPING_FLAG_RESET         = 0x40   # OVERLAY_MAP_W_RESET: the prepare step before them
+MAPPING_BAD_WIDTH_LINE     = "REJECTED overlay mapping report: bad width"
+MIRROR_OVERLAYS_BIT        = 1 << 2 # overlay_flag MIRROR_OVERLAYS (base/com.h)
+
+
+def test_mapping_flags_ride_cmd_33(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """cmd 33 (v21) decodes a report whose width byte carries the prepare and
+    enable flags, and still refuses a bad width hidden under them.
+
+    A firmware older than v21 reads 0x60|9 as width 105 and drops the report with
+    ``REJECTED overlay mapping report: bad width 105``: the host would then send
+    every warm switch's mappings into nothing, and every keycap would keep the old
+    app's icons. So the firmware must print no such line for a flagged report. The
+    width-7 report is the positive control: it must produce the line, which proves
+    the console is live at the moment the silence is measured. ``needs_console``.
+
+    Nothing reads the mapping or the overlay flags back, so the test cannot show
+    that the reset and the enable RAN, only that the report was accepted. Cleanup
+    in a finally: cmd 11 resets mapping and usage, cmd 12 clears the DISPLAY and
+    MIRROR bits the two flags set, and a cleanup the keyboard does not ACK fails
+    the test.
+    """
+    report, pairs = _overlay_map_w_report(9)
+    flagged = bytes([report[0], report[1], report[2] | MAPPING_FLAG_RESET | MAPPING_FLAG_SHOW]) + report[3:]
+    passed = False
+    try:
+        mark = TAP.mark()
+        raw.write_reports([flagged])
+        log(f"sent cmd 33 width byte {flagged[2]:#04x} (reset + show, width 9): {pairs} pairs")
+        if not _master_alive(raw, log):
+            return False
+        line = TAP.wait_for(MAPPING_BAD_WIDTH_LINE, mark, timeout=PRC_SETTLE_S)
+        if line is not None:
+            log(f"  FAIL: the flagged report was refused: {line.strip()} — the width "
+                "byte is not masked (pre-v21 decoder)")
+            return False
+        log(f"  no bad-width line within {PRC_SETTLE_S:.0f}s")
+
+        hidden = bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W,
+                        MAPPING_FLAG_RESET | 7]) + bytes(OVERLAY_MAP_W_BYTES)
+        mark = TAP.mark()
+        raw.write_reports([hidden])
+        line = TAP.wait_for(MAPPING_BAD_WIDTH_LINE, mark, timeout=PRC_SETTLE_S)
+        if line is None:
+            log("  FAIL: no bad-width line for width 7 under the reset flag — either "
+                "the console is not live or the mask let a bad width through")
+            return False
+        log(f"  width 7 under the reset flag refused: {line.strip()}")
+        passed = _master_alive(raw, log)
+    finally:
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON, OVERLAY_MAPPING_RESET_BITS]))
+        off = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_OFF,
+                              DISPLAY_OVERLAYS_BIT | MIRROR_OVERLAYS_BIT]))
+        ok = (_resp_ok(restore, CMD_OVERLAY_FLAGS_ON, lambda *_a: None, expect_status=ACK)
+              and _resp_ok(off, CMD_OVERLAY_FLAGS_OFF, lambda *_a: None, expect_status=ACK))
+        log("  reset mapping + usage, cleared DISPLAY/MIRROR: "
+            + ("ok" if ok else "FAILED — rig left with test mappings until next boot"))
+    return passed and ok
+
 # GET_ID stress pass/fail tuning. ``send_repeated`` already retries transient
 # host-side USB errors internally, so each no-answer counted here is a *sustained*
 # silence (~retries x timeout). Two failure shapes must be told apart:
@@ -3295,6 +3360,8 @@ TESTS = [
      "fn": test_roi_overlay_keeps_master_alive},
     {"name": "overlay mapping widths 8/9/10/11 (v12 cmd 33)", "fn": test_overlay_mapping_widths,
      "min_protocol": 12},
+    {"name": "mapping flags ride cmd 33 (v21, console)", "fn": test_mapping_flags_ride_cmd_33,
+     "min_protocol": MAPPING_FLAGS_MIN_PROTOCOL, "needs_console": True},
     # PRC overlays (cmd 41): real records decoded on both halves, the longest
     # decode, and the three malformed records. The console twin proves the
     # malformed ones are REFUSED rather than merely survived.
