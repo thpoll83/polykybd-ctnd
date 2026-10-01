@@ -22,6 +22,7 @@ broken?* The rig has no camera, so it cannot see a keycap. What it can observe:
 | **liveness** after a silent command | send the burst, then a `GET_ID` |
 | a firmware log line | the console tap — **needs `"needs_console": True`** |
 | state surviving a power cycle | runner-level, `FlashController.reset()` |
+| a crash + reboot DURING the test | a single-attempt GET_ID right after: `*` means it rebooted (see `_probe_after_switch`) |
 
 ⚠️ **A silent command can only ever be a liveness guard.** The overlay uploads and
 cmd 33 mapping are no-reply by design and nothing reads the mapping back, so the
@@ -33,6 +34,16 @@ gate, a run where the console did not come up asserts nothing and reports a gree
 it did not earn. Most firmware diagnostics are `debug_enable`-gated (default
 false) and never appear on the rig — check the gate in the firmware source before
 designing around any line. `Split link:` is deliberately ungated.
+
+⚠️ **Reading a reboot needs `attempts=1` on that GET_ID**: the first GET_ID after a
+reboot answers `*`, and a retry inside `send()` consumes it and answers `.`. While the
+master re-enumerates, `send()` RAISES `RuntimeError` (interface not found) rather than
+returning `None`, so poll through the exception for a few seconds.
+⚠️ **The rig can never hold a modifier.** Key injection (cmd 14) needs `debug_enable`,
+which only the physical `DB_TOGG` key sets. So nothing that needs Shift, Caps Lock or
+AltGr held is observable here; the language sweep draws the resting view only (base
+legend + Shift preview + AltGr hint). The firmware's `tools/check_glyph_coverage.py`
+covers the rest statically.
 
 ## 2. Pick the gate
 
