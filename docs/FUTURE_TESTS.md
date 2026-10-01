@@ -64,6 +64,13 @@ unattended rig now has a test. Covered:
   state to the slave (it is in `OVERLAY_SYNCED_STATE_FLAGS`). Restores default.
 - [x] **language round-trip** (cmd 9) — switch to a different language, read back via GET_LANG,
   restore the original in a `finally`. Exercises the `save_user_latin` EEPROM + slave sync path.
+- [x] **every language draws without a crash** (cmd 9 sweep, extended, v16) — switches to each
+  language in the packed list, then a single-attempt GET_ID tells a live master from a rebooted
+  one ('*'), and GET_LANG confirms the switch. Compares both halves' cmd 39 crash records before
+  and after. Added after hy-AM's U+2014 legend (in no font) HardFaulted the master in demo mode,
+  2026-10-01. It draws base, Shift preview and AltGr hint; the Caps column and the held-Shift and
+  held-AltGr views need a modifier held, which waits on GPIO key-matrix injection below. The
+  firmware's `tools/check_glyph_coverage.py` checks all four columns against the fonts on every PR.
 - [x] **plain overlay keeps master alive** (cmd 10) — full uncompressed overlay upload (6
   segments) does not wedge the master; GET_ID still answers. Exercises the uncompressed
   upload + `USER_SYNC_OVERLAY_DATA` split-sync.
@@ -209,6 +216,8 @@ unattended rig now has a test. Covered:
 
 - [ ] **GPIO key-matrix injection** — a way to simulate key presses on either half from the Pi so
   split-link and per-half tests don't need a human. Tracked in `CLAUDE.md` → "What still needs doing".
+  It would also let the language sweep hold Shift, Caps Lock and AltGr, so each layout's other
+  views get drawn on hardware too.
 - [~] **EEPROM read-back / flash-time handedness set** — needed to make language/layer round-trips
   deterministic, and formerly the blocker for any handedness test at all. ⚠️ The READ-BACK half is
   no longer missing for handedness specifically: the boot banner now carries
