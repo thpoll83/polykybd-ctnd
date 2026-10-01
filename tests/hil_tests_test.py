@@ -577,6 +577,8 @@ class SuiteTierGateTest(unittest.TestCase):
             "replay startup animation (cmd 31)",
             "idle engages + Eden screensaver keeps HID alive (cmd 15/28)",
             "split link health under a bridged soak (cmd 21)",
+            # ~160 CHANGE_LANG switches, each an EEPROM write and a full redraw.
+            "every language draws without a crash (cmd 9 sweep)",
         })
 
     def test_the_cheap_new_checks_stay_in_the_default_suite(self):
@@ -910,6 +912,147 @@ class ClassifyHandLine(unittest.TestCase):
         ])
         self.assertTrue(ok, msg)
         self.assertIn("slot=0/1", msg)
+
+
+class LanguageSweepTest(unittest.TestCase):
+    """The every-layout sweep: a reboot must read as a crash (the single-attempt
+    GET_ID that sees '*'), a sweep that stopped early must fail, and a NEW crash
+    record on either half must fail even when every switch looked fine."""
+
+    CODES = ["enUS", "deDE", "hyAM", "kaGE", "roRO"]
+
+    class _Board:
+        """A master that switches language, answers GET_ID with its one-shot
+        fresh-boot marker, and can crash, go silent or NACK on given codes."""
+
+        def __init__(self, crash_on=(), silent_on=(), nack_on=(), unplugged_reads=0):
+            import struct
+            self.lang = "enUS"
+            self.fresh = False
+            self.crash_on, self.silent_on, self.nack_on = set(crash_on), set(silent_on), set(nack_on)
+            self.silent = False
+            self.unplugged = 0
+            self.unplugged_reads = unplugged_reads
+            self.switched = []
+            self.get_id_attempts = []
+            self.records = {0: bytes(hil_tests.CRASH_HID_BODY_LEN), 1: bytes(hil_tests.CRASH_HID_BODY_LEN)}
+            rec = struct.pack(hil_tests._CRASH_REC_FMT, 0x504B4352, 1, 0, 1, 0x22,
+                              0x10015A82, 0x10015A5F, 0x20040F00, 0x21000003, 3,
+                              173066, 2, 0x9103, b"1.4.0\0\0\0", 0)
+            self.crash_body = bytes([hil_tests.CRASH_HID_FLAG_PRESENT]) + rec
+
+        def send(self, data, timeout_ms=3000, attempts=3):
+            cmd = data[1]
+            if self.unplugged:
+                self.unplugged -= 1
+                raise RuntimeError("QMK Raw HID interface not found")
+            if self.silent:
+                return None
+            if cmd == hil_tests.CMD_CHANGE_LANG:
+                code = bytes(data[2:6]).decode("ascii")
+                if code in self.nack_on:
+                    return bytes([POLY_CHANNEL, cmd, hil_tests.NACK])
+                self.lang = code
+                self.switched.append(code)
+                if code in self.crash_on:   # crashes drawing it, reboots
+                    self.fresh = True
+                    self.unplugged = self.unplugged_reads
+                    self.records[0] = self.crash_body
+                if code in self.silent_on:
+                    self.silent = True
+                return bytes([POLY_CHANNEL, cmd, ACK])
+            if cmd == CMD_GET_ID:
+                self.get_id_attempts.append(attempts)
+                status = FRESH_BOOT if self.fresh else ACK
+                self.fresh = False
+                return bytes([POLY_CHANNEL, cmd, status]) + IDENTITY
+            if cmd == hil_tests.CMD_GET_LANG:
+                return bytes([POLY_CHANNEL, cmd, ACK]) + self.lang.encode("ascii") + b"\0"
+            if cmd == hil_tests.CMD_CRASH_RECORD:
+                return bytes([POLY_CHANNEL, cmd, ACK]) + self.records[data[2]]
+            raise AssertionError(f"unexpected cmd {cmd}")
+
+    def sweep(self, board, codes=None):
+        return hil_tests._sweep_languages(board, lambda *_a: None, codes or self.CODES,
+                                          dwell_s=0, reboot_s=0)
+
+    def test_clean_sweep_visits_every_language(self):
+        board = self._Board()
+        results = self.sweep(board)
+        self.assertEqual([c for c, o, _ in results if o == "ok"], self.CODES)
+        self.assertTrue(hil_tests.classify_language_sweep(results, len(self.CODES))[0])
+        # The fresh-boot marker is one-shot: a retried GET_ID would hide a reboot.
+        self.assertEqual(set(board.get_id_attempts), {1})
+
+    def test_a_reboot_is_a_crash_and_stops_the_sweep(self):
+        board = self._Board(crash_on={"hyAM"})
+        results = self.sweep(board)
+        self.assertEqual(results[-1][:2], ("hyAM", "rebooted"))
+        self.assertNotIn("kaGE", board.switched)
+        ok, msg = hil_tests.classify_language_sweep(results, len(self.CODES))
+        self.assertFalse(ok)
+        self.assertIn("hyAM rebooted", msg)
+        self.assertIn("3/5", msg)
+
+    def test_a_reboot_seen_through_re_enumeration_is_still_a_crash(self):
+        # USB drops out while the master reboots; send() raises until it is back.
+        board = self._Board(crash_on={"hyAM"}, unplugged_reads=2)
+        results = hil_tests._sweep_languages(board, lambda *_a: None, self.CODES,
+                                             dwell_s=0, reboot_s=5)
+        self.assertEqual(results[-1][:2], ("hyAM", "rebooted"))
+
+    def test_a_silent_master_is_no_reply(self):
+        results = self.sweep(self._Board(silent_on={"kaGE"}))
+        self.assertEqual(results[-1][:2], ("kaGE", "no-reply"))
+
+    def test_a_nack_is_recorded_and_the_sweep_goes_on(self):
+        results = self.sweep(self._Board(nack_on={"deDE"}))
+        self.assertEqual([o for _, o, _ in results], ["ok", "nack", "ok", "ok", "ok"])
+        ok, msg = hil_tests.classify_language_sweep(results, len(self.CODES))
+        self.assertFalse(ok)
+        self.assertIn("deDE nack", msg)
+
+    def test_an_early_stop_or_an_empty_list_is_not_a_pass(self):
+        ok_rows = [(c, "ok", "") for c in self.CODES[:2]]
+        self.assertFalse(hil_tests.classify_language_sweep(ok_rows, 5)[0])
+        self.assertFalse(hil_tests.classify_language_sweep([], 0)[0])
+
+    def _run_test(self, board):
+        from unittest import mock
+        logged = []
+        with mock.patch.object(hil_tests, "_read_packed_lang_codes", return_value=self.CODES), \
+             mock.patch.object(hil_tests.time, "sleep"):
+            ok = hil_tests.test_language_sweep(board, logged.append)
+        return ok, logged
+
+    def test_full_test_restores_the_language(self):
+        board = self._Board()
+        board.lang = "frFR"
+        ok, _ = self._run_test(board)
+        self.assertTrue(ok)
+        self.assertEqual(board.lang, "frFR")
+
+    def test_full_test_prints_the_new_crash_record(self):
+        board = self._Board(crash_on={"hyAM"})
+        ok, logged = self._run_test(board)
+        self.assertFalse(ok)
+        self.assertEqual(board.lang, "enUS")
+        line = next(ln for ln in logged if "NEW crash record" in ln)
+        self.assertIn("master", line)
+        self.assertIn("pc=0x10015A82", line)
+
+    def test_an_old_record_left_in_place_does_not_fail(self):
+        board = self._Board()
+        board.records[1] = board.crash_body     # archived before the sweep
+        self.assertTrue(self._run_test(board)[0])
+
+    def test_registered_extended_v16_before_the_console_scan(self):
+        names = [t["fn"] for t in hil_tests.TESTS]
+        entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_language_sweep)
+        self.assertEqual(entry["tier"], hil_tests.TIER_EXTENDED)
+        self.assertEqual(entry["min_protocol"], 16)
+        self.assertLess(names.index(hil_tests.test_language_sweep),
+                        names.index(hil_tests.test_no_crash_record))
 
 
 if __name__ == "__main__":

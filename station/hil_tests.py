@@ -1587,6 +1587,152 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         log(f"  restored language to {original!r}: {'ok' if restored else 'FAILED — left changed!'}")
 
 
+# --- every layout drawn once (extended) ---------------------------------------
+#
+# The demo-mode crash of 2026-10-01: hy-AM's Shift legend U+2014 was in no font,
+# the missing-glyph fallback read '!' out of IconsFont (first in g_all_fonts, at
+# U+100000), the glyph index underflowed and the master HardFaulted a few seconds
+# after the demo switched to Armenian. language round-trip above only ever draws
+# ONE other layout, so nothing on the rig had drawn the other 158.
+
+LANG_SWEEP_DWELL_S  = 0.4   # after CHANGE_LANG: let the master redraw its keycaps
+LANG_SWEEP_REBOOT_S = 8.0   # how long a silent master gets to come back as '*'
+
+
+def _crash_record_body(raw: RawHID, which: int):
+    """The cmd 39 reply body ([flags][48-byte record]) for one half, or None."""
+    resp = raw.send(bytes([POLY_CHANNEL, CMD_CRASH_RECORD, which]))
+    if resp is None or len(resp) < 3 + CRASH_HID_BODY_LEN:
+        return None
+    if resp[0] != POLY_CHANNEL or resp[1] != CMD_CRASH_RECORD or resp[2] != ACK:
+        return None
+    return bytes(resp[3:3 + CRASH_HID_BODY_LEN])
+
+
+def _probe_after_switch(raw: RawHID, log: Callable[[str], None],
+                        reboot_s: float = LANG_SWEEP_REBOOT_S) -> str:
+    """'alive', 'rebooted' or 'no-reply' for the master right after a CHANGE_LANG.
+
+    GET_ID goes out with ``attempts=1`` because it consumes the fresh-boot marker:
+    the first GET_ID after a reboot answers '*', and a retry inside send() would
+    swallow it and answer '.', hiding the crash. A reboot also re-enumerates USB,
+    so send() can raise while the interface is gone; that is polled through too."""
+    deadline = time.monotonic() + reboot_s
+    misses = 0
+    while True:
+        try:
+            resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
+        except RuntimeError:
+            resp = None
+        if _resp_ok(resp, CMD_GET_ID, lambda *_a: None, expect_status=None):
+            if resp[2] == FRESH_BOOT:
+                return "rebooted"
+            if misses:
+                log(f"    master answered GET_ID after {misses} miss(es)")
+            return "alive"
+        misses += 1
+        if time.monotonic() >= deadline:
+            return "no-reply"
+        time.sleep(0.5)
+
+
+def classify_language_sweep(results, total: int) -> tuple:
+    """(ok, message) for a sweep. ``results`` is [(code, outcome, detail)] with
+    outcome one of ok / nack / mismatch / rebooted / no-reply. Passes only when
+    EVERY listed language was reached and came back ok — a sweep that stopped
+    early is a fail even if each language it reached was fine. Pure."""
+    bad = [(c, o, d) for c, o, d in results if o != "ok"]
+    msg = f"swept {len(results)}/{total} languages"
+    if bad:
+        msg += ": " + "; ".join(f"{c} {o}" + (f" ({d})" if d else "") for c, o, d in bad)
+    elif len(results) != total:
+        msg += ": stopped early"
+    return (not bad and len(results) == total and total > 0), msg
+
+
+def _sweep_languages(raw: RawHID, log: Callable[[str], None], codes,
+                     dwell_s: float = LANG_SWEEP_DWELL_S,
+                     reboot_s: float = LANG_SWEEP_REBOOT_S):
+    """Switch to each code in turn and check the master survived the redraw.
+
+    Stops at the first reboot or silent master: that language is the finding,
+    and driving a board that just crashed through 100 more switches only adds
+    noise. A NACK or a wrong read-back is recorded and the sweep goes on."""
+    results = []
+    for code in codes:
+        req = bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + code.encode("ascii")
+        resp = _send_with_retry(raw, req, CMD_CHANGE_LANG, log, expect_status=ACK)
+        if not _resp_ok(resp, CMD_CHANGE_LANG, lambda *_a: None, expect_status=ACK):
+            results.append((code, "nack", f"reply {bytes(resp[:3])!r}" if resp else "no reply"))
+            continue
+        time.sleep(dwell_s)
+        state = _probe_after_switch(raw, log, reboot_s)
+        if state != "alive":
+            results.append((code, state, "the master crashed drawing this layout"
+                            if state == "rebooted" else "the master stopped answering"))
+            log(f"  FAIL at {code!r}: {state}")
+            break
+        check = _send_with_retry(raw, bytes([POLY_CHANNEL, CMD_GET_LANG]), CMD_GET_LANG, log)
+        now = _reply_text(check) if _resp_ok(check, CMD_GET_LANG, lambda *_a: None,
+                                             expect_status=None) else ""
+        if now != code:
+            results.append((code, "mismatch", f"read back {now!r}"))
+            continue
+        results.append((code, "ok", ""))
+    return results
+
+
+def test_language_sweep(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Every layout in the packed list (cmd 27) is switched to (cmd 9) and drawn.
+
+    After each switch the master gets ``LANG_SWEEP_DWELL_S`` to redraw, then a
+    single-attempt GET_ID tells a live master ('.') from one that crashed and
+    rebooted ('*'), and GET_LANG confirms the switch. The two halves' crash
+    records (cmd 39) are read before and after, so a fault that rebooted quietly,
+    or one on the slave the master pulled, still fails here and is printed. The
+    console scan at the end of the suite covers a slave fault the master never
+    pulled. The original language is restored in a ``finally``.
+
+    What it draws: each keycap's base legend plus the Shift preview and the AltGr
+    hint drawn beside it (where the layout does not hide them), so three of the
+    four LUT columns per layout. Caps only
+    shows with Caps Lock on, and the rig cannot hold a modifier: key injection
+    (cmd 14) needs debug mode, which only the physical DB_TOGG key sets. The
+    firmware's tools/check_glyph_coverage.py checks all four columns of all
+    layouts against the fonts on every PR; this test is the hardware half.
+
+    EXTENDED tier: about 160 switches at roughly half a second each, and each
+    CHANGE_LANG writes the language to EEPROM (save_user_latin)."""
+    cur = _send_with_retry(raw, bytes([POLY_CHANNEL, CMD_GET_LANG]), CMD_GET_LANG, log)
+    if not _resp_ok(cur, CMD_GET_LANG, log):
+        log("  FAIL: could not read the current language")
+        return False
+    original = _reply_text(cur)
+    codes = _read_packed_lang_codes(raw, log)
+    if not codes:
+        log("  FAIL: could not read the packed language list")
+        return False
+    log(f"  original language: {original!r}; sweeping {len(codes)} languages")
+
+    before = {which: _crash_record_body(raw, which) for which in (0, 1)}
+    try:
+        results = _sweep_languages(raw, log, codes)
+    finally:
+        restore_req = bytes([POLY_CHANNEL, CMD_CHANGE_LANG]) + original.encode("ascii")
+        restore = _send_with_retry(raw, restore_req, CMD_CHANGE_LANG, log, expect_status=ACK)
+        restored = _resp_ok(restore, CMD_CHANGE_LANG, log, expect_status=ACK)
+        log(f"  restored language to {original!r}: {'ok' if restored else 'FAILED, left changed'}")
+
+    ok, msg = classify_language_sweep(results, len(codes))
+    log(("  " if ok else "  FAIL: ") + msg)
+    for which, side in ((0, "master"), (1, "slave")):
+        after = _crash_record_body(raw, which)
+        if after is not None and after != before[which] and after[0] & CRASH_HID_FLAG_PRESENT:
+            log(f"  FAIL: the {side} half has a NEW crash record: {describe_crash_record(after)}")
+            ok = False
+    return ok
+
+
 # --- upload / soak regression guards ------------------------------------------
 
 def test_plain_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -3353,6 +3499,11 @@ TESTS = [
      "needs_console": True, "tier": TIER_EXTENDED},
     # picks a second language from the packed list (cmd 27) — protocol v2+ only.
     {"name": "language round-trip",             "fn": test_language_round_trip, "min_protocol": 2},
+    # Every layout, one after another: the demo-mode crash (hy-AM, 2026-10-01) was
+    # one layout's legend drawing a glyph no font had. v16 for the cmd 39 crash
+    # records it compares; EXTENDED for the ~160 switches.
+    {"name": "every language draws without a crash (cmd 9 sweep)", "fn": test_language_sweep,
+     "min_protocol": 16, "tier": TIER_EXTENDED},
     {"name": "plain overlay keeps master alive", "fn": test_plain_overlay_keeps_master_alive, "min_protocol": 11},
     {"name": "compressed overlay keeps master alive (core1)", "fn": test_compressed_overlay_keeps_master_alive},
     # The packet shapes the single-packet guards above never reach: the cmd-17
