@@ -1775,19 +1775,25 @@ def _wait_for_reboot(raw: RawHID, deadline_s: float) -> str:
     """'fresh' (GET_ID answered '*'), 'back' ('.' after the interface went away,
     so the '*' was lost to a read), 'not-rebooted' ('.' with no gap at all) or
     'no-reply'. Single-attempt GET_ID, polled through re-enumeration: see
-    _probe_after_switch for why a retry would hide the marker."""
+    _probe_after_switch for why a retry would hide the marker.
+
+    Only a MISSING interface counts as the board having gone away: send() raises
+    while the master re-enumerates. A read timeout with the interface present is
+    just a slow reply, and a '.' after one proves no reboot. Any status byte but
+    '*' or '.' is a failed probe, never evidence."""
     deadline = time.monotonic() + deadline_s
     gone = False
     while time.monotonic() < deadline:
         try:
             resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 — interface missing or torn down mid-call
+            gone = True
             resp = None
         if _resp_ok(resp, CMD_GET_ID, lambda *_a: None, expect_status=None):
             if resp[2] == FRESH_BOOT:
                 return "fresh"
-            return "back" if gone else "not-rebooted"
-        gone = True
+            if resp[2] == ACK:
+                return "back" if gone else "not-rebooted"
         time.sleep(0.5)
     return "no-reply"
 
@@ -1810,9 +1816,18 @@ def test_boot_loop(raw: RawHID, log: Callable[[str], None]) -> bool:
     log(f"  {rounds} reboot(s)")
     boot_times = []
     for n in range(1, rounds + 1):
-        resp = raw.send(bytes([POLY_CHANNEL, CMD_REBOOT]))
-        if not _resp_ok(resp, CMD_REBOOT, log, expect_status=ACK):
-            log(f"  FAIL: round {n}: the reboot request was not ACKed")
+        # ⚠️ attempts=1: send() re-writes the request on a read timeout, and a
+        # second cmd 43 landing on the rebooting board is a second reboot inside
+        # one counted round. A lost ACK is not a failure by itself: the wait
+        # below tells a board that rebooted from one that did not.
+        try:
+            resp = raw.send(bytes([POLY_CHANNEL, CMD_REBOOT]), attempts=1)
+        except Exception:  # noqa: BLE001 — it may already be gone
+            resp = None
+        if resp is None:
+            log(f"    round {n}: no ACK to the reboot request (lost, or reset first)")
+        elif not _resp_ok(resp, CMD_REBOOT, log, expect_status=ACK):
+            log(f"  FAIL: round {n}: the reboot request was refused")
             return False
         t0 = time.monotonic()
         state = _wait_for_reboot(raw, BOOT_LOOP_RETURN_S)

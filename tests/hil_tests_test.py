@@ -1072,9 +1072,14 @@ class BootLoopTest(unittest.TestCase):
         """GET_ID answers '*' once after each reboot, after `gone` exchanges
         in which the interface is missing (RuntimeError)."""
 
-        def __init__(self, crash_on=None, hang_on=None, slave_crash_on=None, gone=2):
+        def __init__(self, crash_on=None, hang_on=None, slave_crash_on=None, gone=2,
+                     ack_lost=False, slow=0, bad_status=0):
             self.crash_on, self.hang_on, self.slave_crash_on = crash_on, hang_on, slave_crash_on
             self.gone_per_boot = gone
+            self.ack_lost = ack_lost          # the reboot happens, its ACK never arrives
+            self.slow = slow                  # GET_ID read timeouts with the interface present
+            self.bad_status = bad_status      # GET_ID answers '!' this many times first
+            self.reboot_writes = 0
             self.reboots = 0
             self._gone = 0
             self._fresh = False
@@ -1084,18 +1089,28 @@ class BootLoopTest(unittest.TestCase):
         def send(self, data, timeout_ms=3000, attempts=3):
             cmd = data[1]
             if cmd == hil_tests.CMD_REBOOT:
+                # send() re-writes the request once per attempt while no reply comes.
+                self.reboot_writes += attempts if self.ack_lost else 1
                 self.reboots += 1
                 self._gone, self._fresh = self.gone_per_boot, True
                 fresh = BootLoopTest._body(0x03)
                 old = BootLoopTest._body(0x01)
                 self.master = fresh if self.reboots == self.crash_on else (old if self.master else None)
                 self.slave = fresh if self.reboots == self.slave_crash_on else None
+                if self.ack_lost:
+                    return None
                 return bytes([POLY_CHANNEL, cmd, ACK]).ljust(64, b"\x00")
             if self.hang_on is not None and self.reboots >= self.hang_on:
                 raise RuntimeError("interface not found")
             if self._gone:
                 self._gone -= 1
                 raise RuntimeError("interface not found")
+            if cmd == hil_tests.CMD_GET_ID and self.slow:
+                self.slow -= 1
+                return None
+            if cmd == hil_tests.CMD_GET_ID and self.bad_status:
+                self.bad_status -= 1
+                return bytes([POLY_CHANNEL, cmd, ord("!")]).ljust(64, b"\x00")
             if cmd == hil_tests.CMD_GET_ID:
                 status = hil_tests.FRESH_BOOT if self._fresh else ACK
                 self._fresh = False
@@ -1180,6 +1195,32 @@ class BootLoopTest(unittest.TestCase):
             return r
         board.send = send
         self.assertTrue(self._run(board, 2))
+
+    def test_a_lost_ack_does_not_resend_the_reboot(self):
+        # send() re-writes on a timeout; a second cmd 43 is a second reboot.
+        board = self.FakeBoard(ack_lost=True)
+        self.assertTrue(self._run(board, 3))
+        self.assertEqual(board.reboot_writes, 3)
+        self.assertIn("no ACK to the reboot request", "\n".join(self.lines))
+
+    def test_a_slow_reply_is_not_a_reboot(self):
+        # A read timeout with the interface present, then '.': nothing went away.
+        board = self.FakeBoard(gone=0, slow=2)
+        orig = board.send
+
+        def send(data, *a, **k):
+            r = orig(data, *a, **k)
+            if data[1] == hil_tests.CMD_REBOOT:
+                board._fresh = False
+            return r
+        board.send = send
+        self.assertFalse(self._run(board, 1))
+        self.assertIn("without ever going away", "\n".join(self.lines))
+
+    def test_an_unexpected_status_is_not_evidence(self):
+        board = self.FakeBoard(bad_status=2)
+        self.assertTrue(self._run(board, 1))
+        self.assertIn("(fresh)", "\n".join(self.lines))
 
     def test_classifier(self):
         ok, _ = hil_tests.classify_boot_round(self._body(0x01), None)
