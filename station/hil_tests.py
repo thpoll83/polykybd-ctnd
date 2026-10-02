@@ -56,6 +56,7 @@ Run them via the CLI::
 
 See ``docs/FUTURE_TESTS.md`` for the planned-but-not-yet-implemented backlog.
 """
+import os
 import re
 import time
 from typing import Callable
@@ -102,6 +103,7 @@ CMD_MACRO_LOOK              = 38  # get/set one macro's whole keycap look (v15+)
 CMD_CRASH_RECORD            = 39  # read/clear the firmware crash record (v16+)
 CMD_SEND_PRC_OVERLAY        = 41  # PRC (Predictive Range Coding) overlay records (v19+; no ACK)
 CMD_FILL_POOL_FROM_ICON     = 42  # fill pool slots from the flash icon library (v20+; REPLIED)
+CMD_REBOOT                  = 43  # reboot both halves, nothing persisted (v22+; ACK before reset)
 MACRO_LOOK_HEADER           = 9   # id, caption length, style, 4 little-endian icon bytes
 MACRO_STYLE_INDEX           = 0   # "M3" above the caption -- the default
 MACRO_STYLE_ICON            = 1   # a chosen glyph above the caption
@@ -1731,6 +1733,114 @@ def test_language_sweep(raw: RawHID, log: Callable[[str], None]) -> bool:
             log(f"  FAIL: the {side} half has a NEW crash record: {describe_crash_record(after)}")
             ok = False
     return ok
+
+
+# --- boot loop: reboot until a boot goes wrong (cmd 43, v22) --------------------
+
+REBOOT_MIN_PROTOCOL = 22
+BOOT_LOOP_DEFAULT_ROUNDS = 20
+BOOT_LOOP_MAX_ROUNDS = 50
+BOOT_LOOP_RETURN_S = 60.0    # a boot plus one watchdog recovery (8 s) fits easily
+BOOT_LOOP_SLAVE_WAIT_S = 8.0  # the master pulls the slave's record 2-6 s after link-up
+
+
+def boot_loop_rounds(env=None) -> int:
+    """Rounds to run: HIL_BOOT_LOOP_ROUNDS if set and sane, else the default,
+    clamped to 1..BOOT_LOOP_MAX_ROUNDS. Pure."""
+    env = os.environ if env is None else env
+    try:
+        n = int(env.get("HIL_BOOT_LOOP_ROUNDS", BOOT_LOOP_DEFAULT_ROUNDS))
+    except (TypeError, ValueError):
+        n = BOOT_LOOP_DEFAULT_ROUNDS
+    return max(1, min(BOOT_LOOP_MAX_ROUNDS, n))
+
+
+def classify_boot_round(master_body, slave_body) -> tuple:
+    """(ok, detail) for the cmd 39 bodies read after one reboot. Pure.
+
+    A deliberate reboot never archives a record (the firmware's shutdown_user()
+    disarms the watchdog first), so a FRESH record on either half means this boot
+    went wrong: typically the late-boot guard recovering a stall, which leaves
+    `kind=watchdog phase=boot`. An unreadable master body is a failure too; a
+    missing slave body is not, since the master may not have pulled it yet."""
+    if master_body is None:
+        return False, "master crash record unreadable"
+    for side, body in (("master", master_body), ("slave", slave_body)):
+        if body is not None and body[0] & CRASH_HID_FLAG_PRESENT and body[0] & CRASH_HID_FLAG_FRESH:
+            return False, f"fresh {side} record: {describe_crash_record(body)}"
+    return True, ""
+
+
+def _wait_for_reboot(raw: RawHID, deadline_s: float) -> str:
+    """'fresh' (GET_ID answered '*'), 'back' ('.' after the interface went away,
+    so the '*' was lost to a read), 'not-rebooted' ('.' with no gap at all) or
+    'no-reply'. Single-attempt GET_ID, polled through re-enumeration: see
+    _probe_after_switch for why a retry would hide the marker."""
+    deadline = time.monotonic() + deadline_s
+    gone = False
+    while time.monotonic() < deadline:
+        try:
+            resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
+        except RuntimeError:
+            resp = None
+        if _resp_ok(resp, CMD_GET_ID, lambda *_a: None, expect_status=None):
+            if resp[2] == FRESH_BOOT:
+                return "fresh"
+            return "back" if gone else "not-rebooted"
+        gone = True
+        time.sleep(0.5)
+    return "no-reply"
+
+
+def test_boot_loop(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Reboot (cmd 43) N times and stop at the first boot that went wrong.
+
+    The rig's twin of the host's boot-loop diagnostic. After each reboot a
+    single-attempt GET_ID waits for the master to come back, then cmd 39 is read
+    on both halves; the slave's for up to BOOT_LOOP_SLAVE_WAIT_S, until the master
+    has pulled it. It FAILS on a fresh crash record (printed decoded) or a reboot
+    that does not come back within BOOT_LOOP_RETURN_S, and logs each round's boot
+    time. It hunts the intermittent stall in the 63%..75% boot window that the
+    late-boot watchdog guard recovers from (fw 1.3.2 field record 1:0x16e1).
+
+    EXTENDED tier: N reboots at several seconds each (HIL_BOOT_LOOP_ROUNDS,
+    default 20, at most 50). Runs after the crash-record test, which clears the
+    archive, so an older record cannot read as this run's."""
+    rounds = boot_loop_rounds()
+    log(f"  {rounds} reboot(s)")
+    boot_times = []
+    for n in range(1, rounds + 1):
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_REBOOT]))
+        if not _resp_ok(resp, CMD_REBOOT, log, expect_status=ACK):
+            log(f"  FAIL: round {n}: the reboot request was not ACKed")
+            return False
+        t0 = time.monotonic()
+        state = _wait_for_reboot(raw, BOOT_LOOP_RETURN_S)
+        dt = time.monotonic() - t0
+        if state == "no-reply":
+            log(f"  FAIL: round {n}: no answer within {BOOT_LOOP_RETURN_S:.0f} s, a boot "
+                f"hang the watchdog did not reset")
+            return False
+        if state == "not-rebooted":
+            log(f"  FAIL: round {n}: the master answered without ever going away")
+            return False
+        boot_times.append(dt)
+        master = _crash_record_body(raw, 0)
+        slave = None
+        slave_deadline = time.monotonic() + BOOT_LOOP_SLAVE_WAIT_S
+        while True:
+            slave = _crash_record_body(raw, 1)
+            if (slave is not None and slave[0] & CRASH_HID_FLAG_PRESENT) or \
+                    time.monotonic() >= slave_deadline:
+                break
+            time.sleep(1.0)
+        ok, detail = classify_boot_round(master, slave)
+        if not ok:
+            log(f"  FAIL: round {n} (boot {dt:.1f} s): {detail}")
+            return False
+        log(f"    round {n}: back in {dt:.1f} s ({state})")
+    log(f"  {rounds} clean reboot(s); boot {min(boot_times):.1f}..{max(boot_times):.1f} s")
+    return True
 
 
 # --- upload / soak regression guards ------------------------------------------
@@ -3540,6 +3650,10 @@ TESTS = [
     # the LAST entry of the list, below.
     {"name": "crash record command (v16 cmd 39)", "fn": test_crash_record_command,
      "min_protocol": 16},
+    # Reboot until a boot goes wrong. AFTER the crash-record test (it clears the
+    # archive) and before the flash tests. EXTENDED: N reboots of several seconds.
+    {"name": "boot loop (v22 cmd 43)", "fn": test_boot_loop,
+     "min_protocol": REBOOT_MIN_PROTOCOL, "tier": TIER_EXTENDED},
     # Real per-bundle font-pack flash (BEGIN/CHUNK/COMMIT) of the empty-pack sentinel
     # to slot 0 — exercises the flash transport + the COMMIT slot-present success gate.
     # LAST: it empties the 'symbol' bundle (a host re-flashes it on the next connect).
