@@ -418,6 +418,24 @@ and relative links were adjusted to suit a standalone file.
     `docs/FUTURE_TESTS.md` until it is trustworthy, not in a tier nobody runs;
     otherwise "extended" becomes where failing tests go to be forgotten. A unit
     test pins the membership so a test cannot be quietly demoted to stop it failing.
+- **`boot loop (v22 cmd 43)` reboots N times and stops at the first boot that went
+  wrong** (`test_boot_loop`, EXTENDED, `min_protocol` 22). The rig's twin of the
+  host's boot-loop diagnostic. Each round: cmd 43 (the firmware ACKs before it
+  resets), a single-attempt GET_ID polled through re-enumeration until it answers,
+  then cmd 39 for the master and, for up to 8 s, the slave. A deliberate reboot never
+  archives a record, so a FRESH one on either half fails the run and is printed
+  decoded; so does a reboot that does not come back within 60 s. It hunts the
+  intermittent stall in the 63%..75% boot window that the late-boot guard recovers
+  (fw 1.3.2 field record `1:0x16e1`).
+  - **`HIL_BOOT_LOOP_ROUNDS`** sets N (default 20, clamped to 1..50).
+  - ⚠️ **It runs on every merge to `PolyKybd`**, because the fwapply job passes
+    `--extended` (above). At roughly 5–15 s a round, the default 20 costs a few
+    minutes there.
+  - **It sits after the crash-record test**, which clears the archive, so an older
+    record cannot be read as this run's.
+  - **A `.` answer counts as "back" only after the interface went away at least
+    once**: the `*` can be lost to a read, but a master that never dropped off USB
+    did not reboot, and that fails.
 - ⚠️ **The touch UI's "Run Tests" button ran NO tests until 2026-08-20.**
   `on_run_tests` called `flash_and_test(left, right)` without `tests=TESTS`, and
   the default is `None` → `for test in (tests or [])`, so it flashed, blanked the

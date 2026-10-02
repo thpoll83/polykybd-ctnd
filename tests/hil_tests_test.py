@@ -579,6 +579,8 @@ class SuiteTierGateTest(unittest.TestCase):
             "split link health under a bridged soak (cmd 21)",
             # ~160 CHANGE_LANG switches, each an EEPROM write and a full redraw.
             "every language draws without a crash (cmd 9 sweep)",
+            # 20 reboots by default, each a few seconds plus the slave-record wait.
+            "boot loop (v22 cmd 43)",
         })
 
     def test_the_cheap_new_checks_stay_in_the_default_suite(self):
@@ -1053,6 +1055,193 @@ class LanguageSweepTest(unittest.TestCase):
         self.assertEqual(entry["min_protocol"], 16)
         self.assertLess(names.index(hil_tests.test_language_sweep),
                         names.index(hil_tests.test_no_crash_record))
+
+
+
+class BootLoopTest(unittest.TestCase):
+    """test_boot_loop (cmd 43 + cmd 39, v22) against a fake keyboard that reboots."""
+
+    @staticmethod
+    def _body(flags, kind=3, phase=1, arg=0x16E1):
+        import struct
+        rec = struct.pack(hil_tests._CRASH_REC_FMT, 0xC4A5C0DE, kind, 0, 1, 0x11,
+                          0, 0, 0, 0, 0, 0, phase, arg, b"1.6.1", 0)
+        return bytes([flags]) + rec
+
+    class FakeBoard:
+        """GET_ID answers '*' once after each reboot, after `gone` exchanges
+        in which the interface is missing (RuntimeError)."""
+
+        def __init__(self, crash_on=None, hang_on=None, slave_crash_on=None, gone=2,
+                     ack_lost=False, slow=0, bad_status=0):
+            self.crash_on, self.hang_on, self.slave_crash_on = crash_on, hang_on, slave_crash_on
+            self.gone_per_boot = gone
+            self.ack_lost = ack_lost          # the reboot happens, its ACK never arrives
+            self.slow = slow                  # GET_ID read timeouts with the interface present
+            self.bad_status = bad_status      # GET_ID answers '!' this many times first
+            self.reboot_writes = 0
+            self.reboots = 0
+            self._gone = 0
+            self._fresh = False
+            self.master = None
+            self.slave = None
+
+        def send(self, data, timeout_ms=3000, attempts=3):
+            cmd = data[1]
+            if cmd == hil_tests.CMD_REBOOT:
+                # send() re-writes the request once per attempt while no reply comes.
+                self.reboot_writes += attempts if self.ack_lost else 1
+                self.reboots += 1
+                self._gone, self._fresh = self.gone_per_boot, True
+                fresh = BootLoopTest._body(0x03)
+                old = BootLoopTest._body(0x01)
+                self.master = fresh if self.reboots == self.crash_on else (old if self.master else None)
+                self.slave = fresh if self.reboots == self.slave_crash_on else None
+                if self.ack_lost:
+                    return None
+                return bytes([POLY_CHANNEL, cmd, ACK]).ljust(64, b"\x00")
+            if self.hang_on is not None and self.reboots >= self.hang_on:
+                raise RuntimeError("interface not found")
+            if self._gone:
+                self._gone -= 1
+                raise RuntimeError("interface not found")
+            if cmd == hil_tests.CMD_GET_ID and self.slow:
+                self.slow -= 1
+                return None
+            if cmd == hil_tests.CMD_GET_ID and self.bad_status:
+                self.bad_status -= 1
+                return bytes([POLY_CHANNEL, cmd, ord("!")]).ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_GET_ID:
+                status = hil_tests.FRESH_BOOT if self._fresh else ACK
+                self._fresh = False
+                return bytes([POLY_CHANNEL, cmd, status]).ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_CRASH_RECORD:
+                body = self.master if data[2] == 0 else self.slave
+                body = body if body is not None else bytes(hil_tests.CRASH_HID_BODY_LEN)
+                return (bytes([POLY_CHANNEL, cmd, ACK]) + body).ljust(64, b"\x00")
+            return None
+
+    def setUp(self):
+        for name, value in (("BOOT_LOOP_RETURN_S", 0.3), ("BOOT_LOOP_SLAVE_WAIT_S", 0.0)):
+            orig = getattr(hil_tests, name)
+            setattr(hil_tests, name, value)
+            self.addCleanup(setattr, hil_tests, name, orig)
+        orig_sleep = hil_tests.time.sleep
+        hil_tests.time.sleep = lambda s: None
+        self.addCleanup(setattr, hil_tests.time, "sleep", orig_sleep)
+        self.lines = []
+
+    def _run(self, board, rounds=5):
+        env = {"HIL_BOOT_LOOP_ROUNDS": str(rounds)}
+        orig = hil_tests.os.environ
+        hil_tests.os.environ = env
+        try:
+            return hil_tests.test_boot_loop(board, self.lines.append)
+        finally:
+            hil_tests.os.environ = orig
+
+    def test_clean_rounds_pass_and_reboot_each_time(self):
+        board = self.FakeBoard()
+        self.assertTrue(self._run(board, 5))
+        self.assertEqual(board.reboots, 5)
+        self.assertIn("5 clean reboot(s)", "\n".join(self.lines))
+
+    def test_a_fresh_master_record_fails_and_stops(self):
+        board = self.FakeBoard(crash_on=3)
+        self.assertFalse(self._run(board, 10))
+        self.assertEqual(board.reboots, 3)
+        out = "\n".join(self.lines)
+        self.assertIn("round 3", out)
+        self.assertIn("fresh master record", out)
+        self.assertIn("phase=boot 6.0xE1 core1=1", out)
+
+    def test_a_fresh_slave_record_fails(self):
+        board = self.FakeBoard(slave_crash_on=2)
+        self.assertFalse(self._run(board, 10))
+        self.assertIn("fresh slave record", "\n".join(self.lines))
+
+    def test_an_old_record_does_not_fail(self):
+        board = self.FakeBoard()
+        board.master = self._body(0x01)
+        self.assertTrue(self._run(board, 3))
+
+    def test_a_board_that_never_comes_back_fails(self):
+        board = self.FakeBoard(hang_on=2)
+        self.assertFalse(self._run(board, 5))
+        self.assertIn("a boot hang the watchdog did not reset", "\n".join(self.lines))
+
+    def test_a_master_that_never_went_away_fails(self):
+        board = self.FakeBoard(gone=0)
+        board._fresh = False
+        orig = board.send
+
+        def send(data, *a, **k):
+            r = orig(data, *a, **k)
+            if data[1] == hil_tests.CMD_REBOOT:
+                board._fresh = False      # the '*' never shows
+            return r
+        board.send = send
+        self.assertFalse(self._run(board, 2))
+        self.assertIn("without ever going away", "\n".join(self.lines))
+
+    def test_a_lost_marker_after_a_gap_still_counts_as_back(self):
+        board = self.FakeBoard()
+        orig = board.send
+
+        def send(data, *a, **k):
+            r = orig(data, *a, **k)
+            if data[1] == hil_tests.CMD_REBOOT:
+                board._fresh = False      # the '*' reply was lost to a read
+            return r
+        board.send = send
+        self.assertTrue(self._run(board, 2))
+
+    def test_a_lost_ack_does_not_resend_the_reboot(self):
+        # send() re-writes on a timeout; a second cmd 43 is a second reboot.
+        board = self.FakeBoard(ack_lost=True)
+        self.assertTrue(self._run(board, 3))
+        self.assertEqual(board.reboot_writes, 3)
+        self.assertIn("no ACK to the reboot request", "\n".join(self.lines))
+
+    def test_a_slow_reply_is_not_a_reboot(self):
+        # A read timeout with the interface present, then '.': nothing went away.
+        board = self.FakeBoard(gone=0, slow=2)
+        orig = board.send
+
+        def send(data, *a, **k):
+            r = orig(data, *a, **k)
+            if data[1] == hil_tests.CMD_REBOOT:
+                board._fresh = False
+            return r
+        board.send = send
+        self.assertFalse(self._run(board, 1))
+        self.assertIn("without ever going away", "\n".join(self.lines))
+
+    def test_an_unexpected_status_is_not_evidence(self):
+        board = self.FakeBoard(bad_status=2)
+        self.assertTrue(self._run(board, 1))
+        self.assertIn("(fresh)", "\n".join(self.lines))
+
+    def test_classifier(self):
+        ok, _ = hil_tests.classify_boot_round(self._body(0x01), None)
+        self.assertTrue(ok)
+        self.assertFalse(hil_tests.classify_boot_round(None, None)[0])
+        self.assertFalse(hil_tests.classify_boot_round(bytes(49), self._body(0x03))[0])
+
+    def test_round_count_from_the_environment(self):
+        self.assertEqual(hil_tests.boot_loop_rounds({}), 20)
+        self.assertEqual(hil_tests.boot_loop_rounds({"HIL_BOOT_LOOP_ROUNDS": "7"}), 7)
+        self.assertEqual(hil_tests.boot_loop_rounds({"HIL_BOOT_LOOP_ROUNDS": "500"}), 50)
+        self.assertEqual(hil_tests.boot_loop_rounds({"HIL_BOOT_LOOP_ROUNDS": "0"}), 1)
+        self.assertEqual(hil_tests.boot_loop_rounds({"HIL_BOOT_LOOP_ROUNDS": "x"}), 20)
+
+    def test_it_is_extended_gated_on_v22_and_after_the_crash_record_test(self):
+        entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_boot_loop)
+        self.assertEqual(entry["tier"], hil_tests.TIER_EXTENDED)
+        self.assertEqual(entry["min_protocol"], 22)
+        fns = [t["fn"] for t in hil_tests.TESTS]
+        self.assertLess(fns.index(hil_tests.test_crash_record_command),
+                        fns.index(hil_tests.test_boot_loop))
 
 
 if __name__ == "__main__":
