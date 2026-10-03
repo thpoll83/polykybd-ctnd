@@ -57,8 +57,12 @@ class FakeProfilerDevice:
     the harness uses to detect a non-profiling firmware.
     """
 
-    def __init__(self, profiling: bool = True, drop_every: int = 0):
+    def __init__(self, profiling: bool = True, drop_every: int = 0,
+                 snapshot_version: int = perf.SNAPSHOT_VERSION, window_us: int = 3_000_000):
         self.profiling = profiling
+        self.snapshot_version = snapshot_version
+        # What the firmware's own clock says the window lasted (v2 page 0).
+        self.window_us = window_us
         # drop_every=N makes every Nth send_repeated exchange come back empty, so
         # the miss-counting path is actually exercised rather than asserted to be
         # zero against a fake that can never miss.
@@ -73,9 +77,12 @@ class FakeProfilerDevice:
                           ovl_render_us=1_927_000,
                           bkt_norm=[0, 264900, 13317, 51, 0, 0, 54],
                           bkt_ovl=[0, 0, 17, 153, 1, 7, 28])
+        # v2 serves page 1 from a copy latched by the page-0 read.
+        self.latched = (list(self.state["bkt_norm"]), list(self.state["bkt_ovl"]))
         # RawHID's timeout bookkeeping, which callers may read.
         self.timeouts_recovered = 0
         self.timeouts_failed = 0
+        self.lost_replies = 0
 
     # --- the RawHID surface the harness uses ---------------------------------
     def send(self, data: bytes, timeout_ms: int = 3000, attempts: int = 3):
@@ -110,6 +117,7 @@ class FakeProfilerDevice:
                               max_render_us=0, max_overlay=False, ovl_wall_us=0,
                               ovl_bridge_us=0, ovl_render_us=0,
                               bkt_norm=[0] * 7, bkt_ovl=[0] * 7)
+            self.latched = ([0] * 7, [0] * 7)
             return bytes([POLY_CHANNEL, perf.CMD_PROFILE, ACK]).ljust(64, b"\x00")
         if sub == perf.PROF_SUB_LOG:
             self.log_count += 1
@@ -124,12 +132,18 @@ class FakeProfilerDevice:
     def _snapshot(self, page: int):
         s = self.state
         if page == 0:
-            return (bytes([perf.SNAPSHOT_VERSION, 0x01 if s["max_overlay"] else 0x00, 0, 0])
+            body = (bytes([self.snapshot_version, 0x01 if s["max_overlay"] else 0x00, 0, 0])
                     + struct.pack("<8I", s["iters"], s["ovl_iters"], s["max_us"],
                                   s["max_bridge_us"], s["max_render_us"],
                                   s["ovl_wall_us"], s["ovl_bridge_us"], s["ovl_render_us"]))
+            if self.snapshot_version >= 2:
+                body += struct.pack("<I", self.window_us)
+                self.latched = (list(s["bkt_norm"]), list(s["bkt_ovl"]))
+            return body
         if page == 1:
-            return struct.pack("<14I", *(s["bkt_norm"] + s["bkt_ovl"]))
+            norm, ovl = (self.latched if self.snapshot_version >= 2
+                         else (s["bkt_norm"], s["bkt_ovl"]))
+            return struct.pack("<14I", *(norm + ovl))
         return None
 
 
@@ -153,8 +167,26 @@ class TestSnapshotWireFormat(unittest.TestCase):
         # >= 10 ms iterations across both histograms (buckets 4..6).
         self.assertEqual(got.long_iters, 54 + 1 + 7 + 28)
 
+    def test_v2_carries_the_keyboards_window(self):
+        got = perf.Profiler(FakeProfilerDevice(window_us=9_001_000), _quiet).read()
+        self.assertEqual(got.version, 2)
+        self.assertEqual(got.window_us, 9_001_000)
+        self.assertEqual(got.to_dict()["device_window_ms"], 9001.0)
+
+    def test_v1_still_decodes_without_a_window(self):
+        got = perf.Profiler(FakeProfilerDevice(snapshot_version=1), _quiet).read()
+        self.assertEqual(got.iters, 12345)
+        self.assertIsNone(got.window_us)
+        self.assertNotIn("device_window_ms", got.to_dict())
+
+    def test_v2_page0_must_carry_window(self):
+        body0 = bytes([2, 0, 0, 0]) + struct.pack("<8I", *([0] * 8))
+        body1 = struct.pack("<14I", *([0] * 14))
+        with self.assertRaisesRegex(ValueError, "too short"):
+            perf.decode_snapshot({0: body0, 1: body1})
+
     def test_rejects_unknown_snapshot_version(self):
-        body0 = bytes([perf.SNAPSHOT_VERSION + 1, 0, 0, 0]) + struct.pack("<8I", *([0] * 8))
+        body0 = bytes([max(perf.SNAPSHOT_VERSIONS) + 1, 0, 0, 0]) + struct.pack("<9I", *([0] * 9))
         body1 = struct.pack("<14I", *([0] * 14))
         with self.assertRaisesRegex(ValueError, "wire format changed"):
             perf.decode_snapshot({0: body0, 1: body1})
@@ -170,6 +202,92 @@ class TestSnapshotWireFormat(unittest.TestCase):
         prof.reset()
         self.assertEqual(dev.reset_count, 1)
         self.assertEqual(prof.read().iters, 0)
+
+
+class _LossyDevice(FakeProfilerDevice):
+    """Every profiler READ needs two re-sends, as in run 37152259246."""
+
+    def send(self, data, timeout_ms=3000, attempts=3):
+        if data[1] == perf.CMD_PROFILE and data[2] == perf.PROF_SUB_READ:
+            self.lost_replies += 2
+            self.timeouts_recovered += 1
+        resp = super().send(data, timeout_ms, attempts)
+        if data[1] == perf.CMD_PROFILE and data[2] == perf.PROF_SUB_RESET:
+            self.state["iters"] = 9039   # what the loop did in the stretched window
+        return resp
+
+
+class TestIdleWindow(unittest.TestCase):
+    """The idle rate must use the window the firmware measured, not the sleep."""
+
+    def _lossy(self, **kw):
+        return _LossyDevice(**kw)
+
+    def test_rate_uses_the_keyboard_window_when_replies_were_lost(self):
+        dev = self._lossy(window_us=9_001_000)
+        out = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        self.assertEqual(out["window_source"], "device")
+        self.assertEqual(out["iters_per_s"], 1004.2)
+        self.assertEqual(out["hid_retries"], 4)       # two per page
+        self.assertNotIn("valid", out)                # the device clock makes it sound
+
+    def test_v1_falls_back_to_host_clock_and_is_invalid_after_retries(self):
+        dev = self._lossy(snapshot_version=1)
+        out = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        self.assertEqual(out["window_source"], "host")
+        self.assertIs(out["valid"], False)
+        self.assertGreater(out["hid_retries"], 0)
+
+    def test_clean_v1_window_stays_valid(self):
+        dev = FakeProfilerDevice(snapshot_version=1)
+        out = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        self.assertEqual(out["hid_retries"], 0)
+        self.assertNotIn("valid", out)
+
+    def test_lost_reset_reply_does_not_count_against_the_window(self):
+        class _LossyReset(FakeProfilerDevice):
+            def send(self, data, timeout_ms=3000, attempts=3):
+                if data[1] == perf.CMD_PROFILE and data[2] == perf.PROF_SUB_RESET:
+                    self.lost_replies += 1
+                return super().send(data, timeout_ms, attempts)
+
+        dev = _LossyReset(snapshot_version=1)
+        out = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        self.assertEqual(out["hid_retries"], 0)
+        self.assertNotIn("valid", out)
+
+    def test_invalid_idle_never_becomes_a_baseline(self):
+        from station.perf_runner import baseline_safe
+        dev = self._lossy(snapshot_version=1)
+        idle = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        self.assertNotIn("idle", baseline_safe({"idle": idle, "label": "x"}))
+
+    def test_zero_device_window_gives_no_rate_not_the_host_clock(self):
+        r = perf.idle_rate(perf.LoopProfile(iters=10, window_us=0), 3.0, 3.0, 0)
+        self.assertEqual(r["window_source"], "device")
+        self.assertIsNone(r["iters_per_s"])
+
+    def test_markdown_leaves_an_invalid_idle_rate_out_of_the_table(self):
+        dev = self._lossy(snapshot_version=1)
+        idle = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        md = format_markdown({"idle": idle})
+        self.assertNotIn("| Idle — main-loop rate |", md)
+        self.assertIn("Not a valid measurement, left out of the table", md)
+
+    def test_v2_page1_is_latched_at_the_page0_read(self):
+        dev = FakeProfilerDevice()
+        prof = perf.Profiler(dev, _quiet)
+        dev._profile(bytes([POLY_CHANNEL, perf.CMD_PROFILE, perf.PROF_SUB_READ, 0]))
+        dev.state["bkt_norm"] = [999] * 7               # the loop ran on
+        body = dev._profile(bytes([POLY_CHANNEL, perf.CMD_PROFILE, perf.PROF_SUB_READ, 1]))
+        self.assertEqual(struct.unpack_from("<7I", body, 4)[0], 0)  # still the latch
+
+    def test_markdown_flags_lost_replies(self):
+        dev = self._lossy(window_us=9_001_000)
+        idle = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        md = format_markdown({"idle": idle})
+        self.assertIn("Profiler replies were lost and re-sent", md)
+        self.assertNotIn("clock: the firmware predates", md)
 
 
 class TestProfilerAvailability(unittest.TestCase):

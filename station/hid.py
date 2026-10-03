@@ -205,6 +205,10 @@ class RawHID:
         # that retry rescued the reply (recovered) or not (failed).
         self.timeouts_recovered = 0
         self.timeouts_failed = 0
+        # Every attempt whose reply never came, including those a retry recovered.
+        # timeouts_recovered counts a request once however many writes it took, so
+        # it cannot say how long a caller actually waited.
+        self.lost_replies = 0
 
     def send(self, data: bytes, timeout_ms: int = 3000, attempts: int = 3) -> bytes | None:
         """Write one report and read one reply (or None after all attempts time out).
@@ -246,6 +250,7 @@ class RawHID:
                     if attempt:
                         self.timeouts_recovered += 1
                     return bytes(response)
+                self.lost_replies += 1
             self.timeouts_failed += 1
             return None
         finally:

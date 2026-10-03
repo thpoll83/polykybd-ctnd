@@ -64,7 +64,11 @@ PROF_SUB_LOG     = 2   # dump the console summary block immediately
 # Wire format of the snapshot. Must match LOOP_PROFILE_SNAPSHOT_VERSION /
 # LOOP_PROFILE_SNAPSHOT_PAGES / LOOP_PROFILE_NBUCKET in loop_profile.h. A version
 # we do not know is refused rather than mis-decoded as a reordered struct.
-SNAPSHOT_VERSION = 1
+# v2 appends window_us to page 0 (the window's length by the keyboard's clock) and
+# serves page 1 from a copy latched at the page-0 read. v1 is still decoded, with
+# window_us None, so the harness keeps working against older profiling images.
+SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSIONS = (1, 2)
 SNAPSHOT_PAGES   = 2
 NBUCKET          = 7
 BUCKET_LABELS    = ("<1ms", "1-2ms", "2-5ms", "5-10ms", "10-20ms", "20-50ms", ">=50ms")
@@ -94,6 +98,9 @@ class LoopProfile:
     ovl_render_us: int = 0
     bkt_norm: list = field(default_factory=lambda: [0] * NBUCKET)
     bkt_ovl: list = field(default_factory=lambda: [0] * NBUCKET)
+    # v2 only: microseconds since RESET, by the keyboard's clock. None on v1.
+    window_us: int | None = None
+    version: int = SNAPSHOT_VERSION
 
     @property
     def ovl_rest_us(self) -> int:
@@ -110,7 +117,7 @@ class LoopProfile:
         return sum(self.bkt_norm[LONG_ITER_BUCKET:]) + sum(self.bkt_ovl[LONG_ITER_BUCKET:])
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "iters": self.iters,
             "ovl_iters": self.ovl_iters,
             "worst_iter_ms": round(self.max_us / 1000.0, 2),
@@ -124,7 +131,11 @@ class LoopProfile:
             "long_iters_ge_10ms": self.long_iters,
             "hist_norm": dict(zip(BUCKET_LABELS, self.bkt_norm)),
             "hist_ovl": dict(zip(BUCKET_LABELS, self.bkt_ovl)),
+            "snapshot_version": self.version,
         }
+        if self.window_us is not None:
+            out["device_window_ms"] = round(self.window_us / 1000.0, 2)
+        return out
 
 
 def decode_snapshot(pages: dict) -> LoopProfile:
@@ -151,16 +162,20 @@ def decode_snapshot(pages: dict) -> LoopProfile:
         raise ValueError(f"profiler snapshot missing page(s) {missing}")
 
     head = pages[0]
-    if len(head) < 36:
+    if len(head) < 4:
         raise ValueError(f"profiler snapshot page 0 too short: {len(head)} bytes")
     version, flags = head[0], head[1]
-    if version != SNAPSHOT_VERSION:
+    if version not in SNAPSHOT_VERSIONS:
         raise ValueError(
-            f"profiler snapshot version {version} != expected {SNAPSHOT_VERSION} — "
+            f"profiler snapshot version {version} not in {SNAPSHOT_VERSIONS} — "
             "the firmware's loop_profile.h wire format changed; update perf.py"
         )
+    need0 = 40 if version >= 2 else 36
+    if len(head) < need0:
+        raise ValueError(f"profiler snapshot page 0 too short: {len(head)} < {need0}")
     (iters, ovl_iters, max_us, max_bridge_us, max_render_us,
      ovl_wall_us, ovl_bridge_us, ovl_render_us) = struct.unpack_from("<8I", head, 4)
+    window_us = struct.unpack_from("<I", head, 36)[0] if version >= 2 else None
 
     hist = pages[1]
     need = NBUCKET * 2 * 4
@@ -174,6 +189,7 @@ def decode_snapshot(pages: dict) -> LoopProfile:
         max_overlay=bool(flags & 0x01),
         ovl_wall_us=ovl_wall_us, ovl_bridge_us=ovl_bridge_us, ovl_render_us=ovl_render_us,
         bkt_norm=list(values[:NBUCKET]), bkt_ovl=list(values[NBUCKET:]),
+        window_us=window_us, version=version,
     )
 
 
@@ -183,6 +199,18 @@ class Profiler:
     def __init__(self, raw: RawHID, log: Callable[[str], None] = print):
         self._raw = raw
         self._log = log
+        # Bookkeeping for the window opened by the last reset():
+        #   retries  - replies RawHID.send() waited out and re-sent for
+        #   failed   - requests that got no reply after every attempt
+        #   host_window_s - RESET reply to page-0 reply, on the host's clock
+        self.retries = 0
+        self.failed = 0
+        self.host_window_s = None
+        self._t_reset = None
+
+    def _hid_counters(self) -> tuple:
+        return (getattr(self._raw, "lost_replies", 0),
+                getattr(self._raw, "timeouts_failed", 0))
 
     def _exchange(self, sub: int, page: int = 0) -> bytes | None:
         """Send one profiler sub-command; return the report body, or None on NACK.
@@ -191,7 +219,13 @@ class Profiler:
         normal build is the dispatcher's unknown-command NACK, i.e. "no profiler
         here". A dropped reply raises, because that is a device fault rather than
         a capability answer, and must not be mistaken for "profiler absent"."""
-        resp = self._raw.send(bytes([POLY_CHANNEL, CMD_PROFILE, sub, page]))
+        rec0, fail0 = self._hid_counters()
+        try:
+            resp = self._raw.send(bytes([POLY_CHANNEL, CMD_PROFILE, sub, page]))
+        finally:
+            rec1, fail1 = self._hid_counters()
+            self.retries += rec1 - rec0
+            self.failed += fail1 - fail0
         if resp is None:
             raise RuntimeError(
                 f"no reply to profiler command sub={sub} page={page} — device not responding"
@@ -215,9 +249,15 @@ class Profiler:
 
     def reset(self) -> None:
         """Zero the counters and open a fresh measurement window."""
+        self.host_window_s = None
         if self._exchange(PROF_SUB_RESET) is None:
             raise ProfilerUnavailable("firmware NACKed the profiler RESET (cmd 32) — "
                                       "not a POLYKYBD_LOOP_PROFILE build")
+        self._t_reset = time.perf_counter()
+        # Zeroed AFTER the RESET reply: a lost RESET reply delays the window's start,
+        # it does not stretch the window, so it must not count against it.
+        self.retries = 0
+        self.failed = 0
 
     def read(self) -> LoopProfile:
         """Read back the current window as a decoded :class:`LoopProfile`."""
@@ -230,7 +270,22 @@ class Profiler:
                     "not a POLYKYBD_LOOP_PROFILE build"
                 )
             pages[page] = body
-        return decode_snapshot(pages)
+            if page == 0 and self._t_reset is not None:
+                # Page 0 is where the firmware snapshots its counters, so the
+                # window ends at ITS reply, not at the end of the host's sleep.
+                self.host_window_s = time.perf_counter() - self._t_reset
+        prof = decode_snapshot(pages)
+        if self.retries or self.failed:
+            self._log(f"[perf]   WARNING: {self.retries} profiler reply(ies) lost and "
+                      f"re-sent in this window ({self.failed} never answered)")
+        return prof
+
+    def window_info(self) -> dict:
+        """The retry count and host-side window length for the last reset()/read()."""
+        out = {"hid_retries": self.retries, "hid_failed": self.failed}
+        if self.host_window_s is not None:
+            out["host_window_ms"] = round(self.host_window_s * 1000.0, 1)
+        return out
 
     def log_to_console(self) -> None:
         """Ask the firmware to print its summary block to the HID console.
@@ -327,6 +382,7 @@ def measure_overlay_burst(raw: RawHID, profiler: Profiler, log: Callable[[str], 
     prof = profiler.read()
 
     out = prof.to_dict()
+    out.update(profiler.window_info())
     out.update({
         "kind": kind,
         "keys": keys,
@@ -439,6 +495,7 @@ def measure_app_switch(raw: RawHID, profiler: Profiler, log: Callable[[str], Non
     prof = profiler.read()
 
     out = prof.to_dict()
+    out.update(profiler.window_info())
     out.update(stats)
     out.update({
         "stem": name,
@@ -533,10 +590,46 @@ def measure_idle_overhead(raw: RawHID, profiler: Profiler, log: Callable[[str], 
     time.sleep(seconds)
     prof = profiler.read()
     out = prof.to_dict()
-    out.update({"window_s": seconds})
-    if seconds > 0:
-        out["iters_per_s"] = round(prof.iters / seconds, 1)
-        log(f"[perf]   {out['iters_per_s']} loop iterations/s, "
+    out.update(profiler.window_info())
+    out.update(idle_rate(prof, seconds, profiler.host_window_s, profiler.retries))
+    if out.get("iters_per_s") is not None:
+        log(f"[perf]   {out['iters_per_s']} loop iterations/s over "
+            f"{out['window_s']} s ({out['window_source']} clock), "
             f"worst {out['worst_iter_ms']} ms, "
             f"{out['long_iters_ge_10ms']} iteration(s) >= 10 ms")
+    return out
+
+
+def idle_rate(prof: LoopProfile, nominal_s: float, host_window_s: float | None,
+              retries: int) -> dict:
+    """Loop rate over the window the firmware actually measured.
+
+    Dividing by the seconds the host SLEPT was wrong whenever a READ reply was lost:
+    RawHID.send() waits 3 s per attempt, so two retries turned a 3 s window into 9 s
+    and reported the idle loop at 3013/s while it ran at 1004/s (run 37152259246).
+
+    Prefers the keyboard's own window_us (snapshot v2), then the host's RESET-reply
+    to page-0-reply time. A v1 window that needed retries is marked invalid: its
+    page 1 was read live seconds after page 0, so the histogram does not match the
+    counters.
+
+    >>> p = LoopProfile(iters=9039, window_us=9_001_000)
+    >>> r = idle_rate(p, 3.0, 9.0, 4)
+    >>> r["iters_per_s"], r["window_source"], r.get("valid")
+    (1004.2, 'device', None)
+    >>> r = idle_rate(LoopProfile(iters=9039, version=1), 3.0, 9.0, 4)
+    >>> r["iters_per_s"], r["window_source"], r["valid"]
+    (1004.3, 'host', False)
+    """
+    out = {"nominal_window_s": nominal_s}
+    if prof.window_us is not None:
+        window_s, source = prof.window_us / 1e6, "device"
+    elif host_window_s:
+        window_s, source = host_window_s, "host"
+    else:
+        window_s, source = nominal_s, "nominal"
+    out.update({"window_s": round(window_s, 3), "window_source": source,
+                "iters_per_s": round(prof.iters / window_s, 1) if window_s > 0 else None})
+    if prof.window_us is None and retries:
+        out["valid"] = False
     return out
