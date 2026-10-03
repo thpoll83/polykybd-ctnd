@@ -622,7 +622,7 @@ def idle_rate(prof: LoopProfile, nominal_s: float, host_window_s: float | None,
     (1004.3, 'host', False)
     """
     out = {"nominal_window_s": nominal_s}
-    if prof.window_us:
+    if prof.window_us is not None:
         window_s, source = prof.window_us / 1e6, "device"
     elif host_window_s:
         window_s, source = host_window_s, "host"

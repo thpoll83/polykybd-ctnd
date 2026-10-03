@@ -255,11 +255,19 @@ def format_markdown(report: dict, comparison: list = None,
         lines += ["_No baseline recorded yet — this run establishes the reference._", ""]
 
     lines += ["| measurement | value |", "|---|---:|"]
+    excluded = []
     for path, mlabel, unit, _ in TRACKED_METRICS:
         val = dig(report, path)
-        if val is not None:
-            lines.append(f"| {mlabel} | {val} {unit} |")
+        if val is None:
+            continue
+        if not metric_is_usable(report, path):
+            excluded.append(mlabel)
+            continue
+        lines.append(f"| {mlabel} | {val} {unit} |")
     lines.append("")
+    if excluded:
+        lines += [f"> ⚠️ Not a valid measurement, left out of the table, the baseline "
+                  f"comparison and `--update-baseline`: {', '.join(excluded)}.", ""]
 
     # The bucket histograms answer "how many iterations were long enough to eat a
     # keystroke", which the scalar table cannot show.

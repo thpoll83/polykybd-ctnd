@@ -262,6 +262,18 @@ class TestIdleWindow(unittest.TestCase):
         idle = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
         self.assertNotIn("idle", baseline_safe({"idle": idle, "label": "x"}))
 
+    def test_zero_device_window_gives_no_rate_not_the_host_clock(self):
+        r = perf.idle_rate(perf.LoopProfile(iters=10, window_us=0), 3.0, 3.0, 0)
+        self.assertEqual(r["window_source"], "device")
+        self.assertIsNone(r["iters_per_s"])
+
+    def test_markdown_leaves_an_invalid_idle_rate_out_of_the_table(self):
+        dev = self._lossy(snapshot_version=1)
+        idle = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        md = format_markdown({"idle": idle})
+        self.assertNotIn("| Idle — main-loop rate |", md)
+        self.assertIn("Not a valid measurement, left out of the table", md)
+
     def test_v2_page1_is_latched_at_the_page0_read(self):
         dev = FakeProfilerDevice()
         prof = perf.Profiler(dev, _quiet)
