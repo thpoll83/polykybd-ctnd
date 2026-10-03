@@ -211,6 +211,23 @@ def format_markdown(report: dict, comparison: list = None,
                   "reflect the boot rather than the workload. Re-run before drawing a "
                   "conclusion, and do not record this run as a baseline.", ""]
 
+    # A profiler reply that was lost and re-sent stretches its window by 3 s per
+    # retry. Snapshot v2 measures the window on the keyboard, so the rates stay
+    # right, but the run still lost HID replies and a human should know.
+    lossy = [(k, report[k].get("hid_retries", 0)) for k in ("idle", "overlay_plain",
+             "overlay_compressed") if isinstance(report.get(k), dict)]
+    for name, phases in (report.get("app_switch") or {}).items():
+        lossy += [(f"{name} {ph}", r.get("hid_retries", 0)) for ph, r in phases.items()]
+    lossy = [(k, n) for k, n in lossy if n]
+    if lossy:
+        where = ", ".join(f"{k} ({n})" for k, n in lossy)
+        lines += [f"> ⚠️ **Profiler replies were lost and re-sent:** {where}. "
+                  "Each retry waited 3 s.", ""]
+    idle = report.get("idle") or {}
+    if idle.get("window_source") and idle["window_source"] != "device":
+        lines += [f"> ⚠️ The idle rate was timed on the **{idle['window_source']}** clock: "
+                  "the firmware predates snapshot v2, which reports the window itself.", ""]
+
     regressions = [c for c in (comparison or []) if c["verdict"] == "regression"]
     if comparison:
         if regressions:

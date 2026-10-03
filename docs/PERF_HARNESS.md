@@ -77,10 +77,23 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   that goes missing. `test_runner.py` is unaffected only because it just echoes each
   chunk to the log verbatim and never parses it.
 - **Offline tests**: `tests/perf_test.py` (`python -m unittest discover -s tests -p
-  "*_test.py"`, 23 tests, no hardware). Its `FakeProfilerDevice` re-implements the
+  "*_test.py"`, no hardware). Its `FakeProfilerDevice` re-implements the
   firmware's cmd-32 replies byte for byte, so it is a genuine **contract test of
   the wire format** — if the C encoder and the Python decoder ever disagree on
   layout/ordering/endianness it fails there rather than producing plausible
   nonsense on the rig. `LOOP_PROFILE_SNAPSHOT_VERSION` (firmware) and
   `SNAPSHOT_VERSION` (`perf.py`) must move together; a mismatch is refused loudly.
+- ⚠️ **A rate divided by the time the host SLEPT is wrong whenever a reply was
+  lost.** `RawHID.send()` waits 3 s per attempt and re-sends. In run 37152259246
+  each idle READ page needed two re-sends, so the "3 s" window lasted 9 s and the
+  report showed **3013 loop iterations/s for a loop running at 1004/s**; page 1
+  arrived 6 s after page 0, so the histogram held 15119 iterations against page 0's
+  9039. Nothing flagged it: the readiness gates passed and `hid_latency.misses` was
+  0, because the lost replies were the profiler's own. Since snapshot v2 the
+  keyboard reports `window_us` (its own clock since RESET) and latches page 1 at the
+  page-0 read, and `idle_rate()` divides by that (`window_source: device`). On a v1
+  image it falls back to the host's RESET-reply to page-0-reply time, and marks the
+  idle section `valid: false` if any reply was lost. Every profiler window records
+  `hid_retries` (from `RawHID.lost_replies`), and the markdown report names the
+  sections that lost one.
 
