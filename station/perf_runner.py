@@ -119,15 +119,21 @@ def metric_is_usable(data: dict, path: str) -> bool:
 
 
 def baseline_safe(report: dict) -> dict:
-    """A copy of ``report`` without the app-switch phases marked invalid.
+    """A copy of ``report`` without the sections and app-switch phases marked invalid.
+
+    A stored invalid section would make metric_is_usable() skip that metric in
+    every later comparison, so a regression there would never be reported.
 
     >>> r = {"app_switch": {"w": {"cold": {"valid": False}, "warm": {"valid": True}}}}
     >>> baseline_safe(r)["app_switch"]
     {'w': {'warm': {'valid': True}}}
     >>> r["app_switch"]["w"]["cold"]   # the report itself is untouched
     {'valid': False}
+    >>> "idle" in baseline_safe({"idle": {"valid": False, "iters_per_s": 3013.0}})
+    False
     """
-    out = dict(report)
+    out = {k: v for k, v in report.items()
+           if not (isinstance(v, dict) and v.get("valid") is False)}
     apps = report.get("app_switch")
     if apps:
         out["app_switch"] = {

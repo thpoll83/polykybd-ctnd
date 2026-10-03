@@ -244,6 +244,24 @@ class TestIdleWindow(unittest.TestCase):
         self.assertEqual(out["hid_retries"], 0)
         self.assertNotIn("valid", out)
 
+    def test_lost_reset_reply_does_not_count_against_the_window(self):
+        class _LossyReset(FakeProfilerDevice):
+            def send(self, data, timeout_ms=3000, attempts=3):
+                if data[1] == perf.CMD_PROFILE and data[2] == perf.PROF_SUB_RESET:
+                    self.lost_replies += 1
+                return super().send(data, timeout_ms, attempts)
+
+        dev = _LossyReset(snapshot_version=1)
+        out = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        self.assertEqual(out["hid_retries"], 0)
+        self.assertNotIn("valid", out)
+
+    def test_invalid_idle_never_becomes_a_baseline(self):
+        from station.perf_runner import baseline_safe
+        dev = self._lossy(snapshot_version=1)
+        idle = perf.measure_idle_overhead(dev, perf.Profiler(dev, _quiet), _quiet, seconds=0)
+        self.assertNotIn("idle", baseline_safe({"idle": idle, "label": "x"}))
+
     def test_v2_page1_is_latched_at_the_page0_read(self):
         dev = FakeProfilerDevice()
         prof = perf.Profiler(dev, _quiet)

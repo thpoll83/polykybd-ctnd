@@ -249,13 +249,15 @@ class Profiler:
 
     def reset(self) -> None:
         """Zero the counters and open a fresh measurement window."""
-        self.retries = 0
-        self.failed = 0
         self.host_window_s = None
         if self._exchange(PROF_SUB_RESET) is None:
             raise ProfilerUnavailable("firmware NACKed the profiler RESET (cmd 32) — "
                                       "not a POLYKYBD_LOOP_PROFILE build")
         self._t_reset = time.perf_counter()
+        # Zeroed AFTER the RESET reply: a lost RESET reply delays the window's start,
+        # it does not stretch the window, so it must not count against it.
+        self.retries = 0
+        self.failed = 0
 
     def read(self) -> LoopProfile:
         """Read back the current window as a decoded :class:`LoopProfile`."""
