@@ -119,15 +119,21 @@ def metric_is_usable(data: dict, path: str) -> bool:
 
 
 def baseline_safe(report: dict) -> dict:
-    """A copy of ``report`` without the app-switch phases marked invalid.
+    """A copy of ``report`` without the sections and app-switch phases marked invalid.
+
+    A stored invalid section would make metric_is_usable() skip that metric in
+    every later comparison, so a regression there would never be reported.
 
     >>> r = {"app_switch": {"w": {"cold": {"valid": False}, "warm": {"valid": True}}}}
     >>> baseline_safe(r)["app_switch"]
     {'w': {'warm': {'valid': True}}}
     >>> r["app_switch"]["w"]["cold"]   # the report itself is untouched
     {'valid': False}
+    >>> "idle" in baseline_safe({"idle": {"valid": False, "iters_per_s": 3013.0}})
+    False
     """
-    out = dict(report)
+    out = {k: v for k, v in report.items()
+           if not (isinstance(v, dict) and v.get("valid") is False)}
     apps = report.get("app_switch")
     if apps:
         out["app_switch"] = {
@@ -211,6 +217,23 @@ def format_markdown(report: dict, comparison: list = None,
                   "reflect the boot rather than the workload. Re-run before drawing a "
                   "conclusion, and do not record this run as a baseline.", ""]
 
+    # A profiler reply that was lost and re-sent stretches its window by 3 s per
+    # retry. Snapshot v2 measures the window on the keyboard, so the rates stay
+    # right, but the run still lost HID replies and a human should know.
+    lossy = [(k, report[k].get("hid_retries", 0)) for k in ("idle", "overlay_plain",
+             "overlay_compressed") if isinstance(report.get(k), dict)]
+    for name, phases in (report.get("app_switch") or {}).items():
+        lossy += [(f"{name} {ph}", r.get("hid_retries", 0)) for ph, r in phases.items()]
+    lossy = [(k, n) for k, n in lossy if n]
+    if lossy:
+        where = ", ".join(f"{k} ({n})" for k, n in lossy)
+        lines += [f"> ⚠️ **Profiler replies were lost and re-sent:** {where}. "
+                  "Each retry waited 3 s.", ""]
+    idle = report.get("idle") or {}
+    if idle.get("window_source") and idle["window_source"] != "device":
+        lines += [f"> ⚠️ The idle rate was timed on the **{idle['window_source']}** clock: "
+                  "the firmware predates snapshot v2, which reports the window itself.", ""]
+
     regressions = [c for c in (comparison or []) if c["verdict"] == "regression"]
     if comparison:
         if regressions:
@@ -232,11 +255,19 @@ def format_markdown(report: dict, comparison: list = None,
         lines += ["_No baseline recorded yet — this run establishes the reference._", ""]
 
     lines += ["| measurement | value |", "|---|---:|"]
+    excluded = []
     for path, mlabel, unit, _ in TRACKED_METRICS:
         val = dig(report, path)
-        if val is not None:
-            lines.append(f"| {mlabel} | {val} {unit} |")
+        if val is None:
+            continue
+        if not metric_is_usable(report, path):
+            excluded.append(mlabel)
+            continue
+        lines.append(f"| {mlabel} | {val} {unit} |")
     lines.append("")
+    if excluded:
+        lines += [f"> ⚠️ Not a valid measurement, left out of the table, the baseline "
+                  f"comparison and `--update-baseline`: {', '.join(excluded)}.", ""]
 
     # The bucket histograms answer "how many iterations were long enough to eat a
     # keystroke", which the scalar table cannot show.
