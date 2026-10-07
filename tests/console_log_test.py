@@ -127,6 +127,34 @@ class ConsoleTapTest(unittest.TestCase):
         self.assertEqual(tap.since(mark), ["after"])
         self.assertEqual(tap.find_all("before", mark), [])
 
+    def test_a_pinned_line_survives_eviction(self):
+        # The doom tier pushed the boot banner out of the ring before the
+        # handedness test read it (rig, 2026-10-07).
+        tap = ConsoleTap(maxlen=4)
+        tap.pin("hand: ")
+        tap.feed("hand: LEFT (flash stamp) slot=0/1 writer=0x55\n")
+        tap.feed("".join(f"chunk {i}\n" for i in range(50)))
+        self.assertEqual(tap.find_all("hand: "),
+                         ["hand: LEFT (flash stamp) slot=0/1 writer=0x55"])
+        self.assertEqual(len(tap.since(0)), 4, "the ring itself still evicts")
+
+    def test_a_pinned_pattern_still_honours_the_mark(self):
+        tap = ConsoleTap(maxlen=4)
+        tap.pin("crash: side=")
+        tap.feed("crash: side=master kind=hardfault\n")
+        mark = tap.mark()
+        self.assertEqual(tap.find_all("crash: side=", mark), [])
+        tap.feed("crash: side=slave kind=hardfault\n")
+        self.assertEqual(tap.find_all("crash: side=", mark),
+                         ["crash: side=slave kind=hardfault"])
+
+    def test_pinning_twice_keeps_what_was_stored(self):
+        tap = ConsoleTap()
+        tap.pin("hand: ")
+        tap.feed("hand: RIGHT\n")
+        tap.pin("hand: ")
+        self.assertEqual(tap.find_all("hand: "), ["hand: RIGHT"])
+
     def test_marks_survive_eviction_without_returning_the_wrong_lines(self):
         tap = ConsoleTap(maxlen=3)
         mark = tap.mark()

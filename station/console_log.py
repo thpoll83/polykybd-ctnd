@@ -130,6 +130,24 @@ class ConsoleTap:
         self._lines = deque(maxlen=maxlen)
         self._pending = ""
         self._produced = 0     # total lines ever appended (mark space)
+        # Pinned patterns: pattern -> deque of (line number, line). A pinned line
+        # outlives the ring buffer, see pin().
+        self._pins = {}
+
+    def pin(self, pattern, keep: int = 256) -> None:
+        """Keep every line matching ``pattern`` for the whole session.
+
+        ⚠️ The ring buffer EVICTS. A doom-tier run prints far more than
+        ``maxlen`` lines (every resent flash chunk is one), so a check that
+        reads a line from early in the run got nothing back: the boot banner's
+        ``hand:`` line was gone by the time the handedness test ran (rig,
+        2026-10-07), and a ``crash:`` line from early in a long run would let
+        the no-crash test pass on a crash it never saw. ``find_all()`` on a
+        pinned pattern reads the pinned store, so eviction cannot hide it.
+        Pin before the lines arrive; pinning again is a no-op."""
+        with self._lock:
+            if pattern not in self._pins:
+                self._pins[pattern] = deque(maxlen=keep)
 
     # -- writer side (console reader thread) --
     def feed(self, chunk: str) -> None:
@@ -158,6 +176,9 @@ class ConsoleTap:
         if line:
             self._lines.append(line)
             self._produced += 1
+            for pattern, store in self._pins.items():
+                if _matches(pattern, line):
+                    store.append((self._produced, line))
 
     # -- reader side (test / runner thread) --
     def mark(self) -> int:
@@ -192,7 +213,14 @@ class ConsoleTap:
             time.sleep(poll)
 
     def find_all(self, pattern, mark: int = 0) -> list:
-        """Every line after ``mark`` matching ``pattern`` (substring or regex)."""
+        """Every line after ``mark`` matching ``pattern`` (substring or regex).
+
+        A pinned pattern is answered from the pinned store, so it also finds
+        lines the ring buffer has already evicted."""
+        with self._lock:
+            store = self._pins.get(pattern)
+            if store is not None:
+                return [ln for idx, ln in store if idx > mark]
         return [ln for ln in self.since(mark) if _matches(pattern, ln)]
 
     def link_stats(self, mark: int = 0) -> list:
