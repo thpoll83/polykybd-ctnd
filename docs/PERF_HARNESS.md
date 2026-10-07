@@ -96,4 +96,14 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   idle section `valid: false` if any reply was lost. Every profiler window records
   `hid_retries` (from `RawHID.lost_replies`), and the markdown report names the
   sections that lost one.
+- ⚠️ **Render time moves ~4% when UNRELATED code shifts in flash, so one run cannot
+  pin a few-percent render change on a code change.** The firmware runs from external
+  flash through the RP2040's 16 KB XIP cache. qmk_firmware#342 (profiler only) moved
+  the glyph-draw and SPI-send code 152 bytes later and plain-burst `render` went from
+  131.7 to 136.8 ms in both runs, while bridge and rest stayed flat. Putting that code
+  in SRAM made the same shift cost 0.2 ms (128.6 vs 128.8 ms, runs 37211962446 and
+  37211980797), which confirms the cause. That fix was not merged: ~3 ms per burst did
+  not justify 1,816 B of the ~6 KB of free RAM (branch `perf/render-in-ram`). The 15%
+  compare tolerance absorbs this. Below it, compare against several runs, or rebuild
+  the base with the same layout, before calling a render change real.
 
