@@ -135,7 +135,7 @@ class ConsoleTap:
         self._pins = {}
 
     def pin(self, pattern, keep: int = 256) -> None:
-        """Keep every line matching ``pattern`` for the whole session.
+        """Keep the latest ``keep`` lines matching ``pattern``, past ring eviction.
 
         ⚠️ The ring buffer EVICTS. A doom-tier run prints far more than
         ``maxlen`` lines (every resent flash chunk is one), so a check that
@@ -143,8 +143,13 @@ class ConsoleTap:
         ``hand:`` line was gone by the time the handedness test ran (rig,
         2026-10-07), and a ``crash:`` line from early in a long run would let
         the no-crash test pass on a crash it never saw. ``find_all()`` on a
-        pinned pattern reads the pinned store, so eviction cannot hide it.
-        Pin before the lines arrive; pinning again is a no-op."""
+        pinned pattern reads the pinned store, so ring eviction cannot hide it.
+
+        The store is BOUNDED on purpose: the tap lives as long as the UI process
+        and rolls across runs, so an unbounded one grows forever. Past ``keep``
+        matches the oldest go, even if the ring still holds them. Both pinned
+        lines print once per boot, so 256 covers far more boots than any run
+        makes. Pin before the lines arrive; pinning again is a no-op."""
         with self._lock:
             if pattern not in self._pins:
                 self._pins[pattern] = deque(maxlen=keep)
