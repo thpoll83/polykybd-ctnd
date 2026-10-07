@@ -2880,6 +2880,11 @@ def classify_crash_lines(lines) -> tuple:
 
 
 HAND_LINE_MARK = "hand: "
+# Both lines are read long after they are printed, so they are PINNED: the tap's
+# ring buffer evicts, and a doom-tier run had pushed the boot banner out of it by
+# the time the handedness test asked (rig, 2026-10-07). See ConsoleTap.pin().
+TAP.pin(HAND_LINE_MARK)
+TAP.pin(CRASH_LINE_MARK)
 # ⚠️ ANCHORED, and the optional tail is NOT decoration. boot_diag.c prints
 #   "hand: %s (%s) slot=%u/%u writer=0x%02X%s"
 # where the last %s is " [EEPROM byte repaired from the stamp]" whenever
