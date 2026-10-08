@@ -41,11 +41,11 @@ and relative links were adjusted to suit a standalone file.
     mutate+restore round-trips, not among the disruptive upload tests. The companion
     **`glyph script expansion (v10)`** test (`test_glyph_script_expansion`, `min_protocol: 10`)
     covers the v10 **open-ended index**: it round-trips known scripts RUNES(2), IBMVGA(6)
-    and the max BRAILLE(10), then sets a deliberately-unknown high index (200) and asserts
+    and the max C64KEYS(11), then sets a deliberately-unknown high index (200) and asserts
     it is **ACCEPTED + stored verbatim** (a pre-v10 board would NACK it) — that graceful
     acceptance is what decouples "add a font face" from the protocol version — then restores.
     Same pack-agnostic, mutate+restore shape; a pre-v10 board SKIPs it. `GLYPH_SCRIPT_MAX`
-    (=10) tracks the highest *known* `poly_glyph_script`; higher indices are valid on the
+    (=11) tracks the highest *known* `poly_glyph_script`; higher indices are valid on the
     wire and just render the normal legend.
   - The **`glyph size round-trip (v13)`** test (`test_glyph_size_round_trip`,
     `min_protocol: 13`) covers HID cmd 34 (`GLYPH_SIZE`) — the keycap legend size, 0
