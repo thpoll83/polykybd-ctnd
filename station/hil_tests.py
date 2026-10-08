@@ -95,7 +95,7 @@ CMD_GET_DEFAULT_LAYER       = 22  # current default layer index
 CMD_IDLE_STYLE              = 28  # get/set idle (anti-burn-in) display style (protocol v4+)
 CMD_SET_OS                  = 29  # get/set active host-OS identity (protocol v7+)
 CMD_GLYPH_SCRIPT            = 30  # get/set glyph-script override (v9+ tengwar; v10 adds 9 more scripts)
-GLYPH_SCRIPT_MAX            = 10  # highest valid poly_glyph_script value (BRAILLE) as of protocol v10
+GLYPH_SCRIPT_MAX            = 11  # highest poly_glyph_script value (C64KEYS); no protocol bump since v10
 CMD_GLYPH_SIZE              = 34  # get/set the keycap legend size (protocol v13+)
 CMD_MACRO_INFO              = 36  # count, label stride, capacity, bytes used (v15+)
 CMD_MACRO_BODY              = 37  # windowed read/write of the shared body buffer (v15+)
@@ -1035,7 +1035,7 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
     (runes, Aurebesh, SGA, Cirth, IBM VGA, C64, Amiga, APL, Braille; values 2..10)
     AND made the firmware accept ANY index 0..0xFE — one it can't render just falls
     back to the normal legend instead of NACKing, so new font faces never need a
-    protocol bump. This walks a few known scripts (incl. the max BRAILLE=10), then
+    protocol bump. This walks a few known scripts (incl. the max, C64KEYS=11), then
     sets a deliberately-unknown high index (200) and asserts it is ACCEPTED and
     stored verbatim (a pre-v10 firmware would NACK here) — that acceptance is the
     whole point of the decoupling. Restores the original. Pack-agnostic.
@@ -1046,7 +1046,7 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
         return False
     original = cur[3]
 
-    # Known scripts RUNES(2), IBM VGA(6), BRAILLE(10) round-trip exactly.
+    # Known scripts RUNES(2), IBM VGA(6) and the max (GLYPH_SCRIPT_MAX) round-trip exactly.
     # Then an UNKNOWN index (200) must also be accepted + stored (open-ended).
     for target in (2, 6, GLYPH_SCRIPT_MAX, 200):
         set_resp = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, target]))
