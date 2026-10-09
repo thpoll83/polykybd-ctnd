@@ -57,7 +57,7 @@ signing the firmware image alone was not enough.**
 | HIL-7 | Sudoers wildcard admits extra `systemctl` arguments | ctnd | ✅ fixed |
 | HIL-8 | Station user holds blanket passwordless root | ctnd *(rig state)* | ✅ fixed (rig) |
 | HIL-9 | Operator account and Actions runner are the same user | ctnd *(rig state)* | 🟡 (1) fixed; (2) deferred by decision |
-| HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk | ✅ fixed (PR #251) |
+| HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk, host | ✅ fixed (qmk #251; host copy found and fixed 2026-10-09) |
 | HOST-4 | `Pillow` unpinned — CVE-2026-54058 reachable via overlay image open-by-filename | host | ✅ fixed (PR #201) |
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
 
@@ -374,11 +374,38 @@ Recorded because neither was where the report was looking, which is the reusable
   flagged the inherited upstream workflow above instead. Every `${{ }}` in that file now
   goes through `env:` and is read as `"$VAR"` / `os.environ[...]`, so nothing interpolates
   into a shell or Python body.
+  ⚠️ **PolyKybdHost's `bump-version.yml` carried the same line and was missed** until
+  2026-10-09, when the host's bump was reworked to land through a PR. It now reads the
+  labels and the bump type from `env:` as well. A copied workflow is a copied finding:
+  when one repo's workflow is fixed, grep the sibling repos for the same shape.
 - **`Pillow` unpinned** (`PolyKybdHost`, fixed in #201) — CVE-2026-54058, an
   out-of-bounds read decoding a McIdas AREA image opened *by filename*, which is exactly
   what `im_converter.open()` does with a user-chosen overlay image. ⚠️ The fix had to be a
   version **floor** (`Pillow>=12.3.0`), not a comment: an unpinned requirement is satisfied
   by whatever is already installed, so pip will never upgrade an existing 10.x.
+
+### PolyKybdHost lets workflow tokens open and merge PRs (accepted, 2026-10-09)
+
+`main` on PolyKybdHost requires a pull request, and the built-in `GITHUB_TOKEN` cannot be
+on a personal repository's bypass list. So `bump-version.yml` lands each version bump
+through a PR it opens and merges itself (PolyKybdHost#329), which needs **Settings →
+Actions → General → "Allow GitHub Actions to create and approve pull requests"**.
+
+That setting lets ANY workflow whose token has `pull-requests: write` open, approve and
+merge a PR into `main`. It is accepted because it opens no path that did not exist
+before the rule:
+- A workflow with `contents: write` could already push to `main` directly before the
+  rule; this route needs that and more.
+- The rule requires a PR and nothing else, so "approve" grants nothing extra.
+- Fork PRs get a read-only token and no secrets, so an outside contributor's workflow
+  cannot use it.
+- Only `bump-version.yml` holds `pull-requests: write`, and it runs only on a merged PR.
+  Its one external input, the label list, arrives through `env:` (HIL-10).
+
+Re-check this entry if the rule gains required approvals or checks, or another workflow
+gets `pull-requests: write`. The firmware repo meets the same rule with a personal access
+token on the `PolyKybd` bypass list instead (`secrets.BUMP_PAT`): no such setting, but a
+long-lived write token in Actions secrets.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
