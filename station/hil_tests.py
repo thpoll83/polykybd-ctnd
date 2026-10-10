@@ -534,7 +534,7 @@ def test_fresh_boot_marker(raw: RawHID, log: Callable[[str], None]) -> bool:
     ACK. A first byte of '.' here means the master was already queried (or not
     actually reflashed) before the suite started.
     """
-    # ⚠️ attempts=1 — this is the ONE send() in the suite that must NOT retry.
+    # ⚠️ attempts=1 — this send() must NOT retry (see docs/HIL_SUITE_NOTES.md).
     # GET_ID is not idempotent: it consumes the one-shot fresh-boot marker. If
     # the reply to the first write is dropped, the firmware has *already* cleared
     # the marker, so send()'s retry re-issues GET_ID and gets a perfectly correct
