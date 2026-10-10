@@ -527,8 +527,11 @@ that one call to `attempts=1`; the regression test is `tests/hil_tests_test.py`,
   the same change and stated "all commands sent via `send()` are idempotent". The
   retry it added is what kept the WARN path it added from ever seeing this failure.
 - ⚠️ **Do NOT "centralise" this by special-casing GET_ID inside `send()`** (both AI
-  reviewers on #66 suggested it). GET_ID is sent from **seven** places and **six
-  depend on the retry** — `_master_alive`, the sustained-settle loop, the GET_ID
+  reviewers on #66 suggested it). (Count as of 2026-10-10: GET_ID is sent from **13** places, 10 in `hil_tests.py` and one
+  each in `perf.py`, `perf_runner.py` and `test_runner.py`; **4 are pinned to
+  `attempts=1`**, each because it observes a one-shot side effect, and `CMD_REBOOT` is
+  pinned too. When this was written it was seven places, and six
+  depend on the retry:) `_master_alive`, the sustained-settle loop, the GET_ID
   stress burst, the identity test, the font-pack version read, and the second GET_ID
   in the marker test itself. Auto-pinning by command id would strip the tolerance
   from exactly the probes that run in the master's post-overlay deaf window, where
