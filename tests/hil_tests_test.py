@@ -17,6 +17,7 @@ cleared by the *write*, not by the reply reaching the host — so these tests fa
 if the ``attempts=1`` pin is ever removed.
 """
 import sys
+import time
 import types
 import unittest
 
@@ -927,8 +928,12 @@ class LanguageSweepTest(unittest.TestCase):
         """A master that switches language, answers GET_ID with its one-shot
         fresh-boot marker, and can crash, go silent or NACK on given codes."""
 
-        def __init__(self, crash_on=(), silent_on=(), nack_on=(), unplugged_reads=0):
+        def __init__(self, crash_on=(), silent_on=(), nack_on=(), unplugged_reads=0, lose_on=None):
             import struct
+            # code -> how many GET_ID replies the HOST loses after switching to it,
+            # with the interface present: the rig's lost-reply pattern.
+            self.lose_on = dict(lose_on or {})
+            self.lose = 0
             self.lang = "enUS"
             self.fresh = False
             self.crash_on, self.silent_on, self.nack_on = set(crash_on), set(silent_on), set(nack_on)
@@ -962,9 +967,13 @@ class LanguageSweepTest(unittest.TestCase):
                     self.records[0] = self.crash_body
                 if code in self.silent_on:
                     self.silent = True
+                self.lose = self.lose_on.get(code, 0)
                 return bytes([POLY_CHANNEL, cmd, ACK])
             if cmd == CMD_GET_ID:
                 self.get_id_attempts.append(attempts)
+                if self.lose:
+                    self.lose -= 1
+                    return None
                 status = FRESH_BOOT if self.fresh else ACK
                 self.fresh = False
                 return bytes([POLY_CHANNEL, cmd, status]) + IDENTITY
@@ -976,7 +985,43 @@ class LanguageSweepTest(unittest.TestCase):
 
     def sweep(self, board, codes=None):
         return hil_tests._sweep_languages(board, lambda *_a: None, codes or self.CODES,
-                                          dwell_s=0, reboot_s=0)
+                                          dwell_s=0, reboot_s=0, lost_reply_s=0)
+
+    def _sweep_no_sleep(self, board, **kw):
+        from unittest import mock
+        logged = []
+        with mock.patch.object(hil_tests.time, "sleep"):
+            results = hil_tests._sweep_languages(board, logged.append, self.CODES, dwell_s=0, **kw)
+        return results, logged
+
+    def test_lost_replies_with_the_interface_present_are_waited_out(self):
+        # The rig's Pi 4 loses replies in runs (two, now and then more) while the
+        # master is fine. Three lost replies used to fail the sweep at 8 s.
+        board = self._Board(lose_on={"kaGE": 3})
+        results, logged = self._sweep_no_sleep(board, reboot_s=0, lost_reply_s=30)
+        self.assertTrue(hil_tests.classify_language_sweep(results, len(self.CODES))[0])
+        line = next(ln for ln in logged if "after 3 miss(es)" in ln)
+        self.assertIn("interface present", line)
+
+    def test_the_lost_reply_window_is_what_decides(self):
+        # Same three losses, no lost-reply window: the master reads as silent.
+        board = self._Board(lose_on={"kaGE": 3})
+        results, _ = self._sweep_no_sleep(board, reboot_s=0, lost_reply_s=0)
+        self.assertEqual(results[-1][:2], ("kaGE", "no-reply"))
+
+    def test_a_vanished_interface_keeps_the_short_reboot_window(self):
+        # A master that dropped off USB and never came back is not a lost reply:
+        # the long window must not apply, or a dead board would hang the sweep.
+        board = self._Board(crash_on={"hyAM"}, unplugged_reads=10**6)
+        t0 = time.monotonic()
+        results, _ = self._sweep_no_sleep(board, reboot_s=0.05, lost_reply_s=3600)
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(results[-1][:2], ("hyAM", "no-reply"))
+
+    def test_a_hung_master_is_still_no_reply(self):
+        board = self._Board(silent_on={"kaGE"})
+        results, _ = self._sweep_no_sleep(board, reboot_s=0, lost_reply_s=0.05)
+        self.assertEqual(results[-1][:2], ("kaGE", "no-reply"))
 
     def test_clean_sweep_visits_every_language(self):
         board = self._Board()

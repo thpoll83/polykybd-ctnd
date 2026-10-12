@@ -436,6 +436,18 @@ and relative links were adjusted to suit a standalone file.
   - **A `.` answer counts as "back" only after the interface went away at least
     once**: the `*` can be lost to a read, but a master that never dropped off USB
     did not reboot, and that fails.
+- ⚠️ **The rig's Pi 4 loses raw HID replies, usually two in a row.** The master
+  receives the request, sends the reply, and the host never gets it. Measured
+  2026-10-12 with a debug build that logged every request and reply: 4 to 23 such
+  stalls per 2000 requests on the rig, with or without a language change, on firmware
+  1.5.0 to 1.8.9. A Windows desktop sending the same pattern lost 0 in 2000. The
+  VL805 firmware was current (`000138c0`). Retried `send()` calls absorb it unseen.
+  The single-attempt GET_ID after each language switch did not: 8 s covered two lost
+  replies, and a third failed the sweep. `_probe_after_switch` now keeps asking for
+  `LANG_SWEEP_LOST_REPLY_S` (20 s) while the interface stays present, and logs
+  `replies lost by the rig's host`. A vanished interface (a reboot) keeps the 8 s
+  window, and a hung master still ends as `no-reply`. Any other single-attempt call
+  on the rig needs the same allowance.
 - ⚠️ **The touch UI's "Run Tests" button ran NO tests until 2026-08-20.**
   `on_run_tests` called `flash_and_test(left, right)` without `tests=TESTS`, and
   the default is `None` → `for test in (tests or [])`, so it flashed, blanked the
