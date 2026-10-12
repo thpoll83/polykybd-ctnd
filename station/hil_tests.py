@@ -1635,22 +1635,32 @@ def _probe_after_switch(raw: RawHID, log: Callable[[str], None],
     own lost-reply pattern (see LANG_SWEEP_LOST_REPLY_S), not the master. A master
     that hangs still ends as 'no-reply', only later."""
     start = time.monotonic()
-    misses = 0
+    timeouts = bad = unplugged = 0
     gone = False
     while True:
+        raised = False
         try:
             resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
         except RuntimeError:
             resp = None
-            gone = True
+            raised = gone = True
         if _resp_ok(resp, CMD_GET_ID, lambda *_a: None, expect_status=None):
             if resp[2] == FRESH_BOOT:
                 return "rebooted"
+            misses = timeouts + bad + unplugged
             if misses:
-                log(f"    master answered GET_ID after {misses} miss(es)"
-                    + ("" if gone else " (replies lost by the rig's host, interface present)"))
+                # What was seen, not why: a timeout alone cannot tell a reply the
+                # host lost from one the master sent late.
+                log(f"    master answered GET_ID after {misses} miss(es): "
+                    f"{timeouts} read timeout(s), {bad} bad repl(ies), "
+                    f"{unplugged} with the interface gone")
             return "alive"
-        misses += 1
+        if raised:
+            unplugged += 1
+        elif resp is None:
+            timeouts += 1
+        else:
+            bad += 1
         window = reboot_s if gone else max(reboot_s, lost_reply_s)
         if time.monotonic() - start >= window:
             return "no-reply"
