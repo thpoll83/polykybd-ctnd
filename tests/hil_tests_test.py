@@ -927,8 +927,13 @@ class LanguageSweepTest(unittest.TestCase):
         """A master that switches language, answers GET_ID with its one-shot
         fresh-boot marker, and can crash, go silent or NACK on given codes."""
 
-        def __init__(self, crash_on=(), silent_on=(), nack_on=(), unplugged_reads=0):
+        def __init__(self, crash_on=(), silent_on=(), nack_on=(), unplugged_reads=0, lose_on=None):
             import struct
+            # code -> how many GET_ID replies the HOST loses after switching to it,
+            # with the interface present: the rig's lost-reply pattern.
+            self.lose_on = dict(lose_on or {})
+            self.lose = 0
+            self.clock = None   # a _FakeClock, advanced by each lost reply's read timeout
             self.lang = "enUS"
             self.fresh = False
             self.crash_on, self.silent_on, self.nack_on = set(crash_on), set(silent_on), set(nack_on)
@@ -962,11 +967,17 @@ class LanguageSweepTest(unittest.TestCase):
                     self.records[0] = self.crash_body
                 if code in self.silent_on:
                     self.silent = True
+                self.lose = self.lose_on.get(code, 0)
                 return bytes([POLY_CHANNEL, cmd, ACK])
             if cmd == CMD_GET_ID:
                 self.get_id_attempts.append(attempts)
                 status = FRESH_BOOT if self.fresh else ACK
-                self.fresh = False
+                self.fresh = False   # the firmware clears it on receipt, reply lost or not
+                if self.lose:
+                    self.lose -= 1
+                    if self.clock:
+                        self.clock.now += timeout_ms / 1000
+                    return None
                 return bytes([POLY_CHANNEL, cmd, status]) + IDENTITY
             if cmd == hil_tests.CMD_GET_LANG:
                 return bytes([POLY_CHANNEL, cmd, ACK]) + self.lang.encode("ascii") + b"\0"
@@ -976,7 +987,68 @@ class LanguageSweepTest(unittest.TestCase):
 
     def sweep(self, board, codes=None):
         return hil_tests._sweep_languages(board, lambda *_a: None, codes or self.CODES,
-                                          dwell_s=0, reboot_s=0)
+                                          dwell_s=0, reboot_s=0, lost_reply_s=0)
+
+    class _FakeClock:
+        """time.monotonic/time.sleep for the probe: a pause advances it, and the
+        board advances it by the read timeout of every reply it loses."""
+        def __init__(self):
+            self.now = 1000.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, s):
+            self.now += s
+
+    def _sweep_timed(self, board, **kw):
+        """A sweep on the fake clock, with the production windows unless given."""
+        from unittest import mock
+        clock = self._FakeClock()
+        board.clock = clock
+        logged = []
+        with mock.patch.object(hil_tests.time, "monotonic", clock.monotonic), \
+             mock.patch.object(hil_tests.time, "sleep", clock.sleep):
+            results = hil_tests._sweep_languages(board, logged.append, self.CODES, dwell_s=0, **kw)
+        return results, logged, clock
+
+    def test_production_windows_are_8_and_20_seconds(self):
+        self.assertEqual(hil_tests.LANG_SWEEP_REBOOT_S, 8.0)
+        self.assertEqual(hil_tests.LANG_SWEEP_LOST_REPLY_S, 20.0)
+
+    def test_three_lost_replies_are_waited_out(self):
+        # 3 x (3 s timeout + 0.5 s pause) = 10.5 s: past the old 8 s, inside 20 s.
+        board = self._Board(lose_on={"kaGE": 3})
+        results, logged, _ = self._sweep_timed(board)
+        self.assertTrue(hil_tests.classify_language_sweep(results, len(self.CODES))[0])
+        line = next(ln for ln in logged if "after 3 miss(es)" in ln)
+        self.assertIn("3 read timeout(s)", line)
+        self.assertIn("0 with the interface gone", line)
+
+    def test_three_lost_replies_failed_the_old_8_second_window(self):
+        board = self._Board(lose_on={"kaGE": 3})
+        results, _, _ = self._sweep_timed(board, lost_reply_s=0)
+        self.assertEqual(results[-1][:2], ("kaGE", "no-reply"))
+
+    def test_more_lost_replies_than_20_seconds_is_no_reply(self):
+        # 6 x 3.5 s = 21 s: a master that stays quiet that long is reported.
+        board = self._Board(lose_on={"kaGE": 6})
+        results, _, _ = self._sweep_timed(board)
+        self.assertEqual(results[-1][:2], ("kaGE", "no-reply"))
+
+    def test_a_vanished_interface_keeps_the_8_second_window(self):
+        # A master that dropped off USB and never came back is not a lost reply.
+        board = self._Board(crash_on={"hyAM"}, unplugged_reads=10**6)
+        results, _, clock = self._sweep_timed(board)
+        self.assertEqual(results[-1][:2], ("hyAM", "no-reply"))
+        self.assertLess(clock.now - 1000.0, 9.0)
+
+    def test_a_reboot_is_still_seen_after_a_lost_reply(self):
+        # The '*' reply itself is lost; the firmware has cleared the marker by then,
+        # so the next GET_ID answers '.', exactly as on hardware.
+        board = self._Board(crash_on={"hyAM"}, lose_on={"hyAM": 1})
+        results, _, _ = self._sweep_timed(board)
+        self.assertEqual(results[2][:2], ("hyAM", "ok"))
 
     def test_clean_sweep_visits_every_language(self):
         board = self._Board()

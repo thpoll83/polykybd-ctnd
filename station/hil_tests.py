@@ -1599,6 +1599,15 @@ def test_language_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
 
 LANG_SWEEP_DWELL_S  = 0.4   # after CHANGE_LANG: let the master redraw its keycaps
 LANG_SWEEP_REBOOT_S = 8.0   # how long a silent master gets to come back as '*'
+# How long to keep asking while the interface stays PRESENT and only the reads time
+# out. The rig's Pi 4 drops raw HID replies on its own: the master receives the
+# request and sends the reply, and the host never gets it, two in a row. Measured
+# 2026-10-12: 4 to 23 such stalls per 2000 requests on the rig, 0 in 2000 from a
+# Windows desktop with the same request pattern, on firmware from 1.5.0 to 1.8.9.
+# Each lost reply costs a 3 s read timeout plus the 0.5 s pause, so 8 s covered two
+# losses and a third failed the sweep. 20 s covers five. A reboot makes the
+# interface vanish (send() raises), and that path keeps the 8 s above.
+LANG_SWEEP_LOST_REPLY_S = 20.0
 
 
 def _crash_record_body(raw: RawHID, which: int):
@@ -1612,28 +1621,48 @@ def _crash_record_body(raw: RawHID, which: int):
 
 
 def _probe_after_switch(raw: RawHID, log: Callable[[str], None],
-                        reboot_s: float = LANG_SWEEP_REBOOT_S) -> str:
+                        reboot_s: float = LANG_SWEEP_REBOOT_S,
+                        lost_reply_s: float = LANG_SWEEP_LOST_REPLY_S) -> str:
     """'alive', 'rebooted' or 'no-reply' for the master right after a CHANGE_LANG.
 
     GET_ID goes out with ``attempts=1`` because it consumes the fresh-boot marker:
     the first GET_ID after a reboot answers '*', and a retry inside send() would
     swallow it and answer '.', hiding the crash. A reboot also re-enumerates USB,
-    so send() can raise while the interface is gone; that is polled through too."""
-    deadline = time.monotonic() + reboot_s
-    misses = 0
+    so send() can raise while the interface is gone; that is polled through too.
+
+    While the interface never went away and only the reads timed out, the probe
+    keeps asking for ``lost_reply_s`` instead of ``reboot_s``: that is the rig's
+    own lost-reply pattern (see LANG_SWEEP_LOST_REPLY_S), not the master. A master
+    that hangs still ends as 'no-reply', only later."""
+    start = time.monotonic()
+    timeouts = bad = unplugged = 0
+    gone = False
     while True:
+        raised = False
         try:
             resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
         except RuntimeError:
             resp = None
+            raised = gone = True
         if _resp_ok(resp, CMD_GET_ID, lambda *_a: None, expect_status=None):
             if resp[2] == FRESH_BOOT:
                 return "rebooted"
+            misses = timeouts + bad + unplugged
             if misses:
-                log(f"    master answered GET_ID after {misses} miss(es)")
+                # What was seen, not why: a timeout alone cannot tell a reply the
+                # host lost from one the master sent late.
+                log(f"    master answered GET_ID after {misses} miss(es): "
+                    f"{timeouts} read timeout(s), {bad} bad repl(ies), "
+                    f"{unplugged} with the interface gone")
             return "alive"
-        misses += 1
-        if time.monotonic() >= deadline:
+        if raised:
+            unplugged += 1
+        elif resp is None:
+            timeouts += 1
+        else:
+            bad += 1
+        window = reboot_s if gone else max(reboot_s, lost_reply_s)
+        if time.monotonic() - start >= window:
             return "no-reply"
         time.sleep(0.5)
 
@@ -1654,7 +1683,8 @@ def classify_language_sweep(results, total: int) -> tuple:
 
 def _sweep_languages(raw: RawHID, log: Callable[[str], None], codes,
                      dwell_s: float = LANG_SWEEP_DWELL_S,
-                     reboot_s: float = LANG_SWEEP_REBOOT_S):
+                     reboot_s: float = LANG_SWEEP_REBOOT_S,
+                     lost_reply_s: float = LANG_SWEEP_LOST_REPLY_S):
     """Switch to each code in turn and check the master survived the redraw.
 
     Stops at the first reboot or silent master: that language is the finding,
@@ -1668,7 +1698,7 @@ def _sweep_languages(raw: RawHID, log: Callable[[str], None], codes,
             results.append((code, "nack", f"reply {bytes(resp[:3])!r}" if resp else "no reply"))
             continue
         time.sleep(dwell_s)
-        state = _probe_after_switch(raw, log, reboot_s)
+        state = _probe_after_switch(raw, log, reboot_s, lost_reply_s)
         if state != "alive":
             results.append((code, state, "the master crashed drawing this layout"
                             if state == "rebooted" else "the master stopped answering"))
