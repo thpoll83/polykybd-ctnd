@@ -445,7 +445,8 @@ and relative links were adjusted to suit a standalone file.
   The single-attempt GET_ID after each language switch did not: 8 s covered two lost
   replies, and a third failed the sweep. `_probe_after_switch` now keeps asking for
   `LANG_SWEEP_LOST_REPLY_S` (20 s) while the interface stays present, and logs
-  `replies lost by the rig's host`. A vanished interface (a reboot) keeps the 8 s
+  each miss by kind (`N read timeout(s), N bad repl(ies), N with the interface
+  gone`) without naming a cause. A vanished interface (a reboot) keeps the 8 s
   window, and a hung master still ends as `no-reply`. Any other single-attempt call
   on the rig needs the same allowance.
 - ⚠️ **The touch UI's "Run Tests" button ran NO tests until 2026-08-20.**
