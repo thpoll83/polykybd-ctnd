@@ -16,9 +16,11 @@ suspend hold. The kernel's runtime PM produces the same bus state:
 3. Wake: ``power/control`` = ``on`` resumes the port, then ``usbhid`` is bound
    again and the hidraw nodes come back.
 
-Every sysfs write goes through ``sudo tee``, as ``uhubctl`` and ``picotool``
-already do in :mod:`station.flash`. ``root`` and ``write`` are parameters so the
-offline tests can run this against a fake tree.
+Every sysfs write goes through ``sudo -n polykybd-usb-suspend``
+(``scripts/usb-suspend-ctl.sh``, installed by ``setup.sh``). The wrapper accepts
+four operations and only on the PolyKybd's own device, so the sudo grant is not
+a root write to any file. Reads need no privilege. ``root`` and ``ctl`` are
+parameters so the offline tests can run this against a fake tree.
 """
 import os
 import subprocess
@@ -27,12 +29,23 @@ from typing import Callable
 
 SYSFS_USB = "/sys/bus/usb"
 USBHID = "usbhid"
+USB_SUSPEND_CTL = "/usr/local/sbin/polykybd-usb-suspend"
 
 
-def sudo_write(path: str, value: str) -> None:
-    """Write one sysfs attribute as root."""
-    subprocess.run(["sudo", "tee", path], input=value.encode("ascii"),
-                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+def sudo_ctl(*args: str) -> None:
+    """Run one wrapper operation as root: ``unbind``/``bind`` <intf>,
+    ``control`` <dev> on|auto, or ``delay`` <dev> <ms>.
+
+    ``-n``: a missing grant fails at once instead of waiting on a password
+    prompt nobody will answer. The fix is ``setup.sh --units-only``."""
+    try:
+        subprocess.run(["sudo", "-n", USB_SUSPEND_CTL, *args],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace").strip()
+        raise RuntimeError(f"polykybd-usb-suspend {' '.join(args)} failed: {detail} "
+                           "(is the rig provisioned? sudo bash ./scripts/setup.sh "
+                           "--units-only)") from exc
 
 
 def _read(path: str) -> str:
@@ -89,12 +102,12 @@ class UsbSuspend:
     :meth:`suspend`, so a caller can put it in a ``finally``."""
 
     def __init__(self, device: str, root: str = SYSFS_USB,
-                 write: Callable[[str, str], None] = sudo_write,
+                 ctl: Callable[..., None] = sudo_ctl,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic):
         self.device = device
         self._root = root
-        self._write = write
+        self._ctl = ctl
         self._sleep = sleep
         self._clock = clock
         self._power = os.path.join(root, "devices", device, "power")
@@ -108,12 +121,14 @@ class UsbSuspend:
         device awake, and the test would measure nothing."""
         self._saved = (_read(os.path.join(self._power, "control")),
                        _read(os.path.join(self._power, "autosuspend_delay_ms")))
-        self._unbound = bound_interfaces(self.device, root=self._root)
-        unbind = os.path.join(self._root, "drivers", USBHID, "unbind")
-        for intf in self._unbound:
-            self._write(unbind, intf)
-        self._write(os.path.join(self._power, "autosuspend_delay_ms"), "0")
-        self._write(os.path.join(self._power, "control"), "auto")
+        # Record each interface only once its unbind succeeded: resume() rebinds
+        # exactly these, and a bind of one still bound fails with EBUSY.
+        self._unbound = []
+        for intf in bound_interfaces(self.device, root=self._root):
+            self._ctl("unbind", intf)
+            self._unbound.append(intf)
+        self._ctl("delay", self.device, "0")
+        self._ctl("control", self.device, "auto")
         start = self._clock()
         while True:
             status = runtime_status(self.device, self._root)
@@ -131,13 +146,12 @@ class UsbSuspend:
         bound would let the port autosuspend again before the bind."""
         saved, self._saved = self._saved, None
         if saved is not None:
-            self._write(os.path.join(self._power, "control"), "on")
-        bind = os.path.join(self._root, "drivers", USBHID, "bind")
+            self._ctl("control", self.device, "on")
         unbound, self._unbound = self._unbound, []
         for intf in unbound:
-            self._write(bind, intf)
+            self._ctl("bind", intf)
         if saved is not None:
             control, delay = saved
-            self._write(os.path.join(self._power, "autosuspend_delay_ms"), delay)
+            self._ctl("delay", self.device, delay)
             if control != "on":
-                self._write(os.path.join(self._power, "control"), control)
+                self._ctl("control", self.device, control)

@@ -78,17 +78,24 @@ class FakeSysfs:
     def delay(self):
         return self._get("devices", self.DEV, "power", "autosuspend_delay_ms")
 
-    def write(self, path, value):
-        """The sudo_write stand-in: apply the write the way the kernel would."""
-        self.writes.append((os.path.relpath(path, self.root), value))
-        rel = os.path.relpath(path, self.root)
-        intf = os.path.join(self.root, "devices", value, "driver")
-        if rel == "drivers/usbhid/unbind":
-            os.unlink(intf)
-        elif rel == "drivers/usbhid/bind":
-            os.symlink(self.drivers, intf)
+    def ctl(self, op, target, value=None):
+        """The sudo_ctl stand-in: apply the wrapper operation the way the kernel
+        would. ``fail_unbind`` makes the unbind of that interface fail."""
+        self.writes.append((op, target, value))
+        if op == "unbind" and target == getattr(self, "fail_unbind", None):
+            raise RuntimeError(f"unbind {target} failed")
+        devices = os.path.join(self.root, "devices")
+        if op in ("unbind", "bind"):
+            link = os.path.join(devices, target, "driver")
+            if op == "unbind":
+                os.unlink(link)
+            else:
+                if os.path.islink(link):
+                    raise RuntimeError(f"bind {target}: EBUSY")
+                os.symlink(self.drivers, link)
         else:
-            self._put(path, value + "\n")
+            attr = {"control": "control", "delay": "autosuspend_delay_ms"}[op]
+            self._put(os.path.join(devices, target, "power", attr), value + "\n")
         self._update_status()
 
     def _update_status(self):
@@ -130,7 +137,7 @@ class UsbSuspendTest(unittest.TestCase):
     def test_suspend_reads_suspended_and_resume_restores_everything(self):
         fs = FakeSysfs(self.root, control="on", delay="2000")
         sleep, clock = self._clock()
-        s = UsbSuspend(fs.DEV, root=self.root, write=fs.write, sleep=sleep, clock=clock)
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
         s.suspend()
         self.assertEqual(usb_suspend.runtime_status(fs.DEV, self.root), "suspended")
         self.assertEqual(bound_interfaces(fs.DEV, root=self.root), [])
@@ -144,22 +151,33 @@ class UsbSuspendTest(unittest.TestCase):
         # with nothing bound.
         fs = FakeSysfs(self.root, control="auto", delay="2000")
         sleep, clock = self._clock()
-        s = UsbSuspend(fs.DEV, root=self.root, write=fs.write, sleep=sleep, clock=clock)
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
         s.suspend()
         fs.writes.clear()
         s.resume()
-        kinds = [w[0].rsplit("/", 1)[-1] for w in fs.writes]
-        self.assertEqual(kinds[0], "control")
-        self.assertEqual(fs.writes[0][1], "on")
-        self.assertLess(max(i for i, k in enumerate(kinds) if k == "bind"),
-                        kinds.index("autosuspend_delay_ms"))
-        self.assertEqual(fs.writes[-1], (f"devices/{fs.DEV}/power/control", "auto"))
+        ops = [w[0] for w in fs.writes]
+        self.assertEqual(fs.writes[0], ("control", fs.DEV, "on"))
+        self.assertLess(max(i for i, op in enumerate(ops) if op == "bind"),
+                        ops.index("delay"))
+        self.assertEqual(fs.writes[-1], ("control", fs.DEV, "auto"))
         self.assertEqual(usb_suspend.runtime_status(fs.DEV, self.root), "active")
+
+    def test_a_failed_unbind_rebinds_only_what_was_unbound(self):
+        fs = FakeSysfs(self.root, control="on", delay="2000")
+        fs.fail_unbind = f"{fs.DEV}:1.1"
+        sleep, clock = self._clock()
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
+        with self.assertRaises(RuntimeError):
+            s.suspend()
+        s.resume()   # would raise EBUSY on a still-bound interface
+        self.assertEqual(len(bound_interfaces(fs.DEV, root=self.root)), 3)
+        self.assertEqual((fs.control(), fs.delay()), ("on", "2000"))
+        self.assertEqual([w[1] for w in fs.writes if w[0] == "bind"], [f"{fs.DEV}:1.0"])
 
     def test_a_device_held_awake_raises_and_resume_still_cleans_up(self):
         fs = FakeSysfs(self.root, holds_awake=True)
         sleep, clock = self._clock()
-        s = UsbSuspend(fs.DEV, root=self.root, write=fs.write, sleep=sleep, clock=clock)
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
         with self.assertRaises(RuntimeError):
             s.suspend(timeout_s=2.0)
         s.resume()
@@ -169,7 +187,7 @@ class UsbSuspendTest(unittest.TestCase):
     def test_resume_twice_writes_nothing_the_second_time(self):
         fs = FakeSysfs(self.root)
         sleep, clock = self._clock()
-        s = UsbSuspend(fs.DEV, root=self.root, write=fs.write, sleep=sleep, clock=clock)
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
         s.suspend()
         s.resume()
         n = len(fs.writes)
@@ -392,11 +410,93 @@ class SuspendWiringTest(unittest.TestCase):
 class VerdictTest(unittest.TestCase):
 
     def test_states(self):
-        self.assertIsNone(tr.suspend_round_verdict("back", []))
-        self.assertIsNone(tr.suspend_round_verdict("not-rebooted", []))
-        self.assertIn("reset while suspended", tr.suspend_round_verdict("fresh", []))
-        self.assertIn("did not answer", tr.suspend_round_verdict("no-reply", []))
-        self.assertIn("core1 stall", tr.suspend_round_verdict("back", ["x"]))
+        from station.hil_tests import suspend_round_verdict as v
+        self.assertIsNone(v("back", []))
+        self.assertIsNone(v("not-rebooted", []))
+        self.assertIn("reset while suspended", v("fresh", []))
+        self.assertIn("did not answer", v("no-reply", []))
+        self.assertIn("core1 stall", v("back", ["x"]))
+
+
+# --- the root wrapper (scripts/usb-suspend-ctl.sh) -------------------------------
+
+import shutil      # noqa: E402
+import subprocess  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+CTL = Path(__file__).resolve().parent.parent / "scripts" / "usb-suspend-ctl.sh"
+
+
+@unittest.skipUnless(os.geteuid() != 0 or shutil.which("setpriv"),
+                     "as root the wrapper ignores the fake tree; needs setpriv to drop it")
+class UsbSuspendCtlTest(unittest.TestCase):
+    """The wrapper's value is what it REFUSES, so the refusals are pinned here.
+
+    It honours POLYKYBD_SYSFS_USB only when not root, so as root (this container)
+    the script runs under setpriv as nobody."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.fs = FakeSysfs(self._tmp.name)
+        os.makedirs(os.path.join(self._tmp.name, "drivers", "usbhid"), exist_ok=True)
+        for f in ("bind", "unbind"):
+            FakeSysfs._put(os.path.join(self._tmp.name, "drivers", "usbhid", f), "")
+        # A second HID device that is not the keyboard.
+        d = os.path.join(self._tmp.name, "devices", "1-1.4")
+        os.makedirs(os.path.join(d, "power"))
+        FakeSysfs._put(os.path.join(d, "idVendor"), "046d\n")
+        FakeSysfs._put(os.path.join(d, "idProduct"), "c52b\n")
+        FakeSysfs._put(os.path.join(d, "power", "control"), "on\n")
+        os.chmod(self._tmp.name, 0o777)
+        for dirpath, dirs, files in os.walk(self._tmp.name):
+            for n in dirs + files:
+                p = os.path.join(dirpath, n)
+                if not os.path.islink(p):
+                    os.chmod(p, 0o777)
+
+    def run_ctl(self, *args):
+        cmd = ["bash", str(CTL), *args]
+        if os.geteuid() == 0:
+            cmd = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups"] + cmd
+        env = {**os.environ, "POLYKYBD_SYSFS_USB": self._tmp.name}
+        return subprocess.run(cmd, env=env, capture_output=True, text=True)
+
+    def read(self, *parts):
+        with open(os.path.join(self._tmp.name, *parts), encoding="ascii") as f:
+            return f.read()
+
+    def test_the_four_operations_write_their_file(self):
+        dev = self.fs.DEV
+        for args, path, want in (
+                (("unbind", f"{dev}:1.0"), ("drivers", "usbhid", "unbind"), f"{dev}:1.0"),
+                (("bind", f"{dev}:1.2"), ("drivers", "usbhid", "bind"), f"{dev}:1.2"),
+                (("control", dev, "auto"), ("devices", dev, "power", "control"), "auto"),
+                (("delay", dev, "0"), ("devices", dev, "power", "autosuspend_delay_ms"), "0")):
+            with self.subTest(args=args):
+                r = self.run_ctl(*args)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.read(*path), want)
+
+    def test_refusals(self):
+        dev = self.fs.DEV
+        for args in (
+                (),
+                ("unbind",),
+                ("unbind", "1-1.4:1.0"),                 # another vendor's device
+                ("control", "1-1.4", "auto"),
+                ("unbind", f"{dev}:1.0", "extra"),
+                ("unbind", "../../../etc/passwd"),
+                ("control", f"{dev}/../1-1.4", "auto"),
+                ("control", dev, "suspend"),
+                ("delay", dev, "0; rm -rf /"),
+                ("delay", dev, "99999999"),
+                ("tee", "/etc/sudoers", "x"),
+                ("control", "9-9", "on")):              # no such device
+            with self.subTest(args=args):
+                r = self.run_ctl(*args)
+                self.assertNotEqual(r.returncode, 0, f"accepted {args}")
+        self.assertEqual(self.read("devices", "1-1.4", "power", "control"), "on\n")
 
 
 if __name__ == "__main__":

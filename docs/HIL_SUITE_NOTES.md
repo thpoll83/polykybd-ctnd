@@ -204,7 +204,11 @@ and relative links were adjusted to suit a standalone file.
     `suspended`. A bound `usbhid` whose input device is open (X, the kiosk) holds a
     PM reference, so without the unbind the port never sleeps. VBUS stays on, which
     is the field case: a hub that powers the keyboard through the host's sleep.
-    Every sysfs write is `sudo tee`, like `uhubctl` and `picotool` in `flash.py`.
+    Every sysfs write goes through `sudo -n polykybd-usb-suspend`
+    (`scripts/usb-suspend-ctl.sh`), which accepts four operations and only on the
+    2021:2007 device. ⚠️ A rig provisioned before this needs
+    `sudo bash ./scripts/setup.sh --units-only`, or the check fails at its first
+    unbind with "is the rig provisioned?".
   - **Per round (3)**: stop idle, start idle, wait for `Transition to idle
     [style=eden]`, let Eden run 1.5 s, suspend, hold 3 s, wake. A round fails on a
     `*` from the single-attempt GET_ID (a reset while suspended), on no answer within

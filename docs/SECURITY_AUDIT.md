@@ -407,6 +407,20 @@ gets `pull-requests: write`. The firmware repo meets the same rule with a person
 token on the `PolyKybd` bypass list instead (`secrets.BUMP_PAT`): no such setting, but a
 long-lived write token in Actions secrets.
 
+### The `polykybd-usb-suspend` grant writes only the keyboard's own sysfs (2026-10-13)
+
+The HIL suspend/wake check (ctnd#114) needs root for four sysfs writes. Revix flagged
+the first cut, which used `sudo tee <path>`: granted, that is a root write to any file,
+and on a rig after HIL-8 it would not have worked anyway (it prompts). The grant is on
+`/usr/local/sbin/polykybd-usb-suspend` instead, a root-owned copy of
+`scripts/usb-suspend-ctl.sh` installed by `setup.sh` (same installed-copy rule as
+HIL-7). It accepts `unbind|bind <intf>`, `control <dev> on|auto` and `delay <dev> <ms>`,
+checks every name against a strict pattern, and refuses any device whose
+`idVendor:idProduct` is not 2021:2007. The sysfs root override used by the offline tests
+is ignored when the script runs as root. Worst case through the grant: the station user
+can suspend or unbind the keyboard, which it can already disrupt over raw HID.
+`tests/usb_suspend_test.py` pins the refusals.
+
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
 The three inert findings above cost real verification and produced no artifact at the time;
@@ -564,6 +578,7 @@ is already covered by a scoped grant:
 | UI ⟳ Restart, ↻ Re-register | `sudo polykybd-runner-ctl …` | `polykybd-runner` |
 | `register-runner.sh` `run_as_ctnd()` | `sudo -u $CTND_USER` | n/a — skipped, already that user |
 | **HIL CI jobs** | nothing | `qmk-test.yml` contains no `sudo` at all |
+| HIL suspend/wake check (added 2026-10-13, ctnd#114) | four sysfs writes | `polykybd-usb-suspend` |
 
 Only two things start prompting, both interactive admin operations where that is correct:
 first-time runner installation (`sudo ./svc.sh install`, in the full registration path —

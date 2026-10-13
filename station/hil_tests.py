@@ -1828,6 +1828,29 @@ def _wait_for_reboot(raw: RawHID, deadline_s: float) -> str:
     return "no-reply"
 
 
+# How long the master gets to answer after a USB wake (resume + usbhid rebind +
+# re-enumeration). Used by the runner's suspend/wake check.
+SUSPEND_RETURN_S = 20.0
+
+
+def suspend_round_verdict(state: str, stall_lines: list):
+    """Why one suspend/wake round failed, or None. Pure.
+
+    ``state`` is :func:`_wait_for_reboot`'s answer after the wake.
+    ``back`` (the interface went away and returned) is the normal case, since
+    the wake rebinds usbhid; ``not-rebooted`` only means the first probe came
+    after the rebind. ``fresh`` is a reset while suspended: the watchdog
+    recovering a wedged bus, which is the shipped bug."""
+    if state == "fresh":
+        return ("the master answered '*' after the wake: it reset while suspended "
+                "(watchdog — read its crash record)")
+    if state == "no-reply":
+        return f"the master did not answer within {SUSPEND_RETURN_S:.0f} s of the wake"
+    if stall_lines:
+        return f"the firmware reported a core1 stall: {stall_lines[0]}"
+    return None
+
+
 def test_boot_loop(raw: RawHID, log: Callable[[str], None]) -> bool:
     """Reboot (cmd 43) N times and stop at the first boot that went wrong.
 

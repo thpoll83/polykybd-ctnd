@@ -12,7 +12,8 @@ from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
                         LINK_OK, LINK_NO_SUMMARY, TIER_EXTENDED, IDLE_STYLE_EDEN,
                         IDLE_ENGAGE_TIMEOUT_S, CMD_IDLE_STATE, CRASH_HID_FLAG_PRESENT,
-                        _crash_record_body, _wait_for_reboot, describe_crash_record)
+                        _crash_record_body, _wait_for_reboot, describe_crash_record,
+                        suspend_round_verdict, SUSPEND_RETURN_S)
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID
 from .usb_suspend import UsbSuspend, find_device
 
@@ -45,7 +46,6 @@ SUSPEND_GATE = {"min_fw": "1.9.1", "needs_console": True, "tier": TIER_EXTENDED}
 SUSPEND_ROUNDS = 3
 SUSPEND_EDEN_RUN_S = 1.5   # Eden keycap jobs flowing on core1 before the suspend
 SUSPEND_HOLD_S = 3.0       # the firmware runs its suspend tick (and flush) in here
-SUSPEND_RETURN_S = 20.0    # resume + rebind + re-enumeration
 # The stall report prints from housekeeping after the wake; the first one has no
 # rate limit, so a few seconds of a live console is enough to see it.
 SUSPEND_STALL_WAIT_S = 3.0
@@ -83,24 +83,6 @@ def should_reflash_slave(apply_result: dict, enabled: bool) -> bool:
     return (enabled
             and apply_result.get("status") == "pass"
             and apply_result.get("link") != LINK_OK)
-
-
-def suspend_round_verdict(state: str, stall_lines: list):
-    """Why one suspend/wake round failed, or None. Pure.
-
-    ``state`` is :func:`hil_tests._wait_for_reboot`'s answer after the wake.
-    ``back`` (the interface went away and returned) is the normal case, since
-    the wake rebinds usbhid; ``not-rebooted`` only means the first probe came
-    after the rebind. ``fresh`` is a reset while suspended: the watchdog
-    recovering a wedged bus, which is the shipped bug."""
-    if state == "fresh":
-        return ("the master answered '*' after the wake: it reset while suspended "
-                "(watchdog — read its crash record)")
-    if state == "no-reply":
-        return f"the master did not answer within {SUSPEND_RETURN_S:.0f} s of the wake"
-    if stall_lines:
-        return f"the firmware reported a core1 stall: {stall_lines[0]}"
-    return None
 
 
 class TestRunner:
@@ -285,6 +267,8 @@ class TestRunner:
                 elif any(r.get("status") == "fail" for r in results):
                     self.log("[runner] skipping the suspend/wake check — the suite "
                              "already has a failure to diagnose first")
+                    results.append({"name": SUSPEND_TEST_NAME, "status": "skip",
+                                    "reason": "an earlier test failed"})
                 else:
                     results.append(self.suspend_wake_eden())
             elif tests:
