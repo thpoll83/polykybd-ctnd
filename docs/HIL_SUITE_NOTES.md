@@ -3,7 +3,7 @@
 Extracted from `CLAUDE.md` 2026-09-14. The prose is unchanged; only heading levels
 and relative links were adjusted to suit a standalone file.
 
-- [x] Write concrete test cases — `station/hil_tests.py` covers every Raw HID command testable without side effects on the unattended rig (identity/fresh-boot, language get/list/list-packed/round-trip, default layer, ACK/NACK error+bounds paths, idle-style / OS / glyph-script round-trips, overlay-flags round-trip, every overlay upload shape — plain, core1 RLE, the two-packet cmd-17 continuation, ROI + its bounds clamp, and both mapping commands — the animation and idle-screensaver paths, GET_ID stress, a bridged split-link soak, and the font-pack/doom flash transport), wired into the `test_runner.py` CLI, plus two runner-level checks that need hardware control (the firmware-update stage+verify and the reboot-persistence power cycle). ⚠️ Count the entries in `TESTS` rather than trusting a number written here — this line has been stale before. Remaining infra-dependent / camera-needing / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
+- [x] Write concrete test cases — `station/hil_tests.py` covers every Raw HID command testable without side effects on the unattended rig (identity/fresh-boot, language get/list/list-packed/round-trip, default layer, ACK/NACK error+bounds paths, idle-style / OS / glyph-script round-trips, overlay-flags round-trip, every overlay upload shape — plain, core1 RLE, the two-packet cmd-17 continuation, ROI + its bounds clamp, and both mapping commands — the animation and idle-screensaver paths, GET_ID stress, a bridged split-link soak, and the font-pack/doom flash transport), wired into the `test_runner.py` CLI, plus runner-level checks that need hardware control (the firmware-update stage+verify, the USB suspend/wake rounds and the reboot-persistence power cycle). ⚠️ Count the entries in `TESTS` rather than trusting a number written here — this line has been stale before. Remaining infra-dependent / camera-needing / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
   - The **packed language-list** test (cmd 27, protocol v2+) decodes the 2-byte ISO index pairs via `station/iso_lang_country.py` and validates the list **standalone** — staple locales present, every code well-formed `llCC`, decoded count matches the count byte, current language present. (It no longer cross-checks against the ASCII `GET_LANG_LIST`: that command is **retired** — a separate test asserts cmd 8 now NACKs.) ⚠️ `station/iso_lang_country.py` is the **frozen index table**, byte-identical to the copies in `qmk_firmware` (`keyboards/polykybd/lang/`) and `PolyKybdHost` (`polyhost/services/`); keep all three in sync (`cmp`) or the rig decodes wrong languages. cmd 27 is the only language-list command on v2+ firmware; on a pre-v2 board it NACKs — but the packed/legacy/round-trip tests now carry `"min_protocol": 2`, so a pre-v2 board **skips** them rather than failing (see "Tolerating not-yet-deployed changes" below).
   - The **`GET_ID stress`** test (`test_get_id_stress`) deliberately **tolerates isolated no-answers** and fails only on a *freeze signature* — decided by the pure `classify_get_id_stress(oks, n)`: FAIL if total misses `> max(2, n//10)` or there is a run of `>= STRESS_FREEZE_RUN` (3) consecutive misses; otherwise PASS. ⚠️ **Do not re-tighten it to fail on the first miss** — it runs right after the overlay-upload tests, which leave the master in its transient post-overlay **deaf window** (EEPROM write + full keycap refresh; `send_repeated` already retried the host-side USB hiccups internally). The qmk **split-sync re-fire fix** (#80, `sync_succeeded()`) can *lengthen* that window on the rig, where master→slave sync is flaky, so an occasional GET_ID times out and then recovers — that is not the core1 hang this test guards (a permanent hang answers nothing from the hang point on → a long consecutive run, which still fails). A retried `_master_alive` settle runs before the burst to drain the carried-over window and still catch a real hang.
     - ⚠️ **The `max` in that test's `min/avg/max` line is NOT a device latency once
@@ -192,6 +192,34 @@ and relative links were adjusted to suit a standalone file.
   re-establish, and a rig that is already misbehaving should not also be
   power-cycled. Staging a firmware image first is safe — `fw_staging_init()` clears
   the apply/reboot flags at boot, so a staged-but-uncommitted image stays inert.
+- [x] **`suspend_wake_eden` USB-suspends the master with Eden running on core1**
+  (runner-level, extended, `min_fw` 1.9.1, needs the console). It covers
+  qmk_firmware#385 and #387: an EEPROM write takes the QSPI out of XIP with only
+  core0's interrupts off, and an Eden keycap job on core1 that fetched from flash
+  during the suspend flush stopped core1 or wedged the bus until the watchdog reset
+  the master (field report 2026-10-12, crash record phase=suspend).
+  - **How the Pi suspends a port it cannot power off** (`station/usb_suspend.py`):
+    unbind `usbhid` from the keyboard's interfaces, set `power/autosuspend_delay_ms`
+    0 and `power/control` `auto`, and wait for `power/runtime_status` =
+    `suspended`. A bound `usbhid` whose input device is open (X, the kiosk) holds a
+    PM reference, so without the unbind the port never sleeps. VBUS stays on, which
+    is the field case: a hub that powers the keyboard through the host's sleep.
+    Every sysfs write is `sudo tee`, like `uhubctl` and `picotool` in `flash.py`.
+  - **Per round (3)**: stop idle, start idle, wait for `Transition to idle
+    [style=eden]`, let Eden run 1.5 s, suspend, hold 3 s, wake. A round fails on a
+    `*` from the single-attempt GET_ID (a reset while suspended), on no answer within
+    20 s, or on a `core1 stalled` line in the 3 s after the wake. After the rounds,
+    a new cmd 39 record on either half fails the test.
+  - **The carrier is the idle style, written only by the suspend flush.** Eden is set
+    over cmd 28 and never flushed with cmd 26 (if Eden was already the style, a
+    non-Eden style is parked in EEPROM first). The RUN-pin reset reboots without
+    `shutdown_user()`, whose flush would hide a missing one. Eden must read back.
+  - It runs right after the graded suite, while the console is still live, and only
+    when the suite is green. It reboots the master, so `reboot_persistence` and the
+    firmware-update section after it start from a fresh boot.
+  - ⚠️ **Three rounds is coverage, not proof.** The race is a few ms per suspend.
+    Read `round N: Eden running, port suspended after X s` in the log to confirm
+    each round really suspended with Eden on.
 - [x] **`FW_UP_GET_VERSION` (cmd 0x43) is asserted, not just logged.** The staged
   `.bin` contains the same compile-time GET_ID literal the firmware answers with
   (`caps_from_image`), so the two are compared. This is what catches a flash that
@@ -396,8 +424,8 @@ and relative links were adjusted to suit a standalone file.
   paths*, not between two firmware versions.
 
 - **The slow checks are OPT-IN — `TIER_EXTENDED`.** The animation, the idle-engage
-  + Eden screensaver, the split-link soak and the reboot power cycle add most of a
-  minute to a gate every push pays for, so they are skipped unless the run asks:
+  + Eden screensaver, the split-link soak, the USB suspend rounds and the reboot
+  power cycle add a minute or two to a gate every push pays for, so they are skipped unless the run asks:
   `python -m station.test_runner --extended` (or `HIL_EXTENDED=1`), the
   **`hil-extended`** PR label, `[hil-extended]` in a commit message (push events
   only), a manual `workflow_dispatch`, or the touch UI's **Extended** toggle beside

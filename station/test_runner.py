@@ -10,7 +10,11 @@ from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
-                        LINK_OK, LINK_NO_SUMMARY)
+                        LINK_OK, LINK_NO_SUMMARY, TIER_EXTENDED, IDLE_STYLE_EDEN,
+                        IDLE_ENGAGE_TIMEOUT_S, CMD_IDLE_STATE, CRASH_HID_FLAG_PRESENT,
+                        _crash_record_body, _wait_for_reboot, describe_crash_record)
+from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID
+from .usb_suspend import UsbSuspend, find_device
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
 # keyboards/polykybd/hid_com.c (case 24 / 0x18). A command report is
@@ -31,6 +35,21 @@ ACK              = ord(".")
 # echoes the request back unchanged (no "P<cmd>." ACK). Same id PolyKybdHost uses
 # in PolyKybd.reset_dynamic_keymap(). See keyboards/polykybd/hid_com.c.
 VIA_DYNAMIC_KEYMAP_RESET = 0x06
+
+# USB suspend with Eden on core1 (see TestRunner.suspend_wake_eden).
+SUSPEND_TEST_NAME = "USB suspend with Eden on core1 (flush + wake)"
+# The first firmware that holds core1 out of flash for the suspend flush
+# (qmk_firmware#385) and for every other EEPROM write (#387). Older images stall
+# core1 or reset on the watchdog here, which is the bug, not a rig fault.
+SUSPEND_GATE = {"min_fw": "1.9.1", "needs_console": True, "tier": TIER_EXTENDED}
+SUSPEND_ROUNDS = 3
+SUSPEND_EDEN_RUN_S = 1.5   # Eden keycap jobs flowing on core1 before the suspend
+SUSPEND_HOLD_S = 3.0       # the firmware runs its suspend tick (and flush) in here
+SUSPEND_RETURN_S = 20.0    # resume + rebind + re-enumeration
+# The stall report prints from housekeeping after the wake; the first one has no
+# rate limit, so a few seconds of a live console is enough to see it.
+SUSPEND_STALL_WAIT_S = 3.0
+STALL_PATTERN = "core1 stalled"
 
 
 def should_reflash_slave(apply_result: dict, enabled: bool) -> bool:
@@ -64,6 +83,24 @@ def should_reflash_slave(apply_result: dict, enabled: bool) -> bool:
     return (enabled
             and apply_result.get("status") == "pass"
             and apply_result.get("link") != LINK_OK)
+
+
+def suspend_round_verdict(state: str, stall_lines: list):
+    """Why one suspend/wake round failed, or None. Pure.
+
+    ``state`` is :func:`hil_tests._wait_for_reboot`'s answer after the wake.
+    ``back`` (the interface went away and returned) is the normal case, since
+    the wake rebinds usbhid; ``not-rebooted`` only means the first probe came
+    after the rebind. ``fresh`` is a reset while suspended: the watchdog
+    recovering a wedged bus, which is the shipped bug."""
+    if state == "fresh":
+        return ("the master answered '*' after the wake: it reset while suspended "
+                "(watchdog — read its crash record)")
+    if state == "no-reply":
+        return f"the master did not answer within {SUSPEND_RETURN_S:.0f} s of the wake"
+    if stall_lines:
+        return f"the firmware reported a core1 stall: {stall_lines[0]}"
+    return None
 
 
 class TestRunner:
@@ -117,8 +154,8 @@ class TestRunner:
         """Flash both halves and run ``tests`` against the master.
 
         ``extended`` opts the run into the slow tier — the animation/idle checks,
-        the split-link soak and the reboot power cycle, together most of a minute
-        — which is otherwise skipped so the per-push gate stays fast. See
+        the split-link soak, the USB suspend rounds and the reboot power cycle,
+        together a minute or two — which is otherwise skipped so the per-push gate stays fast. See
         ``hil_tests.TIER_EXTENDED``.
         """
         results = []
@@ -149,7 +186,7 @@ class TestRunner:
             self.status = "testing"
             self.log("[runner] suite tier: "
                      + ("EXTENDED (slow checks included: animation, idle, link "
-                        "soak, reboot power cycle)" if extended else
+                        "soak, USB suspend, reboot power cycle)" if extended else
                         "default (extended checks skipped — pass --extended to "
                         "include them)"))
             # Wait out the post-cold-flash window during which the master blocks
@@ -236,6 +273,24 @@ class TestRunner:
                     results.append(rec)
                     self.log(f"[test] {status.upper()}: {name}: {exc}"
                              + (f" (expected to fail: {xfail})" if xfail else ""))
+
+            # USB suspend with Eden on core1, while the console still runs: the
+            # stall report it watches for is a console line. It reboots the
+            # master at the end, so it goes after the graded suite.
+            if tests and extended:
+                if not console_started:
+                    self.log(f"[test] SKIP: {SUSPEND_TEST_NAME} (needs the console)")
+                    results.append({"name": SUSPEND_TEST_NAME, "status": "skip",
+                                    "reason": "HID console not available"})
+                elif any(r.get("status") == "fail" for r in results):
+                    self.log("[runner] skipping the suspend/wake check — the suite "
+                             "already has a failure to diagnose first")
+                else:
+                    results.append(self.suspend_wake_eden())
+            elif tests:
+                results.append({"name": SUSPEND_TEST_NAME, "status": "skip",
+                                "reason": "extended suite — re-run with --extended "
+                                          "(or the hil-extended label)"})
 
             if console_started:
                 self._console.stop()
@@ -879,6 +934,140 @@ class TestRunner:
                 self.log(f"[runner] restore idle style {original}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
                             "value until someone sets it back"))
+
+    def suspend_wake_eden(self) -> dict:
+        """USB-suspend the master while Eden runs on core1, wake it, and check that
+        the suspend flush wrote EEPROM without stalling core1.
+
+        The field bug (2026-10-12, fixed in qmk_firmware#385 and #387): an EEPROM
+        write takes the QSPI flash out of XIP mode with only core0's interrupts
+        off. An Eden keycap job on core1 that fetched from flash during the
+        suspend flush stopped core1 for good, or wedged the bus and the watchdog
+        reset the master (crash record phase=suspend). The hub kept VBUS on, so
+        the flush ran on every sleep, and LTR-559 auto-brightness made it write
+        almost every time.
+
+        Each round: idle is started with style Eden (confirmed from the console),
+        Eden runs for ``SUSPEND_EDEN_RUN_S``, the Pi suspends the port
+        (:mod:`station.usb_suspend`, no power cut), holds it for
+        ``SUSPEND_HOLD_S``, and wakes it. A round FAILS on a fresh-boot ``*``
+        (the master reset while suspended), a master that does not come back, or
+        a ``core1 stalled`` line. After the rounds a new crash record on either
+        half fails the test.
+
+        The carrier is the idle style. Eden is set over cmd 28 and never flushed
+        with cmd 26, so only the suspend flush can write it. A RUN-pin reset
+        then reboots the master without ``shutdown_user()`` (whose flush would
+        hide a missing one), and the style must read back as Eden.
+
+        Runner-level (it needs sysfs and the GPIO reset) and it reboots the
+        master, so it runs after the graded suite, with the console still live.
+        """
+        name = SUSPEND_TEST_NAME
+        caps = dict(self._device_caps())
+        caps["console"] = True   # the caller runs this only with a live console
+        caps["extended"] = True  # and only on an extended run
+        reason = skip_reason(SUSPEND_GATE, caps)
+        if reason:
+            self.log(f"[test] SKIP: {name} ({reason})")
+            return {"name": name, "status": "skip", "reason": reason}
+
+        original = self._idle_style()
+        if original is None:
+            self.log(f"[test] FAIL: {name}: could not read the idle style")
+            return {"name": name, "status": "fail", "error": "idle style unreadable"}
+        suspender = None
+        try:
+            device = find_device(QMK_VENDOR_ID, QMK_PRODUCT_ID)
+            if device is None:
+                raise RuntimeError(f"no USB device {QMK_VENDOR_ID:04x}:"
+                                   f"{QMK_PRODUCT_ID:04x} under /sys/bus/usb/devices")
+            suspender = UsbSuspend(device)
+            if original == IDLE_STYLE_EDEN:
+                # EEPROM must hold something else, or the read-back below proves
+                # nothing. This one flush is cmd 26's, before any round.
+                if not (self._set_idle_style(0) and self._save_eeprom()):
+                    raise RuntimeError("could not park a non-Eden idle style in EEPROM")
+            if not self._set_idle_style(IDLE_STYLE_EDEN):
+                raise RuntimeError("the keyboard refused idle style Eden")
+            self.log(f"[runner] suspend/wake: USB device {device}, idle style "
+                     f"{original} -> {IDLE_STYLE_EDEN} (Eden, not flushed), "
+                     f"{SUSPEND_ROUNDS} round(s)")
+            before = {which: _crash_record_body(self._raw, which) for which in (0, 1)}
+
+            for n in range(1, SUSPEND_ROUNDS + 1):
+                self._suspend_round(n, suspender)
+
+            for which, side in ((0, "master"), (1, "slave")):
+                after = _crash_record_body(self._raw, which)
+                if (after is not None and after != before[which]
+                        and after[0] & CRASH_HID_FLAG_PRESENT):
+                    raise RuntimeError(f"the {side} half has a NEW crash record: "
+                                       f"{describe_crash_record(after)}")
+
+            self.log("[runner] suspend/wake: RUN-pin reset of the master (no "
+                     "shutdown flush), then reading the idle style back")
+            self._flash.reset("left", self.log)
+            time.sleep(2)
+            self.wait_for_master_ready()
+            self.settle_master()
+            after = self._idle_style()
+            if after != IDLE_STYLE_EDEN:
+                raise RuntimeError(
+                    f"idle style read back as {after} after the reset, expected "
+                    f"{IDLE_STYLE_EDEN} (Eden). Nothing but the suspend flush could "
+                    "have written it, so the flush did not run, or ran and lost it "
+                    "(core1_suspend_flush_ready() never went true, or the VBUS "
+                    "guard deferred it)")
+            self.log(f"[test] PASS: {name}: {SUSPEND_ROUNDS} round(s) clean, and the "
+                     "suspend flush persisted the idle style")
+            return {"name": name, "status": "pass"}
+        except Exception as exc:
+            self.log(f"[test] FAIL: {name}: {exc}")
+            return {"name": name, "status": "fail", "error": str(exc)}
+        finally:
+            if suspender is not None:
+                try:
+                    suspender.resume()
+                except Exception as exc:
+                    self.log(f"[runner] suspend/wake: resume FAILED ({exc}); the "
+                             "master may stay suspended until it is replugged")
+            try:
+                self._raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
+            except Exception:
+                pass
+            if self._idle_style() != original:
+                restored = self._set_idle_style(original) and self._save_eeprom()
+                self.log(f"[runner] restore idle style {original}: "
+                         + ("ok" if restored else "FAILED — the rig keeps Eden until "
+                            "someone sets it back"))
+
+    def _suspend_round(self, n: int, suspender) -> None:
+        """One idle-Eden → suspend → wake round. Raises on a failed round."""
+        self._raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
+        mark = TAP.mark()
+        resp = self._raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 1]))
+        if not (resp and len(resp) >= 3 and resp[1] == CMD_IDLE_STATE and resp[2] == ACK):
+            raise RuntimeError(f"round {n}: start-idle (cmd 15) was not ACKed")
+        line = TAP.wait_for("Transition to idle", mark, timeout=IDLE_ENGAGE_TIMEOUT_S)
+        if line is None or "style=eden" not in line:
+            raise RuntimeError(f"round {n}: Eden never engaged (console: {line!r}), so "
+                               "the suspend would not race a core1 job")
+        time.sleep(SUSPEND_EDEN_RUN_S)
+        took = suspender.suspend()
+        self.log(f"[runner]   round {n}: Eden running, port suspended after "
+                 f"{took:.1f} s; holding {SUSPEND_HOLD_S:.0f} s")
+        time.sleep(SUSPEND_HOLD_S)
+        suspender.resume()
+        state = _wait_for_reboot(self._raw, SUSPEND_RETURN_S)
+        verdict = suspend_round_verdict(state, [])
+        if verdict:
+            raise RuntimeError(f"round {n}: {verdict}")
+        time.sleep(SUSPEND_STALL_WAIT_S)
+        verdict = suspend_round_verdict(state, TAP.find_all(STALL_PATTERN, mark))
+        if verdict:
+            raise RuntimeError(f"round {n}: {verdict}")
+        self.log(f"[runner]   round {n}: woke ({state}), no core1 stall")
 
     def _idle_style(self):
         """Current idle style (cmd 28 with the 0xFF query byte), or None."""

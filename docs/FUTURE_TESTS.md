@@ -110,6 +110,10 @@ unattended rig now has a test. Covered:
   (`save_all_dirty`, previously untested), power-cycle the master over the RUN pin, and read
   it back. The only check in the suite that survives a reboot, and the only one that can
   see the suspend-only EEPROM model failing.
+- [x] **USB suspend with Eden on core1** (runner-level) — the Pi suspends the master's
+  port through runtime PM (usbhid unbound, `control=auto`), three rounds with Eden
+  running, then a RUN-pin reset proves the suspend flush wrote EEPROM. Fails on a
+  reset while suspended, a `core1 stalled` line or a new crash record.
 - [x] **firmware version cross-check** (cmd 0x43) — `FW_UP_GET_VERSION` was read and thrown
   away; the staged `.bin` carries the same GET_ID literal the firmware answers with, so the
   two are compared. Catches a flash that silently did not take, which is otherwise invisible
