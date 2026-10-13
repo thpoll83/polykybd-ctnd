@@ -209,7 +209,11 @@ and relative links were adjusted to suit a standalone file.
     2021:2007 device. ⚠️ A rig provisioned before this needs
     `sudo bash ./scripts/setup.sh --units-only`, or the check fails at its first
     unbind with "is the rig provisioned?".
-  - **Per round (3)**: stop idle, start idle, wait for `Transition to idle
+  - **Per round (3)**: pin the host OS (cmd 29) to Windows or macOS, alternating,
+    so the suspend flush has a changed block to write. The idle style dirties only
+    round 1: after it EEPROM holds Eden, and QMK's EEPROM update skips unchanged
+    bytes. The cleanup pins the original active OS and re-engages auto if it was
+    on. Then stop idle, start idle, wait for `Transition to idle
     [style=eden]`, let Eden run 1.5 s, suspend, hold 3 s, wake. A round fails on a
     `*` from the single-attempt GET_ID (a reset while suspended), on no answer within
     20 s, or on a `core1 stalled` line in the 12 s after the wake. After the

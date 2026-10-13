@@ -11,7 +11,7 @@ from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
                         LINK_OK, LINK_NO_SUMMARY, TIER_EXTENDED, IDLE_STYLE_EDEN,
-                        IDLE_ENGAGE_TIMEOUT_S, CMD_IDLE_STATE, CRASH_HID_FLAG_PRESENT,
+                        IDLE_ENGAGE_TIMEOUT_S, CMD_IDLE_STATE, CMD_SET_OS, CRASH_HID_FLAG_PRESENT,
                         _crash_record_body, _wait_for_reboot, describe_crash_record,
                         suspend_round_verdict, SUSPEND_RETURN_S)
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID
@@ -44,6 +44,9 @@ SUSPEND_TEST_NAME = "USB suspend with Eden on core1 (flush + wake)"
 # core1 or reset on the watchdog here, which is the bug, not a rig fault.
 SUSPEND_GATE = {"min_fw": "1.9.1", "needs_console": True, "tier": TIER_EXTENDED}
 SUSPEND_ROUNDS = 3
+# Host OS pinned before each round (enum poly_os: 1 Windows, 2 macOS), alternating
+# so every round's suspend flush has a changed block to write.
+SUSPEND_OS_PINS = (1, 2)
 SUSPEND_EDEN_RUN_S = 1.5   # Eden keycap jobs flowing on core1 before the suspend
 SUSPEND_HOLD_S = 3.0       # the firmware runs its suspend tick (and flush) in here
 # The firmware prints a recorded stall on the first raw HID report after the wake
@@ -966,6 +969,8 @@ class TestRunner:
             self.log(f"[test] FAIL: {name}: could not read the idle style")
             return {"name": name, "status": "fail", "error": "idle style unreadable"}
         suspender = None
+        parked = False
+        os_state = None
         try:
             device = find_device(QMK_VENDOR_ID, QMK_PRODUCT_ID)
             if device is None:
@@ -977,8 +982,12 @@ class TestRunner:
             # nothing about EEPROM, which can hold Eden from an earlier session
             # that was never flushed over. This one flush is cmd 26's, before any
             # round.
+            parked = True   # from here the cleanup restores the original, flushed
             if not (self._set_idle_style(0) and self._save_eeprom()):
                 raise RuntimeError("could not park a non-Eden idle style in EEPROM")
+            os_state = self._os_state()
+            if os_state is None:
+                raise RuntimeError("could not read the host-OS setting (cmd 29)")
             if not self._set_idle_style(IDLE_STYLE_EDEN):
                 raise RuntimeError("the keyboard refused idle style Eden")
             self.log(f"[runner] suspend/wake: USB device {device}, idle style "
@@ -990,6 +999,14 @@ class TestRunner:
                                    "so a new one could not be told from an old one")
 
             for n in range(1, SUSPEND_ROUNDS + 1):
+                # The idle style dirties only round 1: after its flush EEPROM holds
+                # Eden, and QMK's EEPROM update skips unchanged bytes. A different
+                # pinned OS each round gives every suspend flush a real flash write
+                # while Eden runs, which is the condition the bug needs.
+                pin = SUSPEND_OS_PINS[(n - 1) % len(SUSPEND_OS_PINS)]
+                if not self._pin_os(pin):
+                    raise RuntimeError(f"round {n}: pinning OS {pin} (cmd 29) was "
+                                       "refused")
                 self._suspend_round(n, suspender)
 
             for which, side in ((0, "master"), (1, "slave")):
@@ -1032,11 +1049,36 @@ class TestRunner:
                 self._raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
             except Exception:
                 pass
-            if self._idle_style() != original:
+            if os_state is not None:
+                # Pin the original active OS first: auto mode keeps whatever pin
+                # is stored, which would otherwise stay the test's last one.
+                os_value, os_auto = os_state
+                self._pin_os(os_value)
+                if os_auto:
+                    self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFE]))
+            # Restore whenever the park ran: EEPROM then holds style 0 whatever the
+            # RAM style reads, so comparing RAM alone could skip a needed restore.
+            if parked or self._idle_style() != original:
                 restored = self._set_idle_style(original) and self._save_eeprom()
-                self.log(f"[runner] restore idle style {original}: "
-                         + ("ok" if restored else "FAILED — the rig keeps Eden until "
-                            "someone sets it back"))
+                self.log(f"[runner] restore idle style {original}"
+                         + (" and the OS setting" if os_state is not None else "")
+                         + ": " + ("ok" if restored else "FAILED — the rig keeps the "
+                                   "test values until someone sets them back"))
+
+    def _os_state(self):
+        """(active OS, auto flag) from cmd 29's 0xFF query, or None."""
+        try:
+            resp = self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFF]))
+        except Exception:
+            return None
+        if (resp and len(resp) >= 5 and resp[1] == CMD_SET_OS and resp[2] == ACK):
+            return resp[3], bool(resp[4])
+        return None
+
+    def _pin_os(self, os_value: int) -> bool:
+        """Pin the host OS (cmd 29, flags bit0). Marks the OS block dirty."""
+        resp = self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, os_value, 0x01]))
+        return bool(resp and len(resp) >= 3 and resp[1] == CMD_SET_OS and resp[2] == ACK)
 
     def _suspend_round(self, n: int, suspender) -> None:
         """One idle-Eden → suspend → wake round. Raises on a failed round."""

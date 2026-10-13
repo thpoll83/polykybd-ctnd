@@ -229,11 +229,14 @@ CMD_SAVE_EEPROM = tr.CMD_SAVE_EEPROM
 class FakeKeyboard:
     """RAM vs EEPROM idle style; suspend flushes, RUN reset reloads."""
 
-    def __init__(self, style=0, flush_works=True):
+    def __init__(self, style=0, flush_works=True, os_value=3, os_auto=True):
         self.ram = style
         self.eeprom = style
         self.flush_works = flush_works
         self.idle_starts = 0
+        self.os = [os_value, os_auto]          # RAM
+        self.os_eeprom = list(self.os)
+        self.flush_writes = []                  # per suspend: did a byte change?
 
     def send(self, data, **_kw):
         cmd = data[1]
@@ -243,18 +246,28 @@ class FakeKeyboard:
             return bytes([POLY_CHANNEL, cmd, ACK, self.ram])
         if cmd == CMD_SAVE_EEPROM:
             self.eeprom = self.ram
+            self.os_eeprom = list(self.os)
             return bytes([POLY_CHANNEL, cmd, ACK])
         if cmd == CMD_IDLE_STATE:
             if data[2]:
                 self.idle_starts += 1
             return bytes([POLY_CHANNEL, cmd, ACK])
+        if cmd == tr.CMD_SET_OS:
+            if data[2] == 0xFE:
+                self.os[1] = True
+            elif data[2] != 0xFF:
+                self.os = [data[2], False]
+            return bytes([POLY_CHANNEL, cmd, ACK, self.os[0], int(self.os[1])])
         if cmd == CMD_GET_ID:
             return bytes([POLY_CHANNEL, cmd, ACK]) + b"fw 1.9.1"
         return None
 
     def suspend_flush(self):
         if self.flush_works:
+            changed = (self.eeprom, self.os_eeprom) != (self.ram, self.os)
+            self.flush_writes.append(changed)
             self.eeprom = self.ram
+            self.os_eeprom = list(self.os)
 
     def power_cycle(self):
         self.ram = self.eeprom
@@ -331,6 +344,25 @@ class SuspendWakeEdenTest(unittest.TestCase):
         self.assertEqual(seen["suspends"], tr.SUSPEND_ROUNDS)
         self.assertEqual(kb.idle_starts, tr.SUSPEND_ROUNDS)
         self.assertEqual((kb.ram, kb.eeprom), (0, 0))
+
+    def test_every_round_gives_the_suspend_flush_something_to_write(self):
+        for os_value, os_auto in ((3, True), (1, False), (2, False)):
+            with self.subTest(os=os_value, auto=os_auto):
+                kb = FakeKeyboard(style=0, os_value=os_value, os_auto=os_auto)
+                result, _seen = self._run(kb)
+                self.assertEqual(result["status"], "pass", result)
+                self.assertEqual(kb.flush_writes, [True] * tr.SUSPEND_ROUNDS)
+                self.assertEqual((kb.os, kb.os_eeprom),
+                                 ([os_value, os_auto], [os_value, os_auto]))
+
+    def test_a_failure_after_the_park_restores_the_original_style_in_EEPROM(self):
+        # Original Eden; the park writes 0; the crash read then fails before any
+        # suspend. RAM reads Eden again after the cleanup's set, EEPROM must too.
+        self.crash_before = None
+        kb = FakeKeyboard(style=IDLE_STYLE_EDEN)
+        result, _seen = self._run(kb)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual((kb.ram, kb.eeprom), (IDLE_STYLE_EDEN, IDLE_STYLE_EDEN))
 
     def test_a_flush_that_never_runs_FAILS(self):
         kb = FakeKeyboard(style=0, flush_works=False)
