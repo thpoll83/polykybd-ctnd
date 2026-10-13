@@ -129,6 +129,14 @@ skipped it.
   not the first miss.
 - **The rig runs `/opt/polykybd-ctnd`, not a fresh checkout** — CI force-syncs it to
   `origin/main` before the run, so a test must be **merged to `main`** to execute.
+- ⚠️ **A test that needs an EEPROM write must CHANGE a value.** QMK's
+  `eeprom_update_*` skips unchanged bytes, so re-setting the stored value writes no
+  flash at all. Alternate between two values per round (ctnd#114 pins the host OS to
+  1, then 2).
+- ⚠️ **A read-back proves EEPROM only if you parked a different value there first.**
+  A command's query returns RAM. Flush a known other value with cmd 26, then set the
+  value under test without a flush, then reset over the RUN pin (no `shutdown_user()`
+  flush). Checking the RAM value first misses an EEPROM left over from an earlier run.
 - **Don't assert a latency threshold without a published baseline.** Report it, read
   a few runs, then promote — see `docs/FUTURE_TESTS.md`, which carries the measured
   Eden/animation numbers and the trap that the reported `max` absorbs the harness's
