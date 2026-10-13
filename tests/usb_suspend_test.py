@@ -313,7 +313,7 @@ class SuspendWakeEdenTest(unittest.TestCase):
             return list(self.stall_lines)
         return []
 
-    def _run(self, kb, fw="1.9.1"):
+    def _run(self, kb, fw="1.9.1", log=None):
         seen = {"suspends": 0, "resumed": 0}
 
         class FakeSuspend:
@@ -329,7 +329,7 @@ class SuspendWakeEdenTest(unittest.TestCase):
                 seen["resumed"] += 1
 
         tr.UsbSuspend = FakeSuspend
-        runner = tr.TestRunner(log=lambda _m: None)
+        runner = tr.TestRunner(log=log or (lambda _m: None))
         runner._raw = kb
         runner._flash = types.SimpleNamespace(reset=lambda *_a: kb.power_cycle())
         runner.wait_for_master_ready = lambda *a, **k: True
@@ -384,6 +384,28 @@ class SuspendWakeEdenTest(unittest.TestCase):
         result, _seen = self._run(kb)
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual((kb.ram, kb.eeprom), (0, 0))
+
+    def test_a_refused_OS_restore_is_logged_as_FAILED(self):
+        kb = FakeKeyboard(style=0)
+        real = kb.send
+        state = {"after_reset": False}
+
+        def send(data, **kw):
+            if data[1] == tr.CMD_SET_OS and state["after_reset"] and data[2] != 0xFF:
+                return bytes([POLY_CHANNEL, data[1], ord("!")])
+            return real(data, **kw)
+        kb.send = send
+        orig_cycle = kb.power_cycle
+
+        def cycle():
+            state["after_reset"] = True
+            orig_cycle()
+        kb.power_cycle = cycle
+        logs = []
+        result, _seen = self._run(kb, log=logs.append)
+        self.assertEqual(result["status"], "pass", result)
+        self.assertTrue(any("restore OS setting" in m and "FAILED" in m for m in logs),
+                        logs)
 
     def test_a_flush_that_never_runs_FAILS(self):
         kb = FakeKeyboard(style=0, flush_works=False)

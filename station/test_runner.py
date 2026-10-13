@@ -12,6 +12,7 @@ from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
                         LINK_OK, LINK_NO_SUMMARY, TIER_EXTENDED, IDLE_STYLE_EDEN,
                         IDLE_ENGAGE_TIMEOUT_S, CMD_IDLE_STATE, CMD_SET_OS, CRASH_HID_FLAG_PRESENT,
+                        read_os_state, pin_os, engage_os_auto,
                         _crash_record_body, _wait_for_reboot, describe_crash_record,
                         suspend_round_verdict, SUSPEND_RETURN_S)
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID
@@ -985,7 +986,7 @@ class TestRunner:
             parked = True   # from here the cleanup restores the original, flushed
             if not (self._set_idle_style(0) and self._save_eeprom()):
                 raise RuntimeError("could not park a non-Eden idle style in EEPROM")
-            os_state = self._os_state()
+            os_state = read_os_state(self._raw)
             if os_state is None:
                 raise RuntimeError("could not read the host-OS setting (cmd 29)")
             if not self._set_idle_style(IDLE_STYLE_EDEN):
@@ -1004,7 +1005,7 @@ class TestRunner:
                 # pinned OS each round gives every suspend flush a real flash write
                 # while Eden runs, which is the condition the bug needs.
                 pin = SUSPEND_OS_PINS[(n - 1) % len(SUSPEND_OS_PINS)]
-                if not self._pin_os(pin):
+                if not pin_os(self._raw, pin):
                     raise RuntimeError(f"round {n}: pinning OS {pin} (cmd 29) was "
                                        "refused")
                 self._suspend_round(n, suspender)
@@ -1054,34 +1055,22 @@ class TestRunner:
                 # is stored, which would otherwise stay the test's last one.
                 os_value, os_auto = os_state
                 try:
-                    self._pin_os(os_value)
-                    if os_auto:
-                        self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFE]))
+                    os_ok = pin_os(self._raw, os_value) and (
+                        not os_auto or engage_os_auto(self._raw))
                 except Exception as exc:
-                    self.log(f"[runner] restore OS setting FAILED ({exc})")
+                    os_ok = False
+                    self.log(f"[runner] restore OS setting raised: {exc}")
+                self.log(f"[runner] restore OS setting {os_value}"
+                         + (" (auto)" if os_auto else " (pinned)") + ": "
+                         + ("ok" if os_ok else "FAILED — the rig keeps a pinned test "
+                            "OS until someone sets it back"))
             # Restore whenever the park ran: EEPROM then holds style 0 whatever the
             # RAM style reads, so comparing RAM alone could skip a needed restore.
             if parked or self._idle_style() != original:
                 restored = self._set_idle_style(original) and self._save_eeprom()
-                self.log(f"[runner] restore idle style {original}"
-                         + (" and the OS setting" if os_state is not None else "")
-                         + ": " + ("ok" if restored else "FAILED — the rig keeps the "
-                                   "test values until someone sets them back"))
-
-    def _os_state(self):
-        """(active OS, auto flag) from cmd 29's 0xFF query, or None."""
-        try:
-            resp = self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFF]))
-        except Exception:
-            return None
-        if (resp and len(resp) >= 5 and resp[1] == CMD_SET_OS and resp[2] == ACK):
-            return resp[3], bool(resp[4])
-        return None
-
-    def _pin_os(self, os_value: int) -> bool:
-        """Pin the host OS (cmd 29, flags bit0). Marks the OS block dirty."""
-        resp = self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, os_value, 0x01]))
-        return bool(resp and len(resp) >= 3 and resp[1] == CMD_SET_OS and resp[2] == ACK)
+                self.log(f"[runner] restore idle style {original}: "
+                         + ("ok" if restored else "FAILED — the rig keeps the test "
+                            "value until someone sets it back"))
 
     def _suspend_round(self, n: int, suspender) -> None:
         """One idle-Eden → suspend → wake round. Raises on a failed round."""
