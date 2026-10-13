@@ -1828,6 +1828,52 @@ def _wait_for_reboot(raw: RawHID, deadline_s: float) -> str:
     return "no-reply"
 
 
+def read_os_state(raw: RawHID):
+    """(active OS, auto flag) from cmd 29's 0xFF query, or None."""
+    try:
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFF]))
+    except Exception:  # noqa: BLE001 — interface missing
+        return None
+    if resp and len(resp) >= 5 and resp[1] == CMD_SET_OS and resp[2] == ACK:
+        return resp[3], bool(resp[4])
+    return None
+
+
+def pin_os(raw: RawHID, os_value: int) -> bool:
+    """Pin the host OS (cmd 29, flags bit0 = manual). Marks the OS block dirty."""
+    resp = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, os_value, 0x01]))
+    return bool(resp and len(resp) >= 3 and resp[1] == CMD_SET_OS and resp[2] == ACK)
+
+
+def engage_os_auto(raw: RawHID) -> bool:
+    """Re-engage OS auto mode (cmd 29 with 0xFE). The stored pin is kept."""
+    resp = raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFE]))
+    return bool(resp and len(resp) >= 3 and resp[1] == CMD_SET_OS and resp[2] == ACK)
+
+
+# How long the master gets to answer after a USB wake (resume + usbhid rebind +
+# re-enumeration). Used by the runner's suspend/wake check.
+SUSPEND_RETURN_S = 20.0
+
+
+def suspend_round_verdict(state: str, stall_lines: list):
+    """Why one suspend/wake round failed, or None. Pure.
+
+    ``state`` is :func:`_wait_for_reboot`'s answer after the wake.
+    ``back`` (the interface went away and returned) is the normal case, since
+    the wake rebinds usbhid; ``not-rebooted`` only means the first probe came
+    after the rebind. ``fresh`` is a reset while suspended: the watchdog
+    recovering a wedged bus, which is the shipped bug."""
+    if state == "fresh":
+        return ("the master answered '*' after the wake: it reset while suspended "
+                "(watchdog — read its crash record)")
+    if state == "no-reply":
+        return f"the master did not answer within {SUSPEND_RETURN_S:.0f} s of the wake"
+    if stall_lines:
+        return f"the firmware reported a core1 stall: {stall_lines[0]}"
+    return None
+
+
 def test_boot_loop(raw: RawHID, log: Callable[[str], None]) -> bool:
     """Reboot (cmd 43) N times and stop at the first boot that went wrong.
 
