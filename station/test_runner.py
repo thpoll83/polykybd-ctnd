@@ -46,9 +46,13 @@ SUSPEND_GATE = {"min_fw": "1.9.1", "needs_console": True, "tier": TIER_EXTENDED}
 SUSPEND_ROUNDS = 3
 SUSPEND_EDEN_RUN_S = 1.5   # Eden keycap jobs flowing on core1 before the suspend
 SUSPEND_HOLD_S = 3.0       # the firmware runs its suspend tick (and flush) in here
-# The stall report prints from housekeeping after the wake; the first one has no
-# rate limit, so a few seconds of a live console is enough to see it.
-SUSPEND_STALL_WAIT_S = 3.0
+# The firmware prints a recorded stall on the first raw HID report after the wake
+# (core1_stall_report() in hid_com.c), which is the GET_ID probe, and repeats it on
+# the next report at least 10 s later (CORE1_STALL_REPORT_GAP_MS), 3 copies in all.
+# The console reattaches about a second after the rebind, so the first copy can be
+# lost. Probing for this long, once a second, makes the second copy reach a live
+# console.
+SUSPEND_STALL_WAIT_S = 12.0
 STALL_PATTERN = "core1 stalled"
 
 
@@ -978,14 +982,19 @@ class TestRunner:
                      f"{original} -> {IDLE_STYLE_EDEN} (Eden, not flushed), "
                      f"{SUSPEND_ROUNDS} round(s)")
             before = {which: _crash_record_body(self._raw, which) for which in (0, 1)}
+            if None in before.values():
+                raise RuntimeError("could not read the crash records before the rounds, "
+                                   "so a new one could not be told from an old one")
 
             for n in range(1, SUSPEND_ROUNDS + 1):
                 self._suspend_round(n, suspender)
 
             for which, side in ((0, "master"), (1, "slave")):
                 after = _crash_record_body(self._raw, which)
-                if (after is not None and after != before[which]
-                        and after[0] & CRASH_HID_FLAG_PRESENT):
+                if after is None:
+                    raise RuntimeError(f"the {side} crash record was unreadable after "
+                                       "the rounds")
+                if after != before[which] and after[0] & CRASH_HID_FLAG_PRESENT:
                     raise RuntimeError(f"the {side} half has a NEW crash record: "
                                        f"{describe_crash_record(after)}")
 
@@ -1047,10 +1056,20 @@ class TestRunner:
         verdict = suspend_round_verdict(state, [])
         if verdict:
             raise RuntimeError(f"round {n}: {verdict}")
-        time.sleep(SUSPEND_STALL_WAIT_S)
-        verdict = suspend_round_verdict(state, TAP.find_all(STALL_PATTERN, mark))
-        if verdict:
-            raise RuntimeError(f"round {n}: {verdict}")
+        waited = 0.0
+        while True:
+            verdict = suspend_round_verdict(state, TAP.find_all(STALL_PATTERN, mark))
+            if verdict:
+                raise RuntimeError(f"round {n}: {verdict}")
+            if waited >= SUSPEND_STALL_WAIT_S:
+                break
+            try:
+                self._raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]), timeout_ms=500,
+                               attempts=1)
+            except Exception:
+                pass
+            time.sleep(1.0)
+            waited += 1.0
         self.log(f"[runner]   round {n}: woke ({state}), no core1 stall")
 
     def _idle_style(self):

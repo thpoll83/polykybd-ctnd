@@ -212,8 +212,14 @@ and relative links were adjusted to suit a standalone file.
   - **Per round (3)**: stop idle, start idle, wait for `Transition to idle
     [style=eden]`, let Eden run 1.5 s, suspend, hold 3 s, wake. A round fails on a
     `*` from the single-attempt GET_ID (a reset while suspended), on no answer within
-    20 s, or on a `core1 stalled` line in the 3 s after the wake. After the rounds,
-    a new cmd 39 record on either half fails the test.
+    20 s, or on a `core1 stalled` line in the 12 s after the wake. After the
+    rounds, a new cmd 39 record on either half fails the test, and so does a record
+    that cannot be read before or after.
+  - ⚠️ **Why 12 s of probes.** The firmware prints a recorded stall on the first raw
+    HID report after the wake (`core1_stall_report()`), which is the GET_ID probe,
+    and again on a report at least 10 s later. The console reattaches about a
+    second after the rebind, so the first copy can be lost. The check sends a
+    GET_LANG every second so the second copy reaches a live console.
   - **The carrier is the idle style, written only by the suspend flush.** Eden is set
     over cmd 28 and never flushed with cmd 26 (if Eden was already the style, a
     non-Eden style is parked in EEPROM first). The RUN-pin reset reboots without

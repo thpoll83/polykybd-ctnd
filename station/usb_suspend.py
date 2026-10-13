@@ -143,15 +143,17 @@ class UsbSuspend:
         """Wake the port, rebind ``usbhid``, then restore the PM settings.
 
         The settings go back last: restoring ``control=auto`` while no driver is
-        bound would let the port autosuspend again before the bind."""
-        saved, self._saved = self._saved, None
-        if saved is not None:
+        bound would let the port autosuspend again before the bind. Each piece of
+        pending state is dropped only once its write succeeded, so after a failed
+        write a second call retries what is left."""
+        if self._saved is not None:
             self._ctl("control", self.device, "on")
-        unbound, self._unbound = self._unbound, []
-        for intf in unbound:
-            self._ctl("bind", intf)
-        if saved is not None:
-            control, delay = saved
+        while self._unbound:
+            self._ctl("bind", self._unbound[0])
+            self._unbound.pop(0)
+        if self._saved is not None:
+            control, delay = self._saved
             self._ctl("delay", self.device, delay)
             if control != "on":
                 self._ctl("control", self.device, control)
+            self._saved = None

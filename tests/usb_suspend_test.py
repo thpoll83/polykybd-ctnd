@@ -184,6 +184,26 @@ class UsbSuspendTest(unittest.TestCase):
         self.assertEqual(len(bound_interfaces(fs.DEV, root=self.root)), 3)
         self.assertEqual(fs.control(), "on")
 
+    def test_a_failed_bind_on_wake_is_retried_by_the_next_resume(self):
+        fs = FakeSysfs(self.root, control="on", delay="2000")
+        sleep, clock = self._clock()
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
+        s.suspend()
+        real = fs.ctl
+        failed = {"done": False}
+
+        def flaky(op, target, value=None):
+            if op == "bind" and target.endswith(":1.1") and not failed["done"]:
+                failed["done"] = True
+                raise RuntimeError("bind failed")
+            return real(op, target, value)
+        s._ctl = flaky
+        with self.assertRaises(RuntimeError):
+            s.resume()
+        s.resume()
+        self.assertEqual(len(bound_interfaces(fs.DEV, root=self.root)), 3)
+        self.assertEqual((fs.control(), fs.delay()), ("on", "2000"))
+
     def test_resume_twice_writes_nothing_the_second_time(self):
         fs = FakeSysfs(self.root)
         sleep, clock = self._clock()
@@ -250,21 +270,35 @@ class SuspendWakeEdenTest(unittest.TestCase):
         tr.time = types.SimpleNamespace(sleep=lambda _s: None, monotonic=lambda: 0.0)
         self.idle_line = "Transition to idle [style=eden] - eden screensaver"
         self.stall_lines = []
+        self.stall_checks = 0
+        def mark():
+            self.stall_checks = 0    # each round starts its own console window
+            return 0
         tr.TAP = types.SimpleNamespace(
-            mark=lambda: 0,
+            mark=mark,
             wait_for=lambda *a, **k: self.idle_line,
-            find_all=lambda *a, **k: list(self.stall_lines),
+            find_all=lambda *a, **k: self._stall_lines_now(),
             flush=lambda: None)
         tr.find_device = lambda *_a: "1-1.3"
         self.wake_state = "back"
         tr._wait_for_reboot = lambda *_a: self.wake_state
-        self.crash_after = None
+        self.crash_clean = bytes(49)      # flags 0: no record
+        self.crash_after = self.crash_clean
+        self.crash_before = self.crash_clean
         self.crash_reads = 0
 
         def crash_body(_raw, _which):
             self.crash_reads += 1
-            return self.crash_after if self.crash_reads > 2 else None
+            return self.crash_after if self.crash_reads > 2 else self.crash_before
         tr._crash_record_body = crash_body
+
+    def _stall_lines_now(self):
+        """``stall_lines`` appear only after ``stall_after`` console checks, the
+        way the second report copy arrives seconds after the wake."""
+        self.stall_checks += 1
+        if self.stall_checks > getattr(self, "stall_after", 0):
+            return list(self.stall_lines)
+        return []
 
     def _run(self, kb, fw="1.9.1"):
         seen = {"suspends": 0, "resumed": 0}
@@ -326,6 +360,25 @@ class SuspendWakeEdenTest(unittest.TestCase):
         result, _seen = self._run(FakeKeyboard())
         self.assertEqual(result["status"], "fail")
         self.assertIn("core1 stall", result["error"])
+
+    def test_a_stall_line_that_arrives_late_still_FAILS(self):
+        # The first report copy is lost to the console reattaching; the second
+        # comes on a later host report, about 10 s on.
+        self.stall_lines = ["WARNING core1 stalled: no answer for 500 ms at suspend"]
+        self.stall_after = 8
+        result, _seen = self._run(FakeKeyboard())
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("core1 stall", result["error"])
+
+    def test_unreadable_crash_records_FAIL_rather_than_pass(self):
+        self.crash_before = None
+        result, _seen = self._run(FakeKeyboard())
+        self.assertEqual(result["status"], "fail")
+        self.crash_before, self.crash_reads = self.crash_clean, 0
+        self.crash_after = None
+        result, _seen = self._run(FakeKeyboard())
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("unreadable", result["error"])
 
     def test_a_new_crash_record_FAILS(self):
         self.crash_after = bytes([1]) + bytes(48)
