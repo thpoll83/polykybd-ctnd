@@ -220,9 +220,9 @@ and relative links were adjusted to suit a standalone file.
     and again on a report at least 10 s later. The console reattaches about a
     second after the rebind, so the first copy can be lost. The check sends a
     GET_LANG every second so the second copy reaches a live console.
-  - **The carrier is the idle style, written only by the suspend flush.** Eden is set
-    over cmd 28 and never flushed with cmd 26 (if Eden was already the style, a
-    non-Eden style is parked in EEPROM first). The RUN-pin reset reboots without
+  - **The carrier is the idle style, written only by the suspend flush.** A non-Eden
+    style is flushed with cmd 26 first (always: the RAM style says nothing about
+    what EEPROM holds), then Eden is set over cmd 28 and never flushed. The RUN-pin reset reboots without
     `shutdown_user()`, whose flush would hide a missing one. Eden must read back.
   - It runs right after the graded suite, while the console is still live, and only
     when the suite is green. It reboots the master, so `reboot_persistence` and the

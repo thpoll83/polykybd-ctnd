@@ -348,6 +348,14 @@ class SuspendWakeEdenTest(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual((kb.ram, kb.eeprom), (IDLE_STYLE_EDEN, IDLE_STYLE_EDEN))
 
+    def test_eden_left_in_eeprom_by_an_earlier_session_cannot_fake_a_pass(self):
+        # RAM says pulse, EEPROM still says Eden, and the suspend flush is broken.
+        kb = FakeKeyboard(style=0, flush_works=False)
+        kb.eeprom = IDLE_STYLE_EDEN
+        result, _seen = self._run(kb)
+        self.assertEqual(result["status"], "fail", "a stale Eden in EEPROM hid the "
+                         "missing flush")
+
     def test_a_reset_while_suspended_FAILS(self):
         self.wake_state = "fresh"
         result, seen = self._run(FakeKeyboard())

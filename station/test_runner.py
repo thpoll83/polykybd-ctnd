@@ -943,8 +943,9 @@ class TestRunner:
         a ``core1 stalled`` line. After the rounds a new crash record on either
         half fails the test.
 
-        The carrier is the idle style. Eden is set over cmd 28 and never flushed
-        with cmd 26, so only the suspend flush can write it. A RUN-pin reset
+        The carrier is the idle style. A non-Eden style is first flushed with
+        cmd 26, then Eden is set over cmd 28 and never flushed, so only the
+        suspend flush can write it. A RUN-pin reset
         then reboots the master without ``shutdown_user()`` (whose flush would
         hide a missing one), and the style must read back as Eden.
 
@@ -971,11 +972,13 @@ class TestRunner:
                 raise RuntimeError(f"no USB device {QMK_VENDOR_ID:04x}:"
                                    f"{QMK_PRODUCT_ID:04x} under /sys/bus/usb/devices")
             suspender = UsbSuspend(device)
-            if original == IDLE_STYLE_EDEN:
-                # EEPROM must hold something else, or the read-back below proves
-                # nothing. This one flush is cmd 26's, before any round.
-                if not (self._set_idle_style(0) and self._save_eeprom()):
-                    raise RuntimeError("could not park a non-Eden idle style in EEPROM")
+            # EEPROM must hold something other than Eden, or the read-back below
+            # proves nothing. Park it every time: the RAM style read above says
+            # nothing about EEPROM, which can hold Eden from an earlier session
+            # that was never flushed over. This one flush is cmd 26's, before any
+            # round.
+            if not (self._set_idle_style(0) and self._save_eeprom()):
+                raise RuntimeError("could not park a non-Eden idle style in EEPROM")
             if not self._set_idle_style(IDLE_STYLE_EDEN):
                 raise RuntimeError("the keyboard refused idle style Eden")
             self.log(f"[runner] suspend/wake: USB device {device}, idle style "
