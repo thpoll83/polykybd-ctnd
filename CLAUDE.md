@@ -127,6 +127,12 @@ that need no change too.
   `ui.allow_lan: true` disables.
 - ⚠️ **The rig is a self-hosted runner for a public repo**, so the fork-PR approval
   settings on `qmk_firmware` are security, not CI hygiene (HIL-2, open).
+- ⚠️ **A new root action needs a root-owned wrapper and a scoped grant in `setup.sh`.**
+  The rig has no blanket `NOPASSWD` since HIL-8, so a plain `sudo X` asks for a password
+  and fails in CI. Grant the installed `/usr/local/sbin/` copy, never the checkout
+  (`runner-ctl.sh`, `usb-suspend-ctl.sh`), and never grant `tee` or another
+  write-anything tool. In a web session the classifier refuses the sudoers edit, so ask
+  the maintainer first (ctnd#114).
 
 ## Open work
 
