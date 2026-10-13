@@ -364,6 +364,27 @@ class SuspendWakeEdenTest(unittest.TestCase):
         self.assertEqual(result["status"], "fail")
         self.assertEqual((kb.ram, kb.eeprom), (IDLE_STYLE_EDEN, IDLE_STYLE_EDEN))
 
+    def test_a_failing_OS_restore_still_restores_the_idle_style(self):
+        kb = FakeKeyboard(style=0)
+        real = kb.send
+        state = {"rounds_done": False}
+
+        def send(data, **kw):
+            # Refuse cmd 29 only in the cleanup (after the reset reloaded RAM).
+            if data[1] == tr.CMD_SET_OS and state["rounds_done"] and data[2] != 0xFF:
+                raise RuntimeError("interface gone")
+            return real(data, **kw)
+        kb.send = send
+        orig_cycle = kb.power_cycle
+
+        def cycle():
+            state["rounds_done"] = True
+            orig_cycle()
+        kb.power_cycle = cycle
+        result, _seen = self._run(kb)
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual((kb.ram, kb.eeprom), (0, 0))
+
     def test_a_flush_that_never_runs_FAILS(self):
         kb = FakeKeyboard(style=0, flush_works=False)
         result, _seen = self._run(kb)

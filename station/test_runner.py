@@ -1053,9 +1053,12 @@ class TestRunner:
                 # Pin the original active OS first: auto mode keeps whatever pin
                 # is stored, which would otherwise stay the test's last one.
                 os_value, os_auto = os_state
-                self._pin_os(os_value)
-                if os_auto:
-                    self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFE]))
+                try:
+                    self._pin_os(os_value)
+                    if os_auto:
+                        self._raw.send(bytes([POLY_CHANNEL, CMD_SET_OS, 0xFE]))
+                except Exception as exc:
+                    self.log(f"[runner] restore OS setting FAILED ({exc})")
             # Restore whenever the park ran: EEPROM then holds style 0 whatever the
             # RAM style reads, so comparing RAM alone could skip a needed restore.
             if parked or self._idle_style() != original:
