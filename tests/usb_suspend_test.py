@@ -502,20 +502,39 @@ class GrantMissingTest(unittest.TestCase):
         self.addCleanup(os.unlink, self.ctl)
         self.calls = []
 
-    def _run_ok(self, argv, **_kw):
-        self.calls.append(argv)
+    def _sudo(self, returncode, stderr):
+        """A fake subprocess.run that answers the way real sudo does: a result
+        with a return code, never an exception (the probe passes no check=)."""
+        def run(argv, **kw):
+            self.calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, returncode, None, stderr)
+        return run
 
-    def _run_refused(self, argv, **_kw):
-        self.calls.append(argv)
-        raise subprocess.CalledProcessError(1, argv)
+    def test_a_passwordless_grant_runs_the_wrapper_bare_and_is_not_missing(self):
+        usage = (b"usage: polykybd-usb-suspend {unbind|bind} <dev:cfg.intf> | "
+                 b"control <dev> {on|auto} | delay <dev> <ms>\n")
+        self.assertIsNone(usb_suspend.grant_missing(self.ctl, run=self._sudo(2, usage)))
+        (argv, kw), = self.calls
+        self.assertEqual(argv, ["sudo", "-n", self.ctl])   # no operation: writes nothing
+        self.assertIn("timeout", kw)
 
-    def test_a_granted_wrapper_is_not_missing(self):
-        self.assertIsNone(usb_suspend.grant_missing(self.ctl, run=self._run_ok))
-        self.assertEqual(self.calls, [["sudo", "-n", "-l", self.ctl]])
+    def test_a_password_required_rule_is_missing(self):
+        # %sudo ALL=(ALL:ALL) ALL allows the command but wants a password:
+        # `sudo -l` would have called this granted (Greptile, ctnd#116).
+        reason = usb_suspend.grant_missing(
+            self.ctl, run=self._sudo(1, b"sudo: a password is required\n"))
+        self.assertIn("no passwordless sudo grant", reason)
+        self.assertIn("a password is required", reason)
 
-    def test_a_refused_grant_is_missing(self):
-        self.assertIn("no passwordless sudo grant",
-                      usb_suspend.grant_missing(self.ctl, run=self._run_refused))
+    def test_exit_2_without_the_usage_line_is_missing(self):
+        # Exit 2 alone could be anything; only the wrapper's own line counts.
+        self.assertIsNotNone(usb_suspend.grant_missing(
+            self.ctl, run=self._sudo(2, b"sudo: something else\n")))
+
+    def test_a_hung_probe_is_missing_rather_than_hanging_the_run(self):
+        def hangs(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+        self.assertIn("did not answer", usb_suspend.grant_missing(self.ctl, run=hangs))
 
     def test_no_sudo_binary_is_missing(self):
         def no_sudo(argv, **_kw):
@@ -523,9 +542,18 @@ class GrantMissingTest(unittest.TestCase):
         self.assertIsNotNone(usb_suspend.grant_missing(self.ctl, run=no_sudo))
 
     def test_an_uninstalled_wrapper_is_missing_and_sudo_is_not_asked(self):
-        reason = usb_suspend.grant_missing(self.ctl + ".absent", run=self._run_ok)
+        reason = usb_suspend.grant_missing(self.ctl + ".absent", run=self._sudo(2, b""))
         self.assertIn("is not installed", reason)
         self.assertEqual(self.calls, [])
+
+    def test_the_real_wrapper_answers_a_bare_call_with_the_usage_line_and_exit_2(self):
+        # The probe's success signal, taken from the script itself rather than
+        # restated. Run as the test user: a bare call exits before any write.
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                              "usb-suspend-ctl.sh")
+        res = subprocess.run(["bash", script], capture_output=True, timeout=10)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn(b"usage: polykybd-usb-suspend", res.stderr)
 
 
 class SuspendWiringTest(unittest.TestCase):

@@ -208,7 +208,7 @@ and relative links were adjusted to suit a standalone file.
     (`scripts/usb-suspend-ctl.sh`), which accepts four operations and only on the
     2021:2007 device. ⚠️ A rig provisioned before this needs
     `sudo bash ./scripts/setup.sh --units-only`, and until then the check SKIPs
-    with "rig not provisioned for it" (`grant_missing()` asks `sudo -n -l` first).
+    with "rig not provisioned for it" (`grant_missing()` first runs the wrapper bare through `sudo -n`, which only prints its usage line).
     It used to FAIL at its first unbind instead. ctnd#114 shipped the wrapper but
     not the `setup.sh` step that installs it, so no rig had the grant, and the
     failure ended every firmware-apply run before the apply. The release gate

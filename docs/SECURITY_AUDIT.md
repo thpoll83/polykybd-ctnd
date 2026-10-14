@@ -424,7 +424,9 @@ add the `setup.sh` step this paragraph describes. It landed later, as
 `/etc/sudoers.d/polykybd-usb-suspend` with one line,
 `<station user> ALL=(root) NOPASSWD: /usr/local/sbin/polykybd-usb-suspend`. The grant
 has no argument list, because the wrapper validates its own arguments, so the
-wrapper is the boundary.
+wrapper is the boundary. `grant_missing()` probes the grant by running the wrapper as
+root with no arguments. The wrapper's first check (`$# -ge 2`) exits 2 on that before
+any write.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 

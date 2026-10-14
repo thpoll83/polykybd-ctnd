@@ -31,6 +31,7 @@ from typing import Callable
 SYSFS_USB = "/sys/bus/usb"
 USBHID = "usbhid"
 USB_SUSPEND_CTL = "/usr/local/sbin/polykybd-usb-suspend"
+GRANT_PROBE_TIMEOUT_S = 10.0   # grant_missing(): sudo -n answers in well under 1 s
 
 
 def sudo_ctl(*args: str) -> None:
@@ -53,9 +54,14 @@ def grant_missing(ctl: str = USB_SUSPEND_CTL,
                   run: Callable[..., object] = subprocess.run):
     """Why the wrapper cannot run as root on this rig, or None when it can.
 
-    Asks without doing anything: ``sudo -n -l <ctl>`` exits 0 only when the
-    station user may run ``ctl`` without a password, and ``-n`` makes a missing
-    grant fail at once. The rig is updated by pushing to ctnd ``main``, but a
+    Runs the wrapper as root with no arguments, which only prints its usage line
+    and exits 2 (``scripts/usb-suspend-ctl.sh``), so nothing is written. That
+    line on stderr proves sudo ran this exact command without a password. ``-n``
+    makes a missing grant fail at once, and sudo's own refusal exits 1. ``sudo
+    -l`` would not prove it: a password-required rule such as ``%sudo ALL``
+    lists the command as allowed too (Sourcery, Greptile, ctnd#116).
+
+    The rig is updated by pushing to ctnd ``main``, but a
     root-owned wrapper and its sudoers line arrive only through ``setup.sh``, run
     by hand on the Pi. A rig that has not had that run cannot execute the check
     at all, so the caller SKIPs it instead of failing a run that gates releases
@@ -67,11 +73,17 @@ def grant_missing(ctl: str = USB_SUSPEND_CTL,
         # Audit: a literal argv with no shell; ctl is the module constant
         # unless a test passes a temp path.
         # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-        run(["sudo", "-n", "-l", ctl], stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, check=True)
-    except (subprocess.CalledProcessError, OSError):
-        return f"no passwordless sudo grant for {ctl}"
-    return None
+        res = run(["sudo", "-n", ctl], stdout=subprocess.DEVNULL,
+                  stderr=subprocess.PIPE, timeout=GRANT_PROBE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return f"sudo -n {ctl} did not answer within {GRANT_PROBE_TIMEOUT_S:.0f} s"
+    except OSError as exc:
+        return f"could not run sudo: {exc}"
+    stderr = (res.stderr or b"").decode("utf-8", "replace")
+    if res.returncode == 2 and "usage: polykybd-usb-suspend" in stderr:
+        return None
+    detail = stderr.strip().splitlines()[0] if stderr.strip() else f"exit {res.returncode}"
+    return f"no passwordless sudo grant for {ctl} ({detail})"
 
 
 def _read(path: str) -> str:
