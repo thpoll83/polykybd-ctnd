@@ -57,7 +57,8 @@ def grant_missing(ctl: str = USB_SUSPEND_CTL,
     Runs the wrapper as root with no arguments, which only prints its usage line
     and exits 2 (``scripts/usb-suspend-ctl.sh``), so nothing is written. That
     line on stderr proves sudo ran this exact command without a password. ``-n``
-    makes a missing grant fail at once, and sudo's own refusal exits 1. ``sudo
+    makes a missing grant fail at once, ``-k`` ignores a cached password, and
+    sudo's own refusal exits 1. ``sudo
     -l`` would not prove it: a password-required rule such as ``%sudo ALL``
     lists the command as allowed too (Sourcery, Greptile, ctnd#116).
 
@@ -73,7 +74,7 @@ def grant_missing(ctl: str = USB_SUSPEND_CTL,
         # Audit: a literal argv with no shell; ctl is the module constant
         # unless a test passes a temp path.
         # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-        res = run(["sudo", "-n", ctl], stdout=subprocess.DEVNULL,
+        res = run(["sudo", "-k", "-n", ctl], stdout=subprocess.DEVNULL,
                   stderr=subprocess.PIPE, timeout=GRANT_PROBE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return f"sudo -n {ctl} did not answer within {GRANT_PROBE_TIMEOUT_S:.0f} s"

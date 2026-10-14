@@ -515,7 +515,7 @@ class GrantMissingTest(unittest.TestCase):
                  b"control <dev> {on|auto} | delay <dev> <ms>\n")
         self.assertIsNone(usb_suspend.grant_missing(self.ctl, run=self._sudo(2, usage)))
         (argv, kw), = self.calls
-        self.assertEqual(argv, ["sudo", "-n", self.ctl])   # no operation: writes nothing
+        self.assertEqual(argv, ["sudo", "-k", "-n", self.ctl])   # no operation: writes nothing
         self.assertIn("timeout", kw)
 
     def test_a_password_required_rule_is_missing(self):
