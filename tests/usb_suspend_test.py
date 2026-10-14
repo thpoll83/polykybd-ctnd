@@ -12,6 +12,7 @@ Two layers:
   exercised for real: a flush that never runs must FAIL the test.
 """
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -278,8 +279,9 @@ class SuspendWakeEdenTest(unittest.TestCase):
     def setUp(self):
         self._saved = {n: getattr(tr, n) for n in
                        ("time", "TAP", "find_device", "UsbSuspend",
-                        "_crash_record_body", "_wait_for_reboot")}
+                        "_crash_record_body", "_wait_for_reboot", "grant_missing")}
         self.addCleanup(lambda: [setattr(tr, n, v) for n, v in self._saved.items()])
+        tr.grant_missing = lambda: None   # a provisioned rig
         tr.time = types.SimpleNamespace(sleep=lambda _s: None, monotonic=lambda: 0.0)
         self.idle_line = "Transition to idle [style=eden] - eden screensaver"
         self.stall_lines = []
@@ -479,6 +481,79 @@ class SuspendWakeEdenTest(unittest.TestCase):
         result, seen = self._run(FakeKeyboard(), fw="1.9.0")
         self.assertEqual(result["status"], "skip")
         self.assertEqual(seen["suspends"], 0)
+
+    def test_a_rig_without_the_grant_SKIPS_before_touching_anything(self):
+        # 2026-10-14: the grant had never been installed, the check FAILED on
+        # every apply run, and the release gate refused firmware 1.9.2.
+        tr.grant_missing = lambda: "no passwordless sudo grant for x"
+        lines = []
+        result, seen = self._run(FakeKeyboard(), log=lines.append)
+        self.assertEqual(result["status"], "skip")
+        self.assertIn("setup.sh --units-only", result["reason"])
+        self.assertEqual(seen["suspends"], 0)
+        self.assertTrue(any(line.startswith("[test] SKIP:") for line in lines))
+
+
+class GrantMissingTest(unittest.TestCase):
+
+    def setUp(self):
+        fd, self.ctl = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(os.unlink, self.ctl)
+        self.calls = []
+
+    def _sudo(self, returncode, stderr):
+        """A fake subprocess.run that answers the way real sudo does: a result
+        with a return code, never an exception (the probe passes no check=)."""
+        def run(argv, **kw):
+            self.calls.append((argv, kw))
+            return subprocess.CompletedProcess(argv, returncode, None, stderr)
+        return run
+
+    def test_a_passwordless_grant_runs_the_wrapper_bare_and_is_not_missing(self):
+        usage = (b"usage: polykybd-usb-suspend {unbind|bind} <dev:cfg.intf> | "
+                 b"control <dev> {on|auto} | delay <dev> <ms>\n")
+        self.assertIsNone(usb_suspend.grant_missing(self.ctl, run=self._sudo(2, usage)))
+        (argv, kw), = self.calls
+        self.assertEqual(argv, ["sudo", "-k", "-n", self.ctl])   # no operation: writes nothing
+        self.assertIn("timeout", kw)
+
+    def test_a_password_required_rule_is_missing(self):
+        # %sudo ALL=(ALL:ALL) ALL allows the command but wants a password:
+        # `sudo -l` would have called this granted (Greptile, ctnd#116).
+        reason = usb_suspend.grant_missing(
+            self.ctl, run=self._sudo(1, b"sudo: a password is required\n"))
+        self.assertIn("no passwordless sudo grant", reason)
+        self.assertIn("a password is required", reason)
+
+    def test_exit_2_without_the_usage_line_is_missing(self):
+        # Exit 2 alone could be anything; only the wrapper's own line counts.
+        self.assertIsNotNone(usb_suspend.grant_missing(
+            self.ctl, run=self._sudo(2, b"sudo: something else\n")))
+
+    def test_a_hung_probe_is_missing_rather_than_hanging_the_run(self):
+        def hangs(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+        self.assertIn("did not answer", usb_suspend.grant_missing(self.ctl, run=hangs))
+
+    def test_no_sudo_binary_is_missing(self):
+        def no_sudo(argv, **_kw):
+            raise FileNotFoundError("sudo")
+        self.assertIsNotNone(usb_suspend.grant_missing(self.ctl, run=no_sudo))
+
+    def test_an_uninstalled_wrapper_is_missing_and_sudo_is_not_asked(self):
+        reason = usb_suspend.grant_missing(self.ctl + ".absent", run=self._sudo(2, b""))
+        self.assertIn("is not installed", reason)
+        self.assertEqual(self.calls, [])
+
+    def test_the_real_wrapper_answers_a_bare_call_with_the_usage_line_and_exit_2(self):
+        # The probe's success signal, taken from the script itself rather than
+        # restated. Run as the test user: a bare call exits before any write.
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                              "usb-suspend-ctl.sh")
+        res = subprocess.run(["bash", script], capture_output=True, timeout=10)
+        self.assertEqual(res.returncode, 2)
+        self.assertIn(b"usage: polykybd-usb-suspend", res.stderr)
 
 
 class SuspendWiringTest(unittest.TestCase):

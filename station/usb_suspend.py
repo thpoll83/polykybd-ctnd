@@ -17,7 +17,8 @@ suspend hold. The kernel's runtime PM produces the same bus state:
    again and the hidraw nodes come back.
 
 Every sysfs write goes through ``sudo -n polykybd-usb-suspend``
-(``scripts/usb-suspend-ctl.sh``, installed by ``setup.sh``). The wrapper accepts
+(``scripts/usb-suspend-ctl.sh``, installed by ``setup.sh``; :func:`grant_missing`
+says whether it is). The wrapper accepts
 four operations and only on the PolyKybd's own device, so the sudo grant is not
 a root write to any file. Reads need no privilege. ``root`` and ``ctl`` are
 parameters so the offline tests can run this against a fake tree.
@@ -30,6 +31,7 @@ from typing import Callable
 SYSFS_USB = "/sys/bus/usb"
 USBHID = "usbhid"
 USB_SUSPEND_CTL = "/usr/local/sbin/polykybd-usb-suspend"
+GRANT_PROBE_TIMEOUT_S = 10.0   # grant_missing(): sudo -n answers in well under 1 s
 
 
 def sudo_ctl(*args: str) -> None:
@@ -46,6 +48,43 @@ def sudo_ctl(*args: str) -> None:
         raise RuntimeError(f"polykybd-usb-suspend {' '.join(args)} failed: {detail} "
                            "(is the rig provisioned? sudo bash ./scripts/setup.sh "
                            "--units-only)") from exc
+
+
+def grant_missing(ctl: str = USB_SUSPEND_CTL,
+                  run: Callable[..., object] = subprocess.run):
+    """Why the wrapper cannot run as root on this rig, or None when it can.
+
+    Runs the wrapper as root with no arguments, which only prints its usage line
+    and exits 2 (``scripts/usb-suspend-ctl.sh``), so nothing is written. That
+    line on stderr proves sudo ran this exact command without a password. ``-n``
+    makes a missing grant fail at once, ``-k`` ignores a cached password, and
+    sudo's own refusal exits 1. ``sudo
+    -l`` would not prove it: a password-required rule such as ``%sudo ALL``
+    lists the command as allowed too (Sourcery, Greptile, ctnd#116).
+
+    The rig is updated by pushing to ctnd ``main``, but a
+    root-owned wrapper and its sudoers line arrive only through ``setup.sh``, run
+    by hand on the Pi. A rig that has not had that run cannot execute the check
+    at all, so the caller SKIPs it instead of failing a run that gates releases
+    (2026-10-14: firmware 1.9.2 published with no files). On a provisioned rig
+    this returns None and the check runs and grades as before."""
+    if not os.path.isfile(ctl):
+        return f"{ctl} is not installed"
+    try:
+        # Audit: a literal argv with no shell; ctl is the module constant
+        # unless a test passes a temp path.
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+        res = run(["sudo", "-k", "-n", ctl], stdout=subprocess.DEVNULL,
+                  stderr=subprocess.PIPE, timeout=GRANT_PROBE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return f"sudo -n {ctl} did not answer within {GRANT_PROBE_TIMEOUT_S:.0f} s"
+    except OSError as exc:
+        return f"could not run sudo: {exc}"
+    stderr = (res.stderr or b"").decode("utf-8", "replace")
+    if res.returncode == 2 and "usage: polykybd-usb-suspend" in stderr:
+        return None
+    detail = stderr.strip().splitlines()[0] if stderr.strip() else f"exit {res.returncode}"
+    return f"no passwordless sudo grant for {ctl} ({detail})"
 
 
 def _read(path: str) -> str:

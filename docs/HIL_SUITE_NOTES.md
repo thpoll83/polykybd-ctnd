@@ -207,8 +207,13 @@ and relative links were adjusted to suit a standalone file.
     Every sysfs write goes through `sudo -n polykybd-usb-suspend`
     (`scripts/usb-suspend-ctl.sh`), which accepts four operations and only on the
     2021:2007 device. ⚠️ A rig provisioned before this needs
-    `sudo bash ./scripts/setup.sh --units-only`, or the check fails at its first
-    unbind with "is the rig provisioned?".
+    `sudo bash ./scripts/setup.sh --units-only`, and until then the check SKIPs
+    with "rig not provisioned for it" (`grant_missing()` first runs the wrapper bare through `sudo -n`, which only prints its usage line).
+    It used to FAIL at its first unbind instead. ctnd#114 shipped the wrapper but
+    not the `setup.sh` step that installs it, so no rig had the grant, and the
+    failure ended every firmware-apply run before the apply. The release gate
+    then refused firmware 1.9.2 (2026-10-14). Read the SKIP lines: on a rig that
+    still skips this, nothing has tested the suspend flush.
   - **Per round (3)**: pin the host OS (cmd 29) to Windows or macOS, alternating,
     so the suspend flush has a changed block to write. The idle style dirties only
     round 1: after it EEPROM holds Eden, and QMK's EEPROM update skips unchanged
