@@ -12,6 +12,7 @@ Two layers:
   exercised for real: a flush that never runs must FAIL the test.
 """
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -278,8 +279,9 @@ class SuspendWakeEdenTest(unittest.TestCase):
     def setUp(self):
         self._saved = {n: getattr(tr, n) for n in
                        ("time", "TAP", "find_device", "UsbSuspend",
-                        "_crash_record_body", "_wait_for_reboot")}
+                        "_crash_record_body", "_wait_for_reboot", "grant_missing")}
         self.addCleanup(lambda: [setattr(tr, n, v) for n, v in self._saved.items()])
+        tr.grant_missing = lambda: None   # a provisioned rig
         tr.time = types.SimpleNamespace(sleep=lambda _s: None, monotonic=lambda: 0.0)
         self.idle_line = "Transition to idle [style=eden] - eden screensaver"
         self.stall_lines = []
@@ -479,6 +481,51 @@ class SuspendWakeEdenTest(unittest.TestCase):
         result, seen = self._run(FakeKeyboard(), fw="1.9.0")
         self.assertEqual(result["status"], "skip")
         self.assertEqual(seen["suspends"], 0)
+
+    def test_a_rig_without_the_grant_SKIPS_before_touching_anything(self):
+        # 2026-10-14: the grant had never been installed, the check FAILED on
+        # every apply run, and the release gate refused firmware 1.9.2.
+        tr.grant_missing = lambda: "no passwordless sudo grant for x"
+        lines = []
+        result, seen = self._run(FakeKeyboard(), log=lines.append)
+        self.assertEqual(result["status"], "skip")
+        self.assertIn("setup.sh --units-only", result["reason"])
+        self.assertEqual(seen["suspends"], 0)
+        self.assertTrue(any(line.startswith("[test] SKIP:") for line in lines))
+
+
+class GrantMissingTest(unittest.TestCase):
+
+    def setUp(self):
+        fd, self.ctl = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(os.unlink, self.ctl)
+        self.calls = []
+
+    def _run_ok(self, argv, **_kw):
+        self.calls.append(argv)
+
+    def _run_refused(self, argv, **_kw):
+        self.calls.append(argv)
+        raise subprocess.CalledProcessError(1, argv)
+
+    def test_a_granted_wrapper_is_not_missing(self):
+        self.assertIsNone(usb_suspend.grant_missing(self.ctl, run=self._run_ok))
+        self.assertEqual(self.calls, [["sudo", "-n", "-l", self.ctl]])
+
+    def test_a_refused_grant_is_missing(self):
+        self.assertIn("no passwordless sudo grant",
+                      usb_suspend.grant_missing(self.ctl, run=self._run_refused))
+
+    def test_no_sudo_binary_is_missing(self):
+        def no_sudo(argv, **_kw):
+            raise FileNotFoundError("sudo")
+        self.assertIsNotNone(usb_suspend.grant_missing(self.ctl, run=no_sudo))
+
+    def test_an_uninstalled_wrapper_is_missing_and_sudo_is_not_asked(self):
+        reason = usb_suspend.grant_missing(self.ctl + ".absent", run=self._run_ok)
+        self.assertIn("is not installed", reason)
+        self.assertEqual(self.calls, [])
 
 
 class SuspendWiringTest(unittest.TestCase):

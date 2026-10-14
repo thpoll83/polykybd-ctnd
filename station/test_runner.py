@@ -16,7 +16,7 @@ from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_s
                         _crash_record_body, _wait_for_reboot, describe_crash_record,
                         suspend_round_verdict, SUSPEND_RETURN_S)
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID
-from .usb_suspend import UsbSuspend, find_device
+from .usb_suspend import UsbSuspend, find_device, grant_missing
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
 # keyboards/polykybd/hid_com.c (case 24 / 0x18). A command report is
@@ -962,6 +962,14 @@ class TestRunner:
         caps["extended"] = True  # and only on an extended run
         reason = skip_reason(SUSPEND_GATE, caps)
         if reason:
+            self.log(f"[test] SKIP: {name} ({reason})")
+            return {"name": name, "status": "skip", "reason": reason}
+        missing = grant_missing()
+        if missing:
+            # The rig, not the firmware: the wrapper and its grant come only from
+            # setup.sh run on the Pi, which pushing to ctnd main does not do.
+            reason = (f"rig not provisioned for it: {missing}. On the Pi: "
+                      "sudo bash ./scripts/setup.sh --units-only")
             self.log(f"[test] SKIP: {name} ({reason})")
             return {"name": name, "status": "skip", "reason": reason}
 

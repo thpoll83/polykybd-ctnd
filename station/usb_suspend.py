@@ -17,7 +17,8 @@ suspend hold. The kernel's runtime PM produces the same bus state:
    again and the hidraw nodes come back.
 
 Every sysfs write goes through ``sudo -n polykybd-usb-suspend``
-(``scripts/usb-suspend-ctl.sh``, installed by ``setup.sh``). The wrapper accepts
+(``scripts/usb-suspend-ctl.sh``, installed by ``setup.sh``; :func:`grant_missing`
+says whether it is). The wrapper accepts
 four operations and only on the PolyKybd's own device, so the sudo grant is not
 a root write to any file. Reads need no privilege. ``root`` and ``ctl`` are
 parameters so the offline tests can run this against a fake tree.
@@ -46,6 +47,31 @@ def sudo_ctl(*args: str) -> None:
         raise RuntimeError(f"polykybd-usb-suspend {' '.join(args)} failed: {detail} "
                            "(is the rig provisioned? sudo bash ./scripts/setup.sh "
                            "--units-only)") from exc
+
+
+def grant_missing(ctl: str = USB_SUSPEND_CTL,
+                  run: Callable[..., object] = subprocess.run):
+    """Why the wrapper cannot run as root on this rig, or None when it can.
+
+    Asks without doing anything: ``sudo -n -l <ctl>`` exits 0 only when the
+    station user may run ``ctl`` without a password, and ``-n`` makes a missing
+    grant fail at once. The rig is updated by pushing to ctnd ``main``, but a
+    root-owned wrapper and its sudoers line arrive only through ``setup.sh``, run
+    by hand on the Pi. A rig that has not had that run cannot execute the check
+    at all, so the caller SKIPs it instead of failing a run that gates releases
+    (2026-10-14: firmware 1.9.2 published with no files). On a provisioned rig
+    this returns None and the check runs and grades as before."""
+    if not os.path.isfile(ctl):
+        return f"{ctl} is not installed"
+    try:
+        # Audit: a literal argv with no shell; ctl is the module constant
+        # unless a test passes a temp path.
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+        run(["sudo", "-n", "-l", ctl], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=True)
+    except (subprocess.CalledProcessError, OSError):
+        return f"no passwordless sudo grant for {ctl}"
+    return None
 
 
 def _read(path: str) -> str:

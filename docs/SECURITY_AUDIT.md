@@ -419,7 +419,12 @@ checks every name against a strict pattern, and refuses any device whose
 `idVendor:idProduct` is not 2021:2007. The sysfs root override used by the offline tests
 is ignored when the script runs as root. Worst case through the grant: the station user
 can suspend or unbind the keyboard, which it can already disrupt over raw HID.
-`tests/usb_suspend_test.py` pins the refusals.
+`tests/usb_suspend_test.py` pins the refusals. Correction (2026-10-14): ctnd#114 did not
+add the `setup.sh` step this paragraph describes. It landed later, as
+`/etc/sudoers.d/polykybd-usb-suspend` with one line,
+`<station user> ALL=(root) NOPASSWD: /usr/local/sbin/polykybd-usb-suspend`. The grant
+has no argument list, because the wrapper validates its own arguments, so the
+wrapper is the boundary.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
