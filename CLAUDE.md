@@ -133,6 +133,15 @@ that need no change too.
   (`runner-ctl.sh`, `usb-suspend-ctl.sh`), and never grant `tee` or another
   write-anything tool. In a web session the classifier refuses the sudoers edit, so ask
   the maintainer first (ctnd#114).
+- ⚠️ **A push never provisions the rig: `setup.sh` runs only by hand on the Pi.** So a
+  test that needs a new grant must SKIP while the grant is absent, never FAIL. ctnd#114
+  shipped the USB-suspend check and its wrapper without the `setup.sh` step. The check
+  failed on every extended run, the firmware-apply job skipped the apply, and the
+  release gate refused 1.9.2 (published with no files, 2026-10-14). The pattern is
+  `grant_missing()` in `station/usb_suspend.py` (ctnd#116). Probe with
+  `sudo -k -n <wrapper>` and no arguments, then match the wrapper's own usage line.
+  `sudo -n -l` is not a probe: it also lists commands that a password-required
+  `%sudo ALL` rule allows.
 
 ## Open work
 
