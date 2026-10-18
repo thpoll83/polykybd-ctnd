@@ -209,7 +209,8 @@ class TestRunner:
                 # reached) which is after test_fresh_boot_marker has consumed the
                 # one-shot '*' marker, so the gate's GET_ID doesn't disturb it.
                 if (test.get("min_protocol") is not None or test.get("min_fw")
-                        or test.get("needs_console") or test.get("tier")):
+                        or test.get("needs_console") or test.get("tier")
+                        or test.get("skip_if")):
                     caps = dict(self._device_caps())
                     # Console availability is a property of THIS RUN, not of the
                     # device, so it is merged in here rather than cached with the

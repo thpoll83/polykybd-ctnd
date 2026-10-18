@@ -64,6 +64,7 @@ from typing import Callable
 from .console_log import TAP, classify_link_health, link_delta
 from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
+from . import bulk_pipe
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -372,6 +373,16 @@ def skip_reason(test: dict, caps: dict):
     # also needs a signed .plyx artifact that only the `doom` CI path produces.
     if test.get("tier") == TIER_DOOM and not caps.get("doom"):
         return "doom suite — re-run with --doom + a signed --plyx-valid (or the hil-doom label)"
+    # Rig-side gate: a callable answering "why can this test not run HERE", or
+    # None. For checks that need something a push cannot provision (a device
+    # node, a group, a sudoers grant): SKIP while it is absent, never FAIL
+    # (CLAUDE.md § Security, ctnd#116). Evaluated last, so a cheaper gate above
+    # still wins the reason.
+    skip_if = test.get("skip_if")
+    if callable(skip_if):
+        reason = skip_if()
+        if reason:
+            return str(reason)
     return None
 
 
@@ -3667,6 +3678,46 @@ def test_layer_names(raw: RawHID, log: Callable[[str], None]) -> bool:
 #   * read-only queries and error/bounds paths next (no persistent state change);
 #   * mutate+restore round-trips, then the upload/soak guards which are the most
 #     likely to disrupt the device, last.
+
+# --- bulk pipe (CDC) -------------------------------------------------------------
+# The firmware's second USB channel (qmk keyboards/polykybd/BULK_PIPE.md): a CDC
+# interface whose bulk endpoints carry large host->master transfers. What the rig
+# can observe: the keyboard's OWN counters read back over the pipe (byte count,
+# chained CRC, bad frames, its clock), so a pass means every byte arrived intact
+# and the keyboard measured the rate itself. No rate threshold is asserted yet:
+# the numbers are logged for a baseline first (docs/FUTURE_TESTS.md).
+PIPE_SOAK_BYTES = 2_000_000
+PIPE_FRAME_PAYLOAD = 4096
+
+
+def test_bulk_pipe_soak(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """2 MB over the bulk pipe arrive intact, by the keyboard's own count and CRC.
+
+    Also a liveness check across channels: raw HID (GET_ID) still answers after
+    the stream, which is what a stuck main loop or a wedged USB stack would break.
+    Gated by ``bulk_pipe.skip_reason`` (no port = firmware without the pipe; port
+    not writable = rig provisioned before the dialout/udev step of setup.sh).
+    """
+    port = bulk_pipe.find_port()
+    if port is None:
+        log("  no CDC port — gate should have skipped this test")
+        return False
+    fd = bulk_pipe.open_raw(port)
+    try:
+        pipe = bulk_pipe.Pipe(fd)
+        result = bulk_pipe.measure(pipe, PIPE_SOAK_BYTES, PIPE_FRAME_PAYLOAD, log)
+    finally:
+        os.close(fd)
+    if not result.get("ok"):
+        log(f"  FAIL: {result.get('error', 'count/CRC/bad-frame mismatch')}")
+        return False
+    reply = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    if reply is None or reply[1] != CMD_GET_ID:
+        log("  FAIL: raw HID (GET_ID) does not answer after the pipe stream")
+        return False
+    log("  raw HID still answers after the stream")
+    return True
+
 TESTS = [
     {"name": "single master enumerates",        "fn": test_single_master_enumerates},
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
@@ -3735,6 +3786,10 @@ TESTS = [
     {"name": "icon fill replies (v20 cmd 42)",
      "fn": test_icon_fill_replies, "min_protocol": ICON_FILL_MIN_PROTOCOL},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
+    # 2 MB over the bulk pipe (CDC) with the keyboard's own count + CRC read back.
+    # SKIPs on firmware without the pipe and on a rig without the tty grant.
+    {"name": "bulk pipe soak (CDC, 2 MB)", "fn": test_bulk_pipe_soak,
+     "skip_if": bulk_pipe.skip_reason},
     # Deliberate bridged-traffic soak + the firmware's own link health counter.
     # After the stress burst (which wants a quiet master) and before the flash
     # tests. Needs the console (the counter is only observable there) and ~5 s of

@@ -289,3 +289,13 @@ Reuse that; do not try to route around the prompt.
 `USB_VBUS_PIN` detection, so it does not test the image shape users flash. An automated apply
 test is worth having anyway — it would have found the brick on the first push instead of in
 the field — but it is not a substitute for one hardware round on a real, unmodified image.
+
+### Bulk pipe rate threshold (CDC, `bulk pipe soak`)
+
+`test_bulk_pipe_soak` asserts integrity only (the keyboard's own byte count, chained
+CRC and bad-frame count) and LOGS the rate it measured on its own clock. Promote a
+threshold only after a few runs: collect the `keyboard clock … MB/s` lines, take the
+slowest healthy run, and assert at half of it. The expected order is several hundred
+KB/s (USB full speed bulk, 64-byte packets, drained once per main-loop iteration),
+against ~60 KB/s for the raw HID channel. The test SKIPs on firmware without
+`POLYKYBD_BULK_PIPE` and on a rig provisioned before the dialout/udev step.
