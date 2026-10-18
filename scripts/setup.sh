@@ -208,7 +208,9 @@ sudo apt-get install -y --no-install-recommends \
   "$CHROMIUM_PKG"
 
 # Allow the user to access GPIO and USB without root
-sudo usermod -aG gpio,plugdev,video "$CTND_USER"
+# dialout: the keyboard's bulk pipe (firmware POLYKYBD_BULK_PIPE builds) is a CDC
+# serial interface, /dev/ttyACM*, which is root:dialout by default.
+sudo usermod -aG gpio,plugdev,video,dialout "$CTND_USER"
 
 # udev rules: HID access for the running keyboard (VID 2021 = PolyTasten, the
 # PolyKybd Split72/split42), BOOTSEL access so picotool can talk to the RP2040
@@ -219,6 +221,11 @@ sudo tee /etc/udev/rules.d/99-polykybd.rules > /dev/null <<'EOF'
 # Must match the keyboard's USB idVendor (see qmk:vendor_id in config.yaml), or
 # the hidraw node stays root-only and the station can't open it.
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2021", MODE="0660", GROUP="plugdev"
+# PolyKybd bulk pipe (CDC serial, POLYKYBD_BULK_PIPE builds): openable by the
+# station user, and not a modem — ModemManager probes every new ttyACM with AT
+# commands otherwise, which the firmware counts as resync bytes.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2021", MODE="0660", GROUP="plugdev", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2021", ENV{ID_MM_DEVICE_IGNORE}="1"
 # RP2040 in BOOTSEL mode — required for picotool
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0660", GROUP="plugdev"
 # RP2040 BOOTSEL mass-storage volume — hide it from UDisks2 / the desktop volume

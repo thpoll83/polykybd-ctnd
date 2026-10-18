@@ -45,6 +45,7 @@ signing the firmware image alone was not enough.**
 | FW-7 | Plain-overlay 1-byte over-read | qmk / host / rig | ✅ fixed as the protocol-11 reframe (#120 / #96 / #43) |
 | FW-8 | RLE non-aligned OOB | qmk | ✅ fixed (PR #112) |
 | FW-11 | Font-pack (`.plyf`) glyph offset unvalidated — persistent HardFault DoS from an unsigned resource | qmk | ✅ fixed (offset alignment + extent checks) |
+| FW-12 | Bulk pipe (CDC) frame parser: bounds of the one buffer | qmk | ✅ checked, not vulnerable (prototype, no state change) |
 | HOST-1 | Legacy plaintext window relay on by default | host | ✅ fixed (PR #133) |
 | HOST-2 | Confirmation polling holds `worker.exclusive()` for up to 75 s | host | 🟡 accepted + documented |
 | HOST-3 | Usage telemetry: new outbound surface, unauthenticated collector, on by default | host | 🟡 accepted + documented |
@@ -275,6 +276,20 @@ UI. Weigh new sudo grants with that in mind.
 
 Things this audit examined and found sound. Recorded because each one looks like a hole
 until you read the guard, and re-deriving that costs more than reading it.
+
+### FW-12 — the bulk pipe parser (CDC serial, 2026-10-18) takes any host bytes
+
+The `POLYKYBD_BULK_PIPE` firmware adds a CDC-ACM interface that any process able to
+open a serial port can write to, with no gate (the same trust level as raw HID,
+which also needs only device access). The parser (`keyboards/polykybd/poly_pipe.c`)
+was read for memory safety: the only buffer is the 512-byte `s_buf` for `ECHO`, a
+frame whose length exceeds it sets `s_oversize` and is drained without storing,
+`SINK` payloads are counted and CRC-chained byte by byte and never stored, every
+index into `s_buf` is `s_pos < s_len <= 512`, and a bad CRC is counted and dropped
+with no reply. A malformed stream can only inflate the counters. The prototype
+commands change no keyboard state. When a real payload moves onto the pipe its
+handler is a new finding to record here, and it must not write flash inside
+`virtser_recv()` (BULK_PIPE.md).
 
 ### Key injection is double-gated — host debug flag AND firmware debug flag
 
