@@ -309,5 +309,28 @@ class FirmwareStreamTest(unittest.TestCase):
         self.assertEqual(fw.cursor, 100)
 
 
+class ResourceSlotOverPipeTest(unittest.TestCase):
+    """The resource-slot pipe test's payload and its place in the suite."""
+
+    def test_payload_has_the_whx_magic_and_crosses_a_block(self):
+        from station import hil_tests
+        p = hil_tests.resource_pipe_payload()
+        self.assertEqual(p[:4], b"IWHX")
+        self.assertEqual(len(p), 96 * 1024)
+        self.assertGreater(len(p), 64 * 1024)          # one block erase + sectors
+        self.assertEqual(len(p) % 4096, 0)
+        # No erased-flash run: an all-0xFF stretch would pass a CRC over bytes
+        # the pipe never wrote.
+        self.assertNotIn(b"\xff" * 64, p)
+
+    def test_entry_is_gated_and_runs_after_the_hid_round_trip(self):
+        from station import hil_tests
+        entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_bulk_pipe_resource_slot)
+        self.assertIs(entry["skip_if"], bp.fw_chunk_skip_reason)
+        self.assertEqual(entry["min_protocol"], 6)
+        fns = [t["fn"] for t in hil_tests.TESTS]
+        self.assertLess(fns.index(hil_tests.test_doomwad_slot_roundtrip), fns.index(entry["fn"]))
+
+
 if __name__ == "__main__":
     unittest.main()
