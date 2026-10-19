@@ -323,6 +323,64 @@ class ResourceSlotOverPipeTest(unittest.TestCase):
         # the pipe never wrote.
         self.assertNotIn(b"\xff" * 64, p)
 
+    def _drive(self, stream=(True, 96 * 1024, ""), begin=(True, b"P\x50."),
+               commit=bytes([0x50, 0x52, ord(".")]), find_port="/dev/ttyACM0"):
+        """Run the HIL test against mocks: BEGIN and COMMIT answers, the pipe
+        stream's (ok, offset, reason) and the port. Returns (verdict, log lines,
+        the raw HID commands sent, the abort count)."""
+        from station import hil_tests
+        from unittest import mock
+        sent, lines, aborts = [], [], []
+
+        def raw_send(pkt, timeout_ms=None, **kw):
+            sent.append(pkt[1])
+            return commit if pkt[1] == hil_tests.CMD_FONTPACK_COMMIT else b"P\x06."
+
+        raw = mock.Mock()
+        raw.send.side_effect = raw_send
+        fd = os.open(os.devnull, os.O_RDONLY)
+        with mock.patch.object(hil_tests, "_doom_slot_begin", return_value=begin), \
+             mock.patch.object(hil_tests, "_fontpack_abort", side_effect=lambda r: aborts.append(1)), \
+             mock.patch.object(bp, "find_port", return_value=find_port), \
+             mock.patch.object(bp, "open_raw", return_value=fd), \
+             mock.patch.object(bp, "stream_firmware", return_value=stream):
+            ok = hil_tests.test_bulk_pipe_resource_slot(raw, lines.append)
+        return ok, lines, sent, len(aborts)
+
+    def test_a_complete_stream_and_an_acked_commit_pass(self):
+        from station import hil_tests
+        ok, lines, sent, aborts = self._drive()
+        self.assertTrue(ok, lines)
+        self.assertEqual(sent, [hil_tests.CMD_FONTPACK_COMMIT])      # BEGIN is mocked, no HID chunk
+        self.assertEqual(aborts, 0)
+        self.assertTrue(any("staged over the bulk pipe" in l for l in lines), lines)
+
+    def test_a_stopped_pipe_fails_without_an_hid_fallback(self):
+        from station import hil_tests
+        ok, lines, sent, aborts = self._drive(stream=(False, 1234, "no reply"))
+        self.assertFalse(ok)
+        self.assertNotIn(hil_tests.CMD_FONTPACK_CHUNK, sent)
+        self.assertNotIn(hil_tests.CMD_FONTPACK_COMMIT, sent)       # the abort is the only COMMIT
+        self.assertEqual(aborts, 1)
+        self.assertTrue(any("stopped at 1234" in l for l in lines), lines)
+
+    def test_a_rejected_commit_fails(self):
+        ok, lines, sent, aborts = self._drive(commit=bytes([0x50, 0x52, ord("R")]))
+        self.assertFalse(ok)
+        self.assertTrue(any("FONTPACK_COMMIT after the pipe transfer" in l for l in lines), lines)
+
+    def test_a_begin_that_never_becomes_ready_fails_before_the_pipe(self):
+        ok, lines, sent, aborts = self._drive(begin=(False, None))
+        self.assertFalse(ok)
+        self.assertEqual(sent, [])
+        self.assertTrue(any("did not become ready" in l for l in lines), lines)
+
+    def test_a_vanished_port_fails_and_aborts(self):
+        ok, lines, sent, aborts = self._drive(find_port=None)
+        self.assertFalse(ok)
+        self.assertEqual(aborts, 1)
+        self.assertEqual(sent, [])
+
     def test_entry_is_gated_and_runs_after_the_hid_round_trip(self):
         from station import hil_tests
         entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_bulk_pipe_resource_slot)
