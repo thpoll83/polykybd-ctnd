@@ -514,6 +514,27 @@ and relative links were adjusted to suit a standalone file.
   check becomes flaky and then ignored. Read the logged medians across a few runs,
   then promote it (tracked in `docs/FUTURE_TESTS.md`).
 
+## The bulk pipe (CDC serial next to raw HID)
+
+Both tests are gated with `skip_if` (`station/bulk_pipe.py`): no CDC port with the
+keyboard's idVendor means a firmware without `POLYKYBD_BULK_PIPE` (SKIP); a port the
+runner user cannot write means a rig provisioned before the dialout/udev step of
+`setup.sh` (SKIP, never FAIL, ctnd#116).
+
+- **`bulk pipe soak (CDC, 2 MB)`** streams 2 MB of SINK frames and reads the
+  keyboard's own byte count, CRC and clock back (STAT), then checks raw HID still
+  answers. The keyboard-clock rate is the number to trust (0.6 MB/s on the Pi, which
+  is host-limited).
+- **`bulk pipe FW_CHUNK refused outside staging (pipe v2)`** sends the host's cursor
+  probe (an empty FW_CHUNK) and one stray data frame with no BEGIN open; both must
+  come back `!` with the cursor. Read-only. Its extra gate is the PING protocol
+  (`fw_chunk_skip_reason`: a protocol 1 firmware SKIPs). The real transfer over the
+  pipe runs in the firmware-apply job: `fw_update.stage_and_verify` uses the pipe
+  when `fw_chunk_skip_reason()` is None and logs
+  `all N bytes staged over the bulk pipe (...) in T s (R KB/s, 236-byte frames)`,
+  else `chunks over HID (<reason>)`. A pipe that stops mid-image hands the rest to
+  HID from the keyboard's cursor.
+
 ## Writing test cases
 
 Tests are plain dicts with `name` and `fn` keys. `fn` receives `(raw_hid: RawHID, log: Callable)` and returns a bool:

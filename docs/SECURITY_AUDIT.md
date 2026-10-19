@@ -45,6 +45,7 @@ signing the firmware image alone was not enough.**
 | FW-7 | Plain-overlay 1-byte over-read | qmk / host / rig | ✅ fixed as the protocol-11 reframe (#120 / #96 / #43) |
 | FW-8 | RLE non-aligned OOB | qmk | ✅ fixed (PR #112) |
 | FW-11 | Font-pack (`.plyf`) glyph offset unvalidated — persistent HardFault DoS from an unsigned resource | qmk | ✅ fixed (offset alignment + extent checks) |
+| FW-12 | Bulk pipe (CDC) frame parser: bounds of the one buffer; FW_CHUNK writes staging | qmk | ✅ checked, not vulnerable (same gate as HID's FW_UP_CHUNK) |
 | HOST-1 | Legacy plaintext window relay on by default | host | ✅ fixed (PR #133) |
 | HOST-2 | Confirmation polling holds `worker.exclusive()` for up to 75 s | host | 🟡 accepted + documented |
 | HOST-3 | Usage telemetry: new outbound surface, unauthenticated collector, on by default | host | 🟡 accepted + documented |
@@ -275,6 +276,39 @@ UI. Weigh new sudo grants with that in mind.
 
 Things this audit examined and found sound. Recorded because each one looks like a hole
 until you read the guard, and re-deriving that costs more than reading it.
+
+### FW-12 — the bulk pipe parser (CDC serial, 2026-10-18) takes any host bytes
+
+The `POLYKYBD_BULK_PIPE` firmware adds a CDC-ACM interface that any process able to
+open a serial port can write to, with no gate (the same trust level as raw HID,
+which also needs only device access). The parser (`keyboards/polykybd/poly_pipe.c`)
+was read for memory safety: the only buffer is the 512-byte `s_buf` for `ECHO`, a
+frame whose length exceeds it sets `s_oversize` and is drained without storing,
+`SINK` payloads are counted and CRC-chained byte by byte and never stored, every
+index into `s_buf` is `s_pos < s_len <= 512`, and a bad CRC is counted and dropped
+with no reply. A malformed stream can only inflate the counters. The measurement
+commands change no keyboard state.
+
+**FW_CHUNK (pipe protocol 2, 2026-10-19)** is the first command that does: it is the
+firmware update's CHUNK step on the pipe. Read for the same properties as HID's
+`FW_UP_CHUNK`, which it shares its handler with (`fw_up_xfer_block()`):
+
+- bounds: the payload is `s_buf`, `s_len <= 512`, and the handler refuses anything
+  outside 5..4 + `FW_UP_RELAY_CHUNK_MAX` (236) bytes before touching it; the split relay
+  sends header + `len` and the slave rejects a message whose `in_len` disagrees with
+  its own `len` field, both asserted against `RPC_M2S_BUFFER_SIZE` at compile time;
+- gate: `fw_staging_write_chunk()` refuses a chunk outside a staging session opened by
+  `FW_UP_BEGIN` over HID, and one whose offset is not the cursor, so a stray frame
+  cannot write anywhere; the rig's graded test `bulk pipe FW_CHUNK refused outside
+  staging` checks that on hardware;
+- trust: the pipe and raw HID need the same device access, and what the chunks
+  stage is still verified at COMMIT (CRC32, then the Ed25519 signature or the
+  on-keycap prompt) before APPLY will install it. The pipe adds no path around the
+  signature check;
+- the handler runs inside `virtser_task()` on the main loop and programs flash
+  there, like the HID handler inside `raw_hid_receive()`; the host paces itself by
+  the replies (BULK_PIPE.md), and a host that does not only stalls the keyboard's
+  own main loop for the length of its stream.
 
 ### Key injection is double-gated — host debug flag AND firmware debug flag
 

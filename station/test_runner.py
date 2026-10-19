@@ -209,15 +209,25 @@ class TestRunner:
                 # reached) which is after test_fresh_boot_marker has consumed the
                 # one-shot '*' marker, so the gate's GET_ID doesn't disturb it.
                 if (test.get("min_protocol") is not None or test.get("min_fw")
-                        or test.get("needs_console") or test.get("tier")):
-                    caps = dict(self._device_caps())
-                    # Console availability is a property of THIS RUN, not of the
-                    # device, so it is merged in here rather than cached with the
-                    # GET_ID caps.
-                    caps["console"] = console_started
-                    caps["extended"] = extended
-                    caps["doom"] = doom
-                    reason = skip_reason(test, caps)
+                        or test.get("needs_console") or test.get("tier")
+                        or test.get("skip_if")):
+                    # A skip_if callable (e.g. bulk_pipe.fw_chunk_skip_reason)
+                    # does I/O, so the gate itself can raise. Record that as a
+                    # failure of this test and keep running the rest.
+                    try:
+                        caps = dict(self._device_caps())
+                        # Console availability is a property of THIS RUN, not of
+                        # the device, so it is merged in here rather than cached
+                        # with the GET_ID caps.
+                        caps["console"] = console_started
+                        caps["extended"] = extended
+                        caps["doom"] = doom
+                        reason = skip_reason(test, caps)
+                    except Exception as exc:
+                        results.append({"name": name, "status": "fail",
+                                        "error": f"gate: {exc}"})
+                        self.log(f"[test] FAIL: {name}: gate raised {exc}")
+                        continue
                     if reason:
                         results.append({"name": name, "status": "skip", "reason": reason})
                         self.log(f"[test] SKIP: {name} ({reason})")

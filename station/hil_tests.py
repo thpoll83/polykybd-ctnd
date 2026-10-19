@@ -58,12 +58,14 @@ See ``docs/FUTURE_TESTS.md`` for the planned-but-not-yet-implemented backlog.
 """
 import os
 import re
+import struct
 import time
 from typing import Callable
 
 from .console_log import TAP, classify_link_health, link_delta
 from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
+from . import bulk_pipe
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -372,6 +374,16 @@ def skip_reason(test: dict, caps: dict):
     # also needs a signed .plyx artifact that only the `doom` CI path produces.
     if test.get("tier") == TIER_DOOM and not caps.get("doom"):
         return "doom suite — re-run with --doom + a signed --plyx-valid (or the hil-doom label)"
+    # Rig-side gate: a callable answering "why can this test not run HERE", or
+    # None. For checks that need something a push cannot provision (a device
+    # node, a group, a sudoers grant): SKIP while it is absent, never FAIL
+    # (CLAUDE.md § Security, ctnd#116). Evaluated last, so a cheaper gate above
+    # still wins the reason.
+    skip_if = test.get("skip_if")
+    if callable(skip_if):
+        reason = skip_if()
+        if reason:
+            return str(reason)
     return None
 
 
@@ -2914,7 +2926,6 @@ def describe_crash_record(body: bytes) -> str:
     part of the step: boot_diag.c sets it once core1 has reached core1_entry()
     (on the sub-step paint marks, and on 0xE1..0xE3 since fw 1.3.2), so 0x15E2
     prints as ``boot 5.0xE2 core1=1``, not ``boot 21.0xE2``."""
-    import struct
     rec = body[1:1 + struct.calcsize(_CRASH_REC_FMT)]
     if len(rec) < struct.calcsize(_CRASH_REC_FMT):
         return f"record too short ({len(rec)} bytes)"
@@ -3134,7 +3145,7 @@ def _build_empty_fontpack() -> bytes:
     Mirrors PolyKybdHost hid_fontpack.build_empty_pack(): header only, body CRC of an
     empty body. Flashing it to a slot empties that bundle (font_count 0 is a valid
     pack the firmware accepts → the slot contributes no fonts)."""
-    import binascii, struct
+    import binascii
     body_crc = binascii.crc32(b"") & 0xFFFFFFFF
     # <4sHHIIIIII: magic, abi, flags, content_version, font_count, font_table_off,
     #              total_size, crc32, reserved
@@ -3151,7 +3162,7 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
     A BEGIN NACK (firmware without the doom slots) is returned as-is so the caller
     reports a clear failure — the shipping HIL firmware always builds the slots
     (qmk-test.yml POLYKYBD_DOOM_PACK=yes), so a NACK now means the routing broke."""
-    import binascii, struct
+    import binascii
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
     ready = False
@@ -3219,7 +3230,6 @@ def test_doompack_commit_magic_gate(raw: RawHID, log: Callable[[str], None]) -> 
     must NACK, then a minimal valid PlyX header (image_size 0) must ACK — so the
     slot is left in a well-formed (empty) state, which the game-entry loader
     refuses gracefully (fire-demo fallback), never a crash."""
-    import struct
     bad = b"NOPE" + b"\x00" * 60
     reply = _doom_slot_flash(raw, log, bad, DOOMPACK_BUNDLE_ID)
     if reply is None:
@@ -3492,7 +3502,7 @@ def test_fontpack_wipe_roundtrip(raw: RawHID, log: Callable[[str], None]) -> boo
     the unattended rig (no host attached) and a real PolyKybdHost re-flashes it on the
     next connect. The empty-pack flash erases only ~2 sectors, so it is fast. v6+ only
     (gated in TESTS)."""
-    import binascii, struct
+    import binascii
     SLOT = 0
     pack = _build_empty_fontpack()
     pack_crc = binascii.crc32(pack) & 0xFFFFFFFF
@@ -3667,6 +3677,89 @@ def test_layer_names(raw: RawHID, log: Callable[[str], None]) -> bool:
 #   * read-only queries and error/bounds paths next (no persistent state change);
 #   * mutate+restore round-trips, then the upload/soak guards which are the most
 #     likely to disrupt the device, last.
+
+# --- bulk pipe (CDC) -------------------------------------------------------------
+# The firmware's second USB channel (qmk keyboards/polykybd/BULK_PIPE.md): a CDC
+# interface whose bulk endpoints carry large host->master transfers. What the rig
+# can observe: the keyboard's OWN counters read back over the pipe (byte count,
+# chained CRC, bad frames, its clock), so a pass means every byte arrived intact
+# and the keyboard measured the rate itself. No rate threshold is asserted yet:
+# the numbers are logged for a baseline first (docs/FUTURE_TESTS.md).
+PIPE_SOAK_BYTES = 2_000_000
+PIPE_FRAME_PAYLOAD = 4096
+
+
+def test_bulk_pipe_soak(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """2 MB over the bulk pipe arrive intact, by the keyboard's own count and CRC.
+
+    Also a liveness check across channels: raw HID (GET_ID) still answers after
+    the stream, which is what a stuck main loop or a wedged USB stack would break.
+    Gated by ``bulk_pipe.skip_reason`` (no port = firmware without the pipe; port
+    not writable = rig provisioned before the dialout/udev step of setup.sh).
+    """
+    port = bulk_pipe.find_port()
+    if port is None:
+        log("  no CDC port — gate should have skipped this test")
+        return False
+    fd = bulk_pipe.open_raw(port)
+    try:
+        pipe = bulk_pipe.Pipe(fd)
+        result = bulk_pipe.measure(pipe, PIPE_SOAK_BYTES, PIPE_FRAME_PAYLOAD, log)
+    finally:
+        os.close(fd)
+    if not result.get("ok"):
+        log(f"  FAIL: {result.get('error', 'count/CRC/bad-frame mismatch')}")
+        return False
+    if result.get("device_s", 0) <= 0:
+        log(f"  FAIL: keyboard clock did not advance over the stream "
+            f"(device_s={result.get('device_s')})")
+        return False
+    reply = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    if reply is None or reply[1] != CMD_GET_ID:
+        log("  FAIL: raw HID (GET_ID) does not answer after the pipe stream")
+        return False
+    log("  raw HID still answers after the stream")
+    return True
+
+def test_bulk_pipe_fw_chunk_probe(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """FW_CHUNK (pipe protocol 2) answers outside a staging session: an empty frame
+    is the host's cursor probe and must come back NACKed with the keyboard's
+    cursor; a frame with data outside a session must be refused too (nothing is
+    written when no BEGIN opened staging). Read-only: no BEGIN is sent. The real
+    transfer runs in the firmware-apply job (``fw_update.stage_and_verify``, which
+    logs the pipe time and rate). Gated by ``bulk_pipe.fw_chunk_skip_reason``.
+    """
+    port = bulk_pipe.find_port()
+    if port is None:
+        log("  no CDC port — gate should have skipped this test")
+        return False
+    fd = bulk_pipe.open_raw(port)
+    try:
+        pipe = bulk_pipe.Pipe(fd)
+        probe = pipe.request(bulk_pipe.CMD_FW_CHUNK, b"", timeout=2.0)
+        parsed = bulk_pipe.parse_fw_chunk_reply(probe) if probe is not None else None
+        if parsed is None:
+            log("  FAIL: the empty FW_CHUNK probe got no well-formed reply")
+            return False
+        if parsed[0]:
+            log("  FAIL: the empty FW_CHUNK probe was ACKed; it must be NACKed with the cursor")
+            return False
+        log(f"  cursor probe NACKed as expected, keyboard cursor {parsed[1]}")
+        stray = pipe.request(bulk_pipe.CMD_FW_CHUNK, struct.pack("<I", 0) + b"\xff" * 16, timeout=2.0)
+        parsed = bulk_pipe.parse_fw_chunk_reply(stray) if stray is not None else None
+        if parsed is None or parsed[0]:
+            log("  FAIL: a FW_CHUNK with data outside a staging session was not refused")
+            return False
+        log("  stray chunk outside a session refused")
+    finally:
+        os.close(fd)
+    reply = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    if reply is None or reply[1] != CMD_GET_ID:
+        log("  FAIL: raw HID (GET_ID) does not answer after the pipe probes")
+        return False
+    return True
+
+
 TESTS = [
     {"name": "single master enumerates",        "fn": test_single_master_enumerates},
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
@@ -3735,6 +3828,12 @@ TESTS = [
     {"name": "icon fill replies (v20 cmd 42)",
      "fn": test_icon_fill_replies, "min_protocol": ICON_FILL_MIN_PROTOCOL},
     {"name": "GET_ID stress",                   "fn": test_get_id_stress},
+    # 2 MB over the bulk pipe (CDC) with the keyboard's own count + CRC read back.
+    # SKIPs on firmware without the pipe and on a rig without the tty grant.
+    {"name": "bulk pipe soak (CDC, 2 MB)", "fn": test_bulk_pipe_soak,
+     "skip_if": bulk_pipe.skip_reason},
+    {"name": "bulk pipe FW_CHUNK refused outside staging (pipe v2)", "fn": test_bulk_pipe_fw_chunk_probe,
+     "skip_if": bulk_pipe.fw_chunk_skip_reason},
     # Deliberate bridged-traffic soak + the firmware's own link health counter.
     # After the stress burst (which wants a quiet master) and before the flash
     # tests. Needs the console (the counter is only observable there) and ~5 s of
