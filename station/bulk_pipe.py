@@ -57,8 +57,9 @@ def fw_chunk_frame(offset: int, data: bytes) -> bytes:
 
 
 def parse_fw_chunk_reply(payload: bytes):
-    """``(acked, cursor)`` from a FW_CHUNK reply, or None for a malformed one."""
-    if len(payload) < 5:
+    """``(acked, cursor)`` from a FW_CHUNK reply, or None for a malformed one
+    (too short, or a status byte other than ``.`` and ``!``)."""
+    if len(payload) < 5 or payload[0] not in (ord("."), ord("!")):
         return None
     return payload[0] == ord("."), struct.unpack_from("<I", payload, 1)[0]
 
@@ -137,17 +138,22 @@ def skip_reason(sys_tty: str = SYS_TTY, access=os.access):
 def open_raw(port: str, read_timeout_ds: int = 2) -> int:
     """Open the tty with no line discipline and a VTIME read timeout (deciseconds)."""
     fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
-    attrs = termios.tcgetattr(fd)
-    attrs[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP
-                  | termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON)
-    attrs[1] &= ~termios.OPOST
-    attrs[2] &= ~(termios.CSIZE | termios.PARENB)
-    attrs[2] |= termios.CS8 | termios.CLOCAL | termios.CREAD
-    attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
-    attrs[6][termios.VMIN] = 0
-    attrs[6][termios.VTIME] = read_timeout_ds
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    termios.tcflush(fd, termios.TCIOFLUSH)
+    try:
+        attrs = termios.tcgetattr(fd)
+        attrs[0] &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP
+                      | termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON)
+        attrs[1] &= ~termios.OPOST
+        attrs[2] &= ~(termios.CSIZE | termios.PARENB)
+        attrs[2] |= termios.CS8 | termios.CLOCAL | termios.CREAD
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
+        attrs[6][termios.VMIN] = 0
+        attrs[6][termios.VTIME] = read_timeout_ds
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+    except (OSError, termios.error):
+        # The port went away or refused the settings: do not leak the fd.
+        os.close(fd)
+        raise
     return fd
 
 
@@ -327,15 +333,21 @@ def fw_chunk_skip_reason(sys_tty: str = SYS_TTY, access=os.access, open_pipe=Non
     if reason:
         return reason
     port = find_port(sys_tty)
+    if port is None:
+        # The port was there for skip_reason and is gone now (re-enumeration).
+        return "CDC port vanished between the port search and the PING"
     if open_pipe is None:
         def open_pipe(p):
             fd = open_raw(p)
             return Pipe(fd), (lambda: os.close(fd))
-    pipe, close = open_pipe(port)
     try:
-        reply = pipe.request(CMD_PING, timeout=1.0)
-    finally:
-        close()
+        pipe, close = open_pipe(port)
+        try:
+            reply = pipe.request(CMD_PING, timeout=1.0)
+        finally:
+            close()
+    except (OSError, termios.error) as exc:
+        return f"{port} cannot be opened or probed: {exc}"
     if reply is None:
         return f"{port} does not answer PING"
     proto = parse_ping(reply)["proto"]

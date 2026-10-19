@@ -134,14 +134,14 @@ class FakeFirmware:
                 if len(payload) >= 5 and len(payload) - 4 <= bp.FW_CHUNK_MAX \
                         and self.fw_frames not in self.reject_fw_frames:
                     offset = struct.unpack_from("<I", payload)[0]
-                    data = payload[4:]
+                    body = payload[4:]
                     if offset < self.cursor:
                         acked = True
                     elif offset == self.cursor:
                         if self.image_size is not None:
-                            data = data[:self.image_size - offset]
-                        self.staged += data
-                        self.cursor += len(data)
+                            body = body[:self.image_size - offset]
+                        self.staged += body
+                        self.cursor += len(body)
                         acked = True
                 self.out += bp.pack_frame(cmd | bp.REPLY, (b"." if acked else b"!")
                                           + struct.pack("<I", self.cursor))
@@ -213,10 +213,6 @@ class GateTest(unittest.TestCase):
         self.assertIn('or test.get("skip_if")', src)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FirmwareStreamTest(unittest.TestCase):
     """``stream_firmware`` against the fake firmware: whole image in 236-byte
     frames, and the recovery paths (a lost frame, a rejected one, a dead keyboard)."""
@@ -277,3 +273,41 @@ class FirmwareStreamTest(unittest.TestCase):
             self.assertIsNone(bp.fw_chunk_skip_reason(
                 d, access=lambda *a: True, open_pipe=lambda p: (self._pipe(fw_new), lambda: None)))
             self.assertIn("not writable", bp.fw_chunk_skip_reason(d, access=lambda *a: False))
+
+    def test_fw_chunk_gate_returns_reason_when_open_raises(self):
+        # The gate does I/O; an unopenable port is a SKIP reason, not an exception.
+        with tempfile.TemporaryDirectory() as d:
+            tty = os.path.join(d, "ttyACM0")
+            os.makedirs(os.path.join(tty, "device"))
+            with open(os.path.join(tty, "idVendor"), "w") as f:
+                f.write("2021\n")
+
+            def open_pipe(p):
+                raise OSError(16, "Device or resource busy")
+            reason = bp.fw_chunk_skip_reason(d, access=lambda *a: True, open_pipe=open_pipe)
+            self.assertIsInstance(reason, str)
+            self.assertIn("cannot be opened or probed", reason)
+            self.assertIn("busy", reason)
+
+    def test_fw_chunk_gate_when_port_vanishes(self):
+        # skip_reason passed (an injected access says so) but find_port sees no
+        # port: a reason string, never a TypeError from open_raw(None).
+        with tempfile.TemporaryDirectory() as d:
+            reason = bp.fw_chunk_skip_reason(d, access=lambda *a: True)
+            self.assertIsInstance(reason, str)
+
+    def test_parse_fw_chunk_reply_rejects_unknown_status(self):
+        self.assertIsNone(bp.parse_fw_chunk_reply(b"?\x00\x00\x00\x00"))
+        self.assertIsNone(bp.parse_fw_chunk_reply(b".\x00\x00"))
+        self.assertEqual(bp.parse_fw_chunk_reply(b"." + struct.pack("<I", 236)), (True, 236))
+        self.assertEqual(bp.parse_fw_chunk_reply(b"!" + struct.pack("<I", 0)), (False, 0))
+
+    def test_fake_firmware_write_returns_frame_length(self):
+        fw = FakeFirmware(image_size=1000)
+        frame = bp.fw_chunk_frame(0, b"\x5a" * 100)
+        self.assertEqual(fw.write(0, frame), len(frame))
+        self.assertEqual(fw.cursor, 100)
+
+
+if __name__ == "__main__":
+    unittest.main()

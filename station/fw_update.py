@@ -29,6 +29,7 @@ import binascii
 import re
 import struct
 import os
+import termios
 import time
 from typing import Callable
 
@@ -272,13 +273,21 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
         pipe_reason = bulk_pipe.fw_chunk_skip_reason()
         if pipe_reason is None:
             port = bulk_pipe.find_port()
-            fd = bulk_pipe.open_raw(port)
             t0 = time.monotonic()
+            # A port that vanished, cannot be opened, or raises mid-stream is a
+            # stopped pipe: HID continues from offset 0, and the keyboard ACKs
+            # every chunk behind its cursor as a duplicate.
             try:
-                pipe = bulk_pipe.Pipe(fd)
-                ok, offset, why = bulk_pipe.stream_firmware(pipe, fw, log=log)
-            finally:
-                os.close(fd)
+                if port is None:
+                    raise OSError("CDC port vanished before the stream")
+                fd = bulk_pipe.open_raw(port)
+                try:
+                    pipe = bulk_pipe.Pipe(fd)
+                    ok, offset, why = bulk_pipe.stream_firmware(pipe, fw, log=log)
+                finally:
+                    os.close(fd)
+            except (OSError, termios.error) as exc:
+                ok, offset, why = False, 0, f"pipe error: {exc}"
             dt = time.monotonic() - t0
             if ok:
                 log(f"  all {fw_size} bytes staged over the bulk pipe ({port}) in {dt:.1f} s "

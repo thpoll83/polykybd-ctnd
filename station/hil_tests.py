@@ -58,6 +58,7 @@ See ``docs/FUTURE_TESTS.md`` for the planned-but-not-yet-implemented backlog.
 """
 import os
 import re
+import struct
 import time
 from typing import Callable
 
@@ -2925,7 +2926,6 @@ def describe_crash_record(body: bytes) -> str:
     part of the step: boot_diag.c sets it once core1 has reached core1_entry()
     (on the sub-step paint marks, and on 0xE1..0xE3 since fw 1.3.2), so 0x15E2
     prints as ``boot 5.0xE2 core1=1``, not ``boot 21.0xE2``."""
-    import struct
     rec = body[1:1 + struct.calcsize(_CRASH_REC_FMT)]
     if len(rec) < struct.calcsize(_CRASH_REC_FMT):
         return f"record too short ({len(rec)} bytes)"
@@ -3145,7 +3145,7 @@ def _build_empty_fontpack() -> bytes:
     Mirrors PolyKybdHost hid_fontpack.build_empty_pack(): header only, body CRC of an
     empty body. Flashing it to a slot empties that bundle (font_count 0 is a valid
     pack the firmware accepts → the slot contributes no fonts)."""
-    import binascii, struct
+    import binascii
     body_crc = binascii.crc32(b"") & 0xFFFFFFFF
     # <4sHHIIIIII: magic, abi, flags, content_version, font_count, font_table_off,
     #              total_size, crc32, reserved
@@ -3162,7 +3162,7 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
     A BEGIN NACK (firmware without the doom slots) is returned as-is so the caller
     reports a clear failure — the shipping HIL firmware always builds the slots
     (qmk-test.yml POLYKYBD_DOOM_PACK=yes), so a NACK now means the routing broke."""
-    import binascii, struct
+    import binascii
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
     ready = False
@@ -3230,7 +3230,6 @@ def test_doompack_commit_magic_gate(raw: RawHID, log: Callable[[str], None]) -> 
     must NACK, then a minimal valid PlyX header (image_size 0) must ACK — so the
     slot is left in a well-formed (empty) state, which the game-entry loader
     refuses gracefully (fire-demo fallback), never a crash."""
-    import struct
     bad = b"NOPE" + b"\x00" * 60
     reply = _doom_slot_flash(raw, log, bad, DOOMPACK_BUNDLE_ID)
     if reply is None:
@@ -3503,7 +3502,7 @@ def test_fontpack_wipe_roundtrip(raw: RawHID, log: Callable[[str], None]) -> boo
     the unattended rig (no host attached) and a real PolyKybdHost re-flashes it on the
     next connect. The empty-pack flash erases only ~2 sectors, so it is fast. v6+ only
     (gated in TESTS)."""
-    import binascii, struct
+    import binascii
     SLOT = 0
     pack = _build_empty_fontpack()
     pack_crc = binascii.crc32(pack) & 0xFFFFFFFF
@@ -3710,6 +3709,10 @@ def test_bulk_pipe_soak(raw: RawHID, log: Callable[[str], None]) -> bool:
         os.close(fd)
     if not result.get("ok"):
         log(f"  FAIL: {result.get('error', 'count/CRC/bad-frame mismatch')}")
+        return False
+    if result.get("device_s", 0) <= 0:
+        log(f"  FAIL: keyboard clock did not advance over the stream "
+            f"(device_s={result.get('device_s')})")
         return False
     reply = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
     if reply is None or reply[1] != CMD_GET_ID:
