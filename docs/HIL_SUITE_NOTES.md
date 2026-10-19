@@ -516,7 +516,7 @@ and relative links were adjusted to suit a standalone file.
 
 ## The bulk pipe (CDC serial next to raw HID)
 
-Both tests are gated with `skip_if` (`station/bulk_pipe.py`): no CDC port with the
+These tests are gated with `skip_if` (`station/bulk_pipe.py`): no CDC port with the
 keyboard's idVendor means a firmware without `POLYKYBD_BULK_PIPE` (SKIP); a port the
 runner user cannot write means a rig provisioned before the dialout/udev step of
 `setup.sh` (SKIP, never FAIL, ctnd#116).
@@ -534,6 +534,16 @@ runner user cannot write means a rig provisioned before the dialout/udev step of
   `all N bytes staged over the bulk pipe (...) in T s (R KB/s, 236-byte frames)`,
   else `chunks over HID (<reason>)`. A pipe that stops mid-image hands the rest to
   HID from the keyboard's cursor.
+- **`resource slot staged over the bulk pipe (pipe v2)`** stages a 96 KB WHX stub
+  into the DOOMWAD pseudo bundle with the chunks over FW_CHUNK frames: BEGIN and
+  COMMIT over HID, every data byte over the pipe. COMMIT must ACK, which verifies
+  the staged CRC on both halves and the WHX magic in place, so the test proves the
+  pipe writes into the slot BEGIN selected (font packs, game data and the engine
+  pack share this transport). Unlike the firmware-apply job it does NOT fall back
+  to HID: a pipe that stops is a FAIL, because the HID path of the same slot is
+  already covered by `doom game-data slot round-trip`, which runs just before it.
+  The size crosses one 64 KB erase block into a sector tail. Same gate as the
+  FW_CHUNK probe.
 
 ## Writing test cases
 

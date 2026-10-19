@@ -59,6 +59,7 @@ See ``docs/FUTURE_TESTS.md`` for the planned-but-not-yet-implemented backlog.
 import os
 import re
 import struct
+import termios
 import time
 from typing import Callable
 
@@ -3155,13 +3156,12 @@ def _build_empty_fontpack() -> bytes:
     return struct.pack("<4sHHIIIIII", b"PlyF", 2, 0, 0, 0, 32, 32, body_crc, 0)
 
 
-def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
-                     payload: bytes, bundle_id: int) -> bytes | None:
-    """BEGIN/CHUNK/COMMIT `payload` to one doom pseudo-bundle slot; returns the raw
-    COMMIT reply (the caller checks ACK vs NACK) or None on a transport failure.
-    A BEGIN NACK (firmware without the doom slots) is returned as-is so the caller
-    reports a clear failure — the shipping HIL firmware always builds the slots
-    (qmk-test.yml POLYKYBD_DOOM_PACK=yes), so a NACK now means the routing broke."""
+def _doom_slot_begin(raw: RawHID, log: Callable[[str], None],
+                     payload: bytes, bundle_id: int) -> tuple[bool, bytes | None]:
+    """FONTPACK_BEGIN for `payload` into one doom pseudo-bundle slot, polled until
+    both halves report the erase done. Returns ``(ready, reply)``: ``ready`` True
+    with the ACK, or False with the BEGIN NACK (firmware without the doom slots,
+    returned as-is so the caller reports a clear failure) or None (no reply)."""
     import binascii
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     begin = bytes([POLY_CHANNEL, CMD_FONTPACK_BEGIN]) + struct.pack("<IIB", len(payload), crc, bundle_id)
@@ -3179,7 +3179,7 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
             continue
         if reply and len(reply) >= 3 and reply[2] == ord('!'):
             log(f"  BEGIN NACK for pseudo bundle 0x{bundle_id:02x} — firmware without the doom slots?")
-            return reply
+            return False, reply
         # No/short reply: the board may be dead. Each of these already burned
         # ~attempts×timeout_ms inside raw.send, so fail fast on a run of them
         # instead of spending the whole (long) erase budget here.
@@ -3191,7 +3191,21 @@ def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
         time.sleep(0.3)
     if not ready:
         log("  FAIL: FONTPACK_BEGIN never became ready")
-        return None
+        return False, None
+    return True, reply
+
+
+def _doom_slot_flash(raw: RawHID, log: Callable[[str], None],
+                     payload: bytes, bundle_id: int) -> bytes | None:
+    """BEGIN/CHUNK/COMMIT `payload` to one doom pseudo-bundle slot over HID; returns
+    the raw COMMIT reply (the caller checks ACK vs NACK) or None on a transport
+    failure. A BEGIN NACK (firmware without the doom slots) is returned as-is so the
+    caller reports a clear failure — the shipping HIL firmware always builds the
+    slots (qmk-test.yml POLYKYBD_DOOM_PACK=yes), so a NACK now means the routing
+    broke."""
+    ready, reply = _doom_slot_begin(raw, log, payload, bundle_id)
+    if not ready:
+        return reply
     for off in range(0, len(payload), FONTPACK_CHUNK_SIZE):
         part = payload[off:off + FONTPACK_CHUNK_SIZE]
         padded = part + b"\xff" * (FONTPACK_CHUNK_SIZE - len(part))
@@ -3760,6 +3774,71 @@ def test_bulk_pipe_fw_chunk_probe(raw: RawHID, log: Callable[[str], None]) -> bo
     return True
 
 
+# A resource-slot payload for the pipe test: the WHX magic the DOOMWAD COMMIT gate
+# checks in place, then a byte pattern that no erased flash can read back. The size
+# crosses a 64 KB erase block into a sector tail, so the staging erase runs both
+# unit sizes (fw_staging.c: a block where aligned, 4 KB sectors for the rest).
+RESOURCE_PIPE_PAYLOAD_SIZE = 96 * 1024
+
+
+def resource_pipe_payload(size: int = RESOURCE_PIPE_PAYLOAD_SIZE) -> bytes:
+    body = bytes((i * 7 + (i >> 8)) & 0xFF for i in range(size - 4))
+    return b"IWHX" + body
+
+
+def test_bulk_pipe_resource_slot(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A resource slot staged over the bulk pipe: FONTPACK_BEGIN over HID selects the
+    DOOMWAD pseudo bundle, every byte of a 96 KB WHX stub goes over FW_CHUNK frames
+    (pipe protocol 2, the same frames the firmware update uses), and FONTPACK_COMMIT
+    over HID must ACK. The COMMIT gate verifies the staged CRC on both halves and
+    the WHX magic in place, so a '.' proves the pipe wrote the whole image into the
+    slot BEGIN selected, master and slave, not into the firmware staging area.
+
+    The pipe must finish on its own here: the host falls back to HID when it stops,
+    and a test that did the same would pass with a pipe that never worked. The HID
+    path of the same slot is ``doom game-data slot round-trip`` just above. Side
+    effect: the rig's game-data slot holds the stub (harmless, the rig never starts
+    the game). Gated by ``bulk_pipe.fw_chunk_skip_reason``."""
+    payload = resource_pipe_payload()
+    ready, reply = _doom_slot_begin(raw, log, payload, DOOMWAD_BUNDLE_ID)
+    if not ready:
+        log(f"  FAIL: FONTPACK_BEGIN for the pipe transfer did not become ready: {reply!r}")
+        return False
+    log(f"  BEGIN ok — slot 0x{DOOMWAD_BUNDLE_ID:02x} erased on both halves, "
+        f"{len(payload)} bytes to stage")
+
+    port = bulk_pipe.find_port()
+    if port is None:
+        _fontpack_abort(raw)
+        log("  FAIL: the CDC port vanished between the gate and the transfer")
+        return False
+    t0 = time.monotonic()
+    try:
+        fd = bulk_pipe.open_raw(port)
+        try:
+            ok, offset, why = bulk_pipe.stream_firmware(bulk_pipe.Pipe(fd), payload, log=log)
+        finally:
+            os.close(fd)
+    except (OSError, termios.error) as exc:
+        ok, offset, why = False, 0, f"pipe error: {exc}"
+    dt = time.monotonic() - t0
+    if not ok:
+        _fontpack_abort(raw)
+        log(f"  FAIL: the pipe stopped at {offset} of {len(payload)} bytes after {dt:.1f} s: {why}")
+        return False
+    log(f"  all {len(payload)} bytes staged over the bulk pipe ({port}) in {dt:.2f} s "
+        f"({len(payload) / 1024 / dt if dt > 0 else 0:.0f} KB/s, "
+        f"{bulk_pipe.FW_CHUNK_MAX}-byte frames)")
+
+    reply = raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
+    if not (reply and len(reply) >= 3 and reply[2] == ord('.')):
+        log(f"  FAIL: FONTPACK_COMMIT after the pipe transfer: {describe_fontpack_commit(reply)}")
+        log(f"        raw reply: {reply!r}")
+        return False
+    log("  COMMIT ok — the slot holds the stub on both halves")
+    return True
+
+
 TESTS = [
     {"name": "single master enumerates",        "fn": test_single_master_enumerates},
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
@@ -3864,6 +3943,12 @@ TESTS = [
      "min_protocol": 6},
     {"name": "doom engine-pack slot magic gate", "fn": test_doompack_commit_magic_gate,
      "min_protocol": 6},
+    # The same resource transport with the chunks over the bulk pipe (FW_CHUNK into
+    # the slot BEGIN selected). After the HID round-trip of the same slot, so a
+    # failure here is the pipe, not the slot. SKIPs like the FW_CHUNK probe.
+    {"name": "resource slot staged over the bulk pipe (pipe v2)",
+     "fn": test_bulk_pipe_resource_slot, "min_protocol": 6,
+     "skip_if": bulk_pipe.fw_chunk_skip_reason},
     # FW-9 follow-up: narrow the intermittent post-doom slave wedge. This soak
     # flashes the doom slot DOOM_FLASH_SOAK_REPEATS× back-to-back with NO IDDQD run — the
     # "repeated erases alone" arm. It runs BEFORE the three IDDQD tests (so none of
