@@ -338,11 +338,12 @@ class ResourceSlotOverPipeTest(unittest.TestCase):
 
         raw = mock.Mock()
         raw.send.side_effect = raw_send
-        fd = os.open(os.devnull, os.O_RDONLY)
+        # The fd is opened inside the open_raw mock, so a run that returns
+        # before open_raw allocates none; the test under test closes it.
         with mock.patch.object(hil_tests, "_doom_slot_begin", return_value=begin), \
              mock.patch.object(hil_tests, "_fontpack_abort", side_effect=lambda r: aborts.append(1)), \
              mock.patch.object(bp, "find_port", return_value=find_port), \
-             mock.patch.object(bp, "open_raw", return_value=fd), \
+             mock.patch.object(bp, "open_raw", side_effect=lambda port: os.open(os.devnull, os.O_RDONLY)), \
              mock.patch.object(bp, "stream_firmware", return_value=stream):
             ok = hil_tests.test_bulk_pipe_resource_slot(raw, lines.append)
         return ok, lines, sent, len(aborts)
