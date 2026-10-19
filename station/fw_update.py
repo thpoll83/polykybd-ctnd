@@ -34,6 +34,8 @@ from typing import Callable
 
 import hid
 
+from . import bulk_pipe
+
 from .hid import _find_path, _frame
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID, HID_RAW_USAGE_PAGE, HID_RAW_USAGE
 
@@ -261,14 +263,41 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
                 return False
         log("  BEGIN ok — staging erased on both halves")
 
-        # -- CHUNK x N. ACK '.' advances; NACK '!' may carry a resume offset
-        #    (bytes 3..6) — rewind to it; otherwise back off and re-send. --
+        # -- CHUNKs over the bulk pipe when the firmware has one (protocol 2+),
+        #    else over HID. A pipe that stops hands the rest to HID from the
+        #    keyboard's cursor; the firmware only requires the cursor, not a
+        #    chunk boundary. --
+        offset = 0
+        rewinds = 0
+        pipe_reason = bulk_pipe.fw_chunk_skip_reason()
+        if pipe_reason is None:
+            port = bulk_pipe.find_port()
+            fd = bulk_pipe.open_raw(port)
+            t0 = time.monotonic()
+            try:
+                pipe = bulk_pipe.Pipe(fd)
+                ok, offset, why = bulk_pipe.stream_firmware(pipe, fw, log=log)
+            finally:
+                os.close(fd)
+            dt = time.monotonic() - t0
+            if ok:
+                log(f"  all {fw_size} bytes staged over the bulk pipe ({port}) in {dt:.1f} s "
+                    f"({fw_size / 1024 / dt if dt > 0 else 0:.0f} KB/s, "
+                    f"{bulk_pipe.FW_CHUNK_MAX}-byte frames)")
+            else:
+                log(f"  bulk pipe stopped at {offset} of {fw_size} bytes after {dt:.1f} s ({why}); "
+                    "continuing over HID")
+        else:
+            log(f"  chunks over HID ({pipe_reason})")
+
+        # -- CHUNK x N over HID. ACK '.' advances; NACK '!' may carry a resume
+        #    offset (bytes 3..6) — rewind to it; otherwise back off and re-send. --
         CHUNK_TIMEOUT = 8000
         CHUNK_ATTEMPTS = 8
         MAX_REWINDS = 200
-        i = attempts = rewinds = 0
-        while i < total_chunks:
-            offset = i * FW_UP_CHUNK_SIZE
+        attempts = 0
+        while offset < fw_size:
+            i = offset // FW_UP_CHUNK_SIZE
             raw = fw[offset:offset + FW_UP_CHUNK_SIZE]
             padded = raw + b"\xff" * (FW_UP_CHUNK_SIZE - len(raw))
             pkt = bytes([HID_POLYKYBD, CMD_FW_UP_CHUNK]) + struct.pack("<I", offset) + padded
@@ -276,21 +305,19 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
 
             if reply is not None and len(reply) >= 3 and reply[2] == ACK:
                 attempts = 0
-                i += 1
-                if i % 500 == 0 or i == total_chunks:
-                    log(f"  chunk {i}/{total_chunks} "
-                        f"({(i * FW_UP_CHUNK_SIZE) // 1024} KB)")
+                offset += len(raw)
+                if (i + 1) % 500 == 0 or offset >= fw_size:
+                    log(f"  chunk {i + 1}/{total_chunks} ({offset // 1024} KB)")
                 continue
 
             resume = (struct.unpack_from("<I", bytes(reply), 3)[0]
                       if reply is not None and len(reply) >= 7 else 0)
             if (reply is not None and len(reply) >= 7 and reply[2] == NACK
-                    and 0 < resume < offset and resume % FW_UP_CHUNK_SIZE == 0
-                    and rewinds < MAX_REWINDS):
+                    and 0 < resume < offset and rewinds < MAX_REWINDS):
                 rewinds += 1
                 attempts = 0
-                i = resume // FW_UP_CHUNK_SIZE
-                log(f"  halves resynced — rewinding to chunk {i + 1} "
+                offset = resume
+                log(f"  halves resynced — rewinding to chunk {offset // FW_UP_CHUNK_SIZE + 1} "
                     f"(offset {resume}, resync {rewinds})")
                 time.sleep(0.05)
                 continue
@@ -306,8 +333,8 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
                 return False
             time.sleep(min(0.05 * (2 ** (attempts - 1)), 1.0))
 
-        log(f"  all {total_chunks} chunks delivered "
-            f"({rewinds} resync rewind(s)) — verifying CRC…")
+        log(f"  all {fw_size} bytes delivered "
+            f"({rewinds} HID resync rewind(s)) — verifying CRC…")
 
         # -- FW_UP_SIGNATURE (FW-2): send it when the build shipped one. --
         # Mirrors PolyKybdHost: a detached <bin>.sig next to the image, 64 raw

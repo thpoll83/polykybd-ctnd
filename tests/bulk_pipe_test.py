@@ -97,7 +97,8 @@ class PortSearchTest(unittest.TestCase):
 class FakeFirmware:
     """Answers the pipe commands the way poly_pipe.c does; ``drop`` loses one SINK frame."""
 
-    def __init__(self, drop_frame=None):
+    def __init__(self, drop_frame=None, proto=2, image_size=None, drop_fw_frames=(),
+                 reject_fw_frames=()):
         self.parser = bp.FrameParser()
         self.out = bytearray()
         self.sink_bytes = 0
@@ -107,12 +108,43 @@ class FakeFirmware:
         self.last_ms = 0
         self.sink_seen = 0
         self.drop_frame = drop_frame
+        self.proto = proto
+        # FW_CHUNK: the staging cursor, like fw_staging_write_chunk: a frame at the
+        # cursor is written, one behind it is a duplicate (ACK, no write), anything
+        # else is NACKed with the cursor. drop_fw_frames never answer (a bad CRC on
+        # the wire), reject_fw_frames are NACKed (a relay failure).
+        self.image_size = image_size
+        self.cursor = 0
+        self.staged = bytearray()
+        self.fw_frames = 0
+        self.drop_fw_frames = set(drop_fw_frames)
+        self.reject_fw_frames = set(reject_fw_frames)
 
     def write(self, fd, data):
         for cmd, payload in self.parser.feed(bytes(data)):
             self.frames_ok += 1
             if cmd == bp.CMD_PING:
-                self.out += bp.pack_frame(cmd | bp.REPLY, struct.pack("<BHBB", 1, 512, 64, 8) + b"1.9.3\0")
+                self.out += bp.pack_frame(cmd | bp.REPLY,
+                                          struct.pack("<BHBB", self.proto, 512, 64, 8) + b"1.9.3\0")
+            elif cmd == bp.CMD_FW_CHUNK:
+                self.fw_frames += 1
+                if self.fw_frames in self.drop_fw_frames:
+                    continue
+                acked = False
+                if len(payload) >= 5 and len(payload) - 4 <= bp.FW_CHUNK_MAX \
+                        and self.fw_frames not in self.reject_fw_frames:
+                    offset = struct.unpack_from("<I", payload)[0]
+                    data = payload[4:]
+                    if offset < self.cursor:
+                        acked = True
+                    elif offset == self.cursor:
+                        if self.image_size is not None:
+                            data = data[:self.image_size - offset]
+                        self.staged += data
+                        self.cursor += len(data)
+                        acked = True
+                self.out += bp.pack_frame(cmd | bp.REPLY, (b"." if acked else b"!")
+                                          + struct.pack("<I", self.cursor))
             elif cmd == bp.CMD_RESET:
                 self.sink_bytes = self.crc = self.first_ms = self.last_ms = 0
                 self.out += bp.pack_frame(cmd | bp.REPLY)
@@ -183,3 +215,65 @@ class GateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirmwareStreamTest(unittest.TestCase):
+    """``stream_firmware`` against the fake firmware: whole image in 236-byte
+    frames, and the recovery paths (a lost frame, a rejected one, a dead keyboard)."""
+
+    IMAGE = bytes((i * 31 + 7) & 0xFF for i in range(236 * 9 + 100))
+
+    def _pipe(self, fw, clock=None):
+        kw = {"clock": clock} if clock else {}
+        return bp.Pipe(0, read=fw.read, write=fw.write, **kw)
+
+    def test_whole_image(self):
+        fw = FakeFirmware(image_size=len(self.IMAGE))
+        ok, offset, why = bp.stream_firmware(self._pipe(fw), self.IMAGE)
+        self.assertEqual((ok, offset, why), (True, len(self.IMAGE), None))
+        self.assertEqual(bytes(fw.staged), self.IMAGE)
+        self.assertEqual(fw.fw_frames, 10)
+
+    def test_lost_frame_recovers(self):
+        t = [0.0]
+
+        def clock():
+            t[0] += 0.01
+            return t[0]
+
+        fw = FakeFirmware(image_size=len(self.IMAGE), drop_fw_frames={3})
+        ok, offset, why = bp.stream_firmware(self._pipe(fw, clock), self.IMAGE)
+        self.assertEqual((ok, offset, why), (True, len(self.IMAGE), None))
+        self.assertEqual(bytes(fw.staged), self.IMAGE)
+
+    def test_rejected_frame_recovers(self):
+        fw = FakeFirmware(image_size=len(self.IMAGE), reject_fw_frames={2})
+        ok, offset, why = bp.stream_firmware(self._pipe(fw), self.IMAGE)
+        self.assertEqual((ok, offset, why), (True, len(self.IMAGE), None))
+        self.assertEqual(bytes(fw.staged), self.IMAGE)
+
+    def test_dead_keyboard_reports_cursor(self):
+        t = [0.0]
+
+        def clock():
+            t[0] += 0.5
+            return t[0]
+
+        fw = FakeFirmware(image_size=len(self.IMAGE), drop_fw_frames=set(range(3, 500)))
+        ok, offset, why = bp.stream_firmware(self._pipe(fw, clock), self.IMAGE)
+        self.assertEqual((ok, offset, why), (False, 2 * 236, "no reply"))
+
+    def test_fw_chunk_gate(self):
+        with tempfile.TemporaryDirectory() as d:
+            tty = os.path.join(d, "ttyACM0")
+            os.makedirs(os.path.join(tty, "device"))
+            with open(os.path.join(tty, "idVendor"), "w") as f:
+                f.write("2021\n")
+            # os.path.join(tty, "device", "..", "idVendor") resolves to tty/idVendor
+            fw_old = FakeFirmware(proto=1)
+            fw_new = FakeFirmware(proto=2)
+            self.assertIn("FW_CHUNK needs 2", bp.fw_chunk_skip_reason(
+                d, access=lambda *a: True, open_pipe=lambda p: (self._pipe(fw_old), lambda: None)))
+            self.assertIsNone(bp.fw_chunk_skip_reason(
+                d, access=lambda *a: True, open_pipe=lambda p: (self._pipe(fw_new), lambda: None)))
+            self.assertIn("not writable", bp.fw_chunk_skip_reason(d, access=lambda *a: False))

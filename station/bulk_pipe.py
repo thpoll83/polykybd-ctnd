@@ -26,7 +26,15 @@ import zlib
 VID = "2021"
 MAGIC = b"PB"
 CMD_PING, CMD_SINK, CMD_STAT, CMD_RESET, CMD_ECHO = 0x01, 0x02, 0x03, 0x04, 0x05
+CMD_FW_CHUNK = 0x10        # pipe protocol 2: one firmware-update chunk (poly_pipe.h)
 REPLY = 0x80
+PIPE_PROTO_FW_CHUNK = 2    # the PING protocol a firmware needs for CMD_FW_CHUNK
+FW_CHUNK_MAX = 236         # data bytes per frame (qmk FW_UP_RELAY_CHUNK_MAX: one split RPC)
+FW_CHUNK_WINDOW = 4        # frames sent ahead of their replies (poly_pipe.h: the host must pace itself)
+FW_CHUNK_TIMEOUT_S = 8.0   # a reply this late means the keyboard is gone (the HID path's 8000 ms)
+FW_CHUNK_DRAIN_S = 1.0     # wait for the replies of the frames in flight after a NACK
+FW_CHUNK_ATTEMPTS = 8
+FW_CHUNK_MAX_REWINDS = 200
 STAT_FIELDS = ("sink_bytes", "frames_ok", "frames_bad", "resync_bytes",
                "sink_crc", "first_ms", "last_ms")
 SYS_TTY = "/sys/class/tty"
@@ -41,6 +49,18 @@ def parse_stat(payload: bytes) -> dict:
     if len(payload) != 4 * len(STAT_FIELDS):
         raise ValueError(f"STAT reply has {len(payload)} bytes, expected {4 * len(STAT_FIELDS)}")
     return dict(zip(STAT_FIELDS, struct.unpack("<" + "I" * len(STAT_FIELDS), payload)))
+
+
+def fw_chunk_frame(offset: int, data: bytes) -> bytes:
+    """One FW_CHUNK frame: the offset (u32 LE) and 1..FW_CHUNK_MAX data bytes."""
+    return pack_frame(CMD_FW_CHUNK, struct.pack("<I", offset) + data)
+
+
+def parse_fw_chunk_reply(payload: bytes):
+    """``(acked, cursor)`` from a FW_CHUNK reply, or None for a malformed one."""
+    if len(payload) < 5:
+        return None
+    return payload[0] == ord("."), struct.unpack_from("<I", payload, 1)[0]
 
 
 def parse_ping(payload: bytes) -> dict:
@@ -208,3 +228,117 @@ def measure(pipe: Pipe, total_bytes: int, frame_payload: int, log) -> dict:
         f"{stats['resync_bytes']} resync, crc 0x{stats['sink_crc']:08x} "
         f"(expected 0x{expect_crc:08x})")
     return result
+
+
+def stream_firmware(pipe: "Pipe", fw: bytes, start: int = 0, chunk: int = FW_CHUNK_MAX,
+                    window: int = FW_CHUNK_WINDOW, timeout: float = FW_CHUNK_TIMEOUT_S,
+                    log=None) -> tuple:
+    """Send ``fw[start:]`` as FW_CHUNK frames, ``window`` frames ahead of their
+    replies, after FW_UP_BEGIN was ACKed over HID. Returns ``(ok, offset, reason)``:
+    ``ok`` when the keyboard's cursor reached the end; otherwise ``offset`` is the
+    cursor to continue from (over HID) and ``reason`` says why.
+
+    Mirrors PolyKybdHost ``bulk_pipe.stream_firmware``: every reply carries the
+    keyboard's cursor, an ACK advances the confirmed offset to it, a NACK rewinds
+    to it once the replies of the frames in flight drained (a dropped frame never
+    answers, so the drain gives up after FW_CHUNK_DRAIN_S), and a quiet window is
+    resolved with a cursor probe (an empty FW_CHUNK, always NACKed with the cursor).
+    """
+    total = len(fw)
+    offset = confirmed = start
+    in_flight = drain = 0
+    attempts = rewinds = 0
+    clock = pipe._clock
+    last_reply = clock()
+    while True:
+        if confirmed >= total:
+            return True, total, None
+        if drain == 0:
+            while in_flight < window and offset < total:
+                n = min(chunk, total - offset)
+                pipe.write_all(fw_chunk_frame(offset, fw[offset:offset + n]))
+                offset += n
+                in_flight += 1
+        data = pipe._read(pipe.fd, 4096)
+        if data:
+            for cmd, body in pipe.parser.feed(data):
+                if cmd != (CMD_FW_CHUNK | REPLY):
+                    continue
+                parsed = parse_fw_chunk_reply(body)
+                if parsed is None:
+                    continue
+                last_reply = clock()
+                acked, cursor = parsed
+                if drain:
+                    drain -= 1
+                    in_flight = max(0, in_flight - 1)
+                    confirmed = max(confirmed, min(cursor, total))
+                    if drain == 0:
+                        offset = confirmed
+                        in_flight = 0
+                    continue
+                in_flight = max(0, in_flight - 1)
+                if acked:
+                    if cursor > confirmed:
+                        confirmed = cursor
+                        attempts = 0
+                    continue
+                rewinds += 1
+                if rewinds > FW_CHUNK_MAX_REWINDS:
+                    return False, cursor, "rejected"
+                if cursor <= confirmed:
+                    attempts += 1
+                    if attempts >= FW_CHUNK_ATTEMPTS:
+                        return False, cursor, "rejected"
+                if log:
+                    log(f"  pipe: NACK, keyboard cursor {cursor} (resync {rewinds})")
+                confirmed = max(confirmed, cursor) if cursor <= total else confirmed
+                if in_flight:
+                    drain = in_flight
+                else:
+                    offset = cursor
+            continue
+        quiet = clock() - last_reply
+        if drain and quiet >= FW_CHUNK_DRAIN_S:
+            drain = in_flight = 0
+            offset = confirmed
+            last_reply = clock()
+            continue
+        if quiet < timeout:
+            continue
+        attempts += 1
+        if attempts >= FW_CHUNK_ATTEMPTS:
+            return False, confirmed, "no reply"
+        reply = pipe.request(CMD_FW_CHUNK, b"", timeout=timeout)
+        parsed = parse_fw_chunk_reply(reply) if reply is not None else None
+        if parsed is None:
+            return False, confirmed, "no reply"
+        if log:
+            log(f"  pipe: quiet for {quiet:.1f} s, keyboard cursor {parsed[1]}")
+        last_reply = clock()
+        offset = confirmed = max(confirmed, parsed[1])
+        in_flight = drain = 0
+
+
+def fw_chunk_skip_reason(sys_tty: str = SYS_TTY, access=os.access, open_pipe=None):
+    """Why a FW_CHUNK check cannot run: ``skip_reason`` plus a firmware whose
+    pipe protocol predates FW_CHUNK (a capability, so SKIP)."""
+    reason = skip_reason(sys_tty, access)
+    if reason:
+        return reason
+    port = find_port(sys_tty)
+    if open_pipe is None:
+        def open_pipe(p):
+            fd = open_raw(p)
+            return Pipe(fd), (lambda: os.close(fd))
+    pipe, close = open_pipe(port)
+    try:
+        reply = pipe.request(CMD_PING, timeout=1.0)
+    finally:
+        close()
+    if reply is None:
+        return f"{port} does not answer PING"
+    proto = parse_ping(reply)["proto"]
+    if proto < PIPE_PROTO_FW_CHUNK:
+        return f"pipe protocol {proto}: FW_CHUNK needs {PIPE_PROTO_FW_CHUNK}"
+    return None

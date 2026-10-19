@@ -3718,6 +3718,45 @@ def test_bulk_pipe_soak(raw: RawHID, log: Callable[[str], None]) -> bool:
     log("  raw HID still answers after the stream")
     return True
 
+def test_bulk_pipe_fw_chunk_probe(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """FW_CHUNK (pipe protocol 2) answers outside a staging session: an empty frame
+    is the host's cursor probe and must come back NACKed with the keyboard's
+    cursor; a frame with data outside a session must be refused too (nothing is
+    written when no BEGIN opened staging). Read-only: no BEGIN is sent. The real
+    transfer runs in the firmware-apply job (``fw_update.stage_and_verify``, which
+    logs the pipe time and rate). Gated by ``bulk_pipe.fw_chunk_skip_reason``.
+    """
+    port = bulk_pipe.find_port()
+    if port is None:
+        log("  no CDC port — gate should have skipped this test")
+        return False
+    fd = bulk_pipe.open_raw(port)
+    try:
+        pipe = bulk_pipe.Pipe(fd)
+        probe = pipe.request(bulk_pipe.CMD_FW_CHUNK, b"", timeout=2.0)
+        parsed = bulk_pipe.parse_fw_chunk_reply(probe) if probe is not None else None
+        if parsed is None:
+            log("  FAIL: the empty FW_CHUNK probe got no well-formed reply")
+            return False
+        if parsed[0]:
+            log("  FAIL: the empty FW_CHUNK probe was ACKed; it must be NACKed with the cursor")
+            return False
+        log(f"  cursor probe NACKed as expected, keyboard cursor {parsed[1]}")
+        stray = pipe.request(bulk_pipe.CMD_FW_CHUNK, struct.pack("<I", 0) + b"\xff" * 16, timeout=2.0)
+        parsed = bulk_pipe.parse_fw_chunk_reply(stray) if stray is not None else None
+        if parsed is None or parsed[0]:
+            log("  FAIL: a FW_CHUNK with data outside a staging session was not refused")
+            return False
+        log("  stray chunk outside a session refused")
+    finally:
+        os.close(fd)
+    reply = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    if reply is None or reply[1] != CMD_GET_ID:
+        log("  FAIL: raw HID (GET_ID) does not answer after the pipe probes")
+        return False
+    return True
+
+
 TESTS = [
     {"name": "single master enumerates",        "fn": test_single_master_enumerates},
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
@@ -3790,6 +3829,8 @@ TESTS = [
     # SKIPs on firmware without the pipe and on a rig without the tty grant.
     {"name": "bulk pipe soak (CDC, 2 MB)", "fn": test_bulk_pipe_soak,
      "skip_if": bulk_pipe.skip_reason},
+    {"name": "bulk pipe FW_CHUNK refused outside staging (pipe v2)", "fn": test_bulk_pipe_fw_chunk_probe,
+     "skip_if": bulk_pipe.fw_chunk_skip_reason},
     # Deliberate bridged-traffic soak + the firmware's own link health counter.
     # After the stress burst (which wants a quiet master) and before the flash
     # tests. Needs the console (the counter is only observable there) and ~5 s of
