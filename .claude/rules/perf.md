@@ -17,5 +17,5 @@ Full notes: `docs/PERF_HARNESS.md`.
 - **Reuse `TestRunner`'s readiness gates** (`flash_halves` / `wait_for_master_ready`
   / `settle_master`); skipping the sustained settle measures the master's boot-time
   busy window instead of the workload.
-- ⚠️ **Never auto-update a baseline** — it ratchets a slow regression in silently.
+- ⚠️ **Never auto-update a baseline** — it accepts a slow regression as the new normal, with no warning.
 - `LOOP_PROFILE_SNAPSHOT_VERSION` (firmware) and `SNAPSHOT_VERSION` here move together.
