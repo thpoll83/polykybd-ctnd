@@ -42,7 +42,7 @@ Python deps: `requirements.txt`. System packages (`uhubctl`, hidapi, `picotool`,
   and VBUS stays on. Per-port power needs an external uhubctl-compatible hub. Flashing
   does not depend on it.
 - ⚠️ **Master and slave are fixed at compile time, per side.** Both halves see VBUS on
-  the rig, so stock VBUS detection makes both master. `-e POLYKYBD_HIL=left` (alias
+  the rig, so standard VBUS detection makes both master. `-e POLYKYBD_HIL=left` (alias
   `yes`) builds the master image, `=right` the slave. `rules.mk` turns them into
   `-DPOLYKYBD_HIL` / `-DPOLYKYBD_HIL_SLAVE`, and `is_keyboard_master_impl()` in
   `qmk_firmware/keyboards/polykybd/polykybd.c` returns true, or calls
@@ -99,18 +99,18 @@ The full workflow and its worked examples: [`docs/DEV_WORKFLOW.md`](docs/DEV_WOR
 the updater: [`docs/SELF_UPDATE.md`](docs/SELF_UPDATE.md).
 
 - ⚠️ **HIL CI runs the installed `/opt/polykybd-ctnd`, force-synced to ctnd `main`**
-  (`git checkout -q -f -B main origin/main`). So the rig is never a place to park a
-  branch, and a test from an unmerged ctnd PR does not run.
-- ⚠️ **A paired firmware + rig change has a merge order: land the ctnd PR first**, then
+  (`git checkout -q -f -B main origin/main`). So the rig cannot keep any other
+  branch checked out, and a test from an unmerged ctnd PR does not run.
+- ⚠️ **A paired firmware + rig change has a merge order: merge the ctnd PR first**, then
   re-run HIL on the firmware PR. What counts is ctnd `main` at the sync step. Merging the
   firmware first only defers coverage to the merge-commit run. Either way, grep the job
   log for `[test] PASS: <name>`.
 - ⚠️ **When HIL flakes, check the rig is current first.** The settle line says
   `need=15` on current code, `need=3` on stale.
-- ⚠️ **A HIL job that dies at `Prepare all required actions` never ran.** That is the
+- ⚠️ **A HIL job that fails at `Prepare all required actions` never ran.** That is the
   rig's network (e.g. `codeload.github.com` blocked), not code. The runner stays online
   throughout. Triage: the `diagnose-hil-failure` skill.
-- ⚠️ **A rig provisioned before a unit landed never gets it.**
+- ⚠️ **A rig provisioned before a unit was added never gets it.**
   `sudo bash ./scripts/setup.sh --units-only` (with `bash`: older checkouts lack the
   execute bit).
 - **The runner's first registration needs SSH**; after that the UI's ⚕ Diagnose,
