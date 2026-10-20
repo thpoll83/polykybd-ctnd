@@ -115,19 +115,27 @@ def dig(data: dict, path: str):
 
 
 def metric_is_usable(data: dict, path: str) -> bool:
-    """False when the section holding ``path`` marks itself invalid.
+    """False when any section on the way to ``path`` marks itself invalid.
 
     An app-switch phase whose replay stopped on a NACK, or whose master never
     answered again, carries ``"valid": False``. Its numbers describe a clipped
-    window, so they must neither be compared nor stored as a baseline.
+    window, so they must neither be compared nor stored as a baseline. The check
+    walks every ancestor, so a nested section (a transport's ``erase`` window)
+    is out whenever the transport row is.
 
     >>> metric_is_usable({"a": {"b": {"valid": False, "x": 1}}}, "a.b.x")
     False
     >>> metric_is_usable({"a": {"b": {"x": 1}}}, "a.b.x")
     True
+    >>> metric_is_usable({"a": {"valid": False, "b": {"x": 1}}}, "a.b.x")
+    False
     """
-    parent = dig(data, path.rsplit(".", 1)[0]) if "." in path else data
-    return not (isinstance(parent, dict) and parent.get("valid") is False)
+    parts = path.split(".")
+    for depth in range(len(parts) - 1):
+        section = dig(data, ".".join(parts[:depth + 1]))
+        if isinstance(section, dict) and section.get("valid") is False:
+            return False
+    return True
 
 
 def baseline_safe(report: dict) -> dict:

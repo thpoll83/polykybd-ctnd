@@ -674,6 +674,11 @@ def erase_summary(prof: LoopProfile, wall_s: float, window_info: dict) -> dict:
     out.update(window_info)
     out["host_wall_ms"] = round(wall_s * 1000.0, 1)
     out["passes_ge_50ms"] = prof.bkt_norm[-1] + prof.bkt_ovl[-1]
+    # Its own flag: the erase is a whole measurement once BEGIN became ready,
+    # whatever the transfer after it does. A v1 window that lost a profiler reply
+    # is not (idle_rate). The transport row's flag still covers it for the
+    # comparison and the baseline (perf_runner.metric_is_usable, baseline_safe).
+    out["valid"] = not (prof.window_us is None and window_info.get("hid_retries"))
     return out
 
 

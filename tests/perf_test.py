@@ -741,6 +741,29 @@ class TestResourceTransferWorkload(unittest.TestCase):
         e = perf.erase_summary(prof, 1.25, {"hid_retries": 0})
         self.assertEqual((e["iters"], e["worst_iter_ms"], e["passes_ge_50ms"],
                           e["long_iters_ge_10ms"], e["host_wall_ms"]), (30, 152.0, 8, 8, 1250.0))
+        self.assertTrue(e["valid"])
+        v1 = perf.LoopProfile(iters=30, version=1)
+        self.assertFalse(perf.erase_summary(v1, 1.0, {"hid_retries": 2})["valid"])
+        self.assertTrue(perf.erase_summary(v1, 1.0, {"hid_retries": 0})["valid"])
+
+    def test_erase_of_an_invalid_transfer_is_not_compared(self):
+        cur = {"resource_transfer": {"hid": {"valid": False, "bytes": 65536,
+                                             "erase": {"valid": True, "worst_iter_ms": 999.0}}}}
+        base = {"resource_transfer": {"hid": {"valid": True, "bytes": 65536,
+                                              "erase": {"valid": True, "worst_iter_ms": 150.0}}}}
+        metrics = {c["metric"] for c in compare_to_baseline(cur, base)}
+        self.assertNotIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
+        metrics = {c["metric"] for c in compare_to_baseline(base, cur)}
+        self.assertNotIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
+        ok = {"resource_transfer": {"hid": {"valid": True, "bytes": 65536,
+                                            "erase": {"valid": True, "worst_iter_ms": 160.0}}}}
+        metrics = {c["metric"] for c in compare_to_baseline(ok, base)}
+        self.assertIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
+        # An erase window that is itself invalid (a v1 window with lost replies)
+        # is out even on a valid transfer.
+        ok["resource_transfer"]["hid"]["erase"]["valid"] = False
+        metrics = {c["metric"] for c in compare_to_baseline(ok, base)}
+        self.assertNotIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
 
     def test_erase_metric_compares_on_the_transports_bytes(self):
         from station.perf_runner import same_workload
