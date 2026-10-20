@@ -519,23 +519,64 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertEqual([r[1] for r in sent].count(0x52), 1)
         self.assertFalse(out["commit_ok"])
 
-    def test_stopped_stream_reports_confirmed_frames_only(self):
+    def test_pipe_port_opens_before_the_window_and_counts_confirmed_frames(self):
         from unittest import mock
         from station import bulk_pipe
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        events = []
+        real_send = dev.send
+        dev.send = lambda data, timeout_ms=3000, attempts=3: (
+            events.append(("hid", data[1], data[2] if data[1] == perf.CMD_PROFILE else None))
+            or real_send(data, timeout_ms, attempts))
+
+        def fake_open(port):
+            events.append(("open", port, None))
+            return 7
+
+        def fake_stream(pipe, payload, log=None):
+            events.append(("stream", len(payload), None))
+            return False, 472, "quiet"
         with mock.patch.object(bulk_pipe, "find_port", return_value="/dev/ttyACM9"), \
-             mock.patch.object(bulk_pipe, "open_raw", return_value=7), \
-             mock.patch.object(bulk_pipe, "stream_firmware", return_value=(False, 472, "quiet", )), \
-             mock.patch("os.close"):
-            ok, offset, why, frames = perf._stream_slot_over_pipe(b"x" * 2000, _quiet)
-        self.assertFalse(ok)
-        self.assertEqual((offset, frames), (472, 2))
-        with mock.patch.object(bulk_pipe, "find_port", return_value="/dev/ttyACM9"), \
-             mock.patch.object(bulk_pipe, "open_raw", return_value=7), \
-             mock.patch.object(bulk_pipe, "stream_firmware", return_value=(True, 2000, "")), \
-             mock.patch("os.close"):
-            ok, offset, why, frames = perf._stream_slot_over_pipe(b"x" * 2000, _quiet)
-        self.assertTrue(ok)
-        self.assertEqual(frames, 9)
+             mock.patch.object(bulk_pipe, "open_raw", side_effect=fake_open), \
+             mock.patch.object(bulk_pipe, "stream_firmware", side_effect=fake_stream), \
+             mock.patch("os.close") as closed:
+            out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                                 "pipe", size=2000)
+        kinds = [e[0] if e[0] != "hid" else (e[1], e[2]) for e in events]
+        self.assertLess(kinds.index("open"), kinds.index((perf.CMD_PROFILE, perf.PROF_SUB_RESET)),
+                        "the port is opened before the RESET")
+        self.assertLess(kinds.index((perf.CMD_PROFILE, perf.PROF_SUB_RESET)), kinds.index("stream"))
+        closed.assert_called_once_with(7)
+        self.assertFalse(out["valid"])
+        self.assertEqual(out["frames"], 2, "only the confirmed frames")
+        self.assertIn("472 of 2000", out["error"])
+        self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran once")
+
+    def test_unopenable_port_aborts_before_any_window(self):
+        from unittest import mock
+        from station import bulk_pipe
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        with mock.patch.object(bulk_pipe, "find_port", return_value=None):
+            out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                                 "pipe", size=600)
+        self.assertFalse(out["valid"])
+        self.assertIn("vanished", out["error"])
+        self.assertEqual(dev.reset_count, 0)
+        self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
+
+    def test_profiler_failure_after_begin_still_aborts(self):
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        prof = perf.Profiler(dev, _quiet)
+
+        def no_reply():
+            raise RuntimeError("no reply to profiler READ")
+        prof.read = no_reply
+        with self.assertRaises(RuntimeError):
+            perf.measure_resource_transfer(dev, prof, _quiet, "hid", size=56)
+        self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
 
     def test_raising_stream_aborts_the_transfer_and_propagates(self):
         dev = FakeProfilerDevice()
@@ -569,13 +610,29 @@ class TestResourceTransferWorkload(unittest.TestCase):
 
     def test_begin_nack_opens_no_window(self):
         dev = FakeProfilerDevice()
-        self._recording(dev, nack_cmds=(0x50,))
+        sent = self._recording(dev, nack_cmds=(0x50,))
         out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
                                              "hid", size=56)
         self.assertFalse(out["valid"])
         self.assertIn("BEGIN", out["error"])
         self.assertEqual(dev.reset_count, 0)
         self.assertNotIn("worst_iter_ms", out)
+        self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
+
+    def test_different_sizes_are_not_compared_and_the_report_says_why(self):
+        from station.perf_runner import resource_size_notes
+        cur = {"resource_transfer": {"hid": {"valid": True, "bytes": 65536, "kb_per_s": 11.0},
+                                     "pipe": {"valid": True, "bytes": 65536, "kb_per_s": 50.0}}}
+        base = {"resource_transfer": {"hid": {"valid": True, "bytes": 32768, "kb_per_s": 11.0},
+                                      "pipe": {"valid": True, "bytes": 65536, "kb_per_s": 50.0}}}
+        metrics = {c["metric"] for c in compare_to_baseline(cur, base)}
+        self.assertNotIn("resource_transfer.hid.kb_per_s", metrics)
+        self.assertIn("resource_transfer.pipe.kb_per_s", metrics)
+        notes = resource_size_notes(cur, base)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("this run moved 65536 bytes, the baseline 32768", notes[0])
+        md = format_markdown(cur, compare_to_baseline(cur, base), notes=notes)
+        self.assertIn("> ℹ️ Resource transfer (hid) was not compared", md)
 
     def test_unknown_transport_is_rejected(self):
         dev = FakeProfilerDevice()

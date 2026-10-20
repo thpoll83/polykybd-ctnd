@@ -159,6 +159,46 @@ def baseline_safe(report: dict) -> dict:
     return out
 
 
+def same_workload(report: dict, baseline: dict, path: str) -> bool:
+    """False when the two reports measured ``path`` on different workloads.
+
+    The resource transfer's size is a CLI option (``--resource-kb``). Its share
+    of fixed costs and its chance of a long loop pass move with the size, so a
+    row from a 64 KB run against a 32 KB baseline would read as a change that is
+    not there. The other workloads are fixed by the harness.
+
+    >>> same_workload({"resource_transfer": {"hid": {"bytes": 1}}},
+    ...               {"resource_transfer": {"hid": {"bytes": 2}}},
+    ...               "resource_transfer.hid.kb_per_s")
+    False
+    >>> same_workload({"resource_transfer": {"hid": {"bytes": 1}}},
+    ...               {"resource_transfer": {"hid": {"bytes": 1}}},
+    ...               "resource_transfer.hid.kb_per_s")
+    True
+    >>> same_workload({"idle": {"iters_per_s": 1.0}}, {}, "idle.iters_per_s")
+    True
+    """
+    if not path.startswith("resource_transfer."):
+        return True
+    section = path.rsplit(".", 1)[0]
+    return dig(report, section + ".bytes") == dig(baseline, section + ".bytes")
+
+
+def resource_size_notes(report: dict, baseline: dict) -> list:
+    """One line per resource-transfer row whose size differs from the baseline's,
+    so the report says why those rows have no comparison."""
+    notes = []
+    for t, r in (report.get("resource_transfer") or {}).items():
+        base = dig(baseline, f"resource_transfer.{t}")
+        if not isinstance(r, dict) or not isinstance(base, dict):
+            continue
+        if r.get("bytes") is not None and base.get("bytes") is not None \
+                and r["bytes"] != base["bytes"]:
+            notes.append(f"Resource transfer ({t}) was not compared: this run moved "
+                         f"{r['bytes']} bytes, the baseline {base['bytes']}.")
+    return notes
+
+
 def compare_to_baseline(report: dict, baseline: dict,
                         tolerance_pct: float = DEFAULT_TOLERANCE_PCT) -> list:
     """Diff the tracked metrics against a baseline report.
@@ -180,10 +220,16 @@ def compare_to_baseline(report: dict, baseline: dict,
     ...                         {"idle": {"iters_per_s": 1000.0}}, tolerance_pct=5)
     >>> c[0]["verdict"], c[0]["delta_pct"]        # lower rate is worse
     ('regression', -50.0)
+    >>> rep  = {"resource_transfer": {"hid": {"bytes": 65536, "kb_per_s": 11.0}}}
+    >>> base = {"resource_transfer": {"hid": {"bytes": 32768, "kb_per_s": 11.0}}}
+    >>> compare_to_baseline(rep, base)            # a different size: not comparable
+    []
     """
     out = []
     for path, label, unit, higher_is_worse in TRACKED_METRICS:
         if not (metric_is_usable(report, path) and metric_is_usable(baseline, path)):
+            continue
+        if not same_workload(report, baseline, path):
             continue
         cur, base = dig(report, path), dig(baseline, path)
         if cur is None or base is None:
@@ -213,8 +259,11 @@ def compare_to_baseline(report: dict, baseline: dict,
 
 
 def format_markdown(report: dict, comparison: list = None,
-                    tolerance_pct: float = DEFAULT_TOLERANCE_PCT) -> str:
-    """Render the report as the markdown posted to the CI job summary."""
+                    tolerance_pct: float = DEFAULT_TOLERANCE_PCT,
+                    notes: list = None) -> str:
+    """Render the report as the markdown posted to the CI job summary.
+    ``notes`` are lines shown as information under the comparison, such as a
+    row that was not compared and why."""
     label = report.get("label") or "PolyKybd"
     dev = report.get("device", {})
     lines = [f"## ⏱️ Firmware performance — {label}", ""]
@@ -271,6 +320,8 @@ def format_markdown(report: dict, comparison: list = None,
         lines.append("")
     else:
         lines += ["_No baseline recorded yet — this run establishes the reference._", ""]
+    for note in notes or ():
+        lines += [f"> ℹ️ {note}", ""]
 
     lines += ["| measurement | value |", "|---|---:|"]
     excluded = []
@@ -656,7 +707,10 @@ def main(argv=None) -> int:
 
     baseline = load_baseline(baseline_path)
     comparison = compare_to_baseline(report, baseline, args.tolerance) if baseline else []
-    markdown = format_markdown(report, comparison, args.tolerance)
+    notes = resource_size_notes(report, baseline) if baseline else []
+    for note in notes:
+        print(f"[perf] {note}")
+    markdown = format_markdown(report, comparison, args.tolerance, notes)
 
     print(markdown)
     write_github_summary(markdown)

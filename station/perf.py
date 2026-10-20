@@ -615,24 +615,28 @@ def _stream_slot_over_hid(raw: RawHID, payload: bytes) -> tuple:
     return True, len(payload), "", reports
 
 
-def _stream_slot_over_pipe(payload: bytes, log: Callable[[str], None]) -> tuple:
-    """FW_CHUNK frames over the CDC port, ``FW_CHUNK_WINDOW`` ahead of their
-    replies, like the host's pipe phase. Returns ``(ok, offset, reason, frames)``;
-    ``frames`` counts the frames the keyboard confirmed, so a stopped stream
-    reports what reached the slot, not what the host queued."""
+def _open_pipe_stream(log: Callable[[str], None]) -> tuple:
+    """Find and open the CDC port now, outside the window, and return
+    ``(stream, close)``. ``stream(payload)`` sends FW_CHUNK frames,
+    ``FW_CHUNK_WINDOW`` ahead of their replies, like the host's pipe phase, and
+    returns ``(ok, offset, reason, frames)``; ``frames`` counts the frames the
+    keyboard confirmed, so a stopped stream reports what reached the slot, not
+    what the host queued. Raises OSError when the port is gone or cannot be
+    opened."""
     port = bulk_pipe.find_port()
     if port is None:
-        return False, 0, "the CDC port vanished before the transfer", 0
-    try:
-        fd = bulk_pipe.open_raw(port)
+        raise OSError("the CDC port vanished before the transfer")
+    fd = bulk_pipe.open_raw(port)
+    pipe = bulk_pipe.Pipe(fd)
+
+    def stream(payload):
         try:
-            ok, offset, why = bulk_pipe.stream_firmware(bulk_pipe.Pipe(fd), payload, log=log)
-        finally:
-            os.close(fd)
-    except OSError as exc:
-        return False, 0, f"pipe error: {exc}", 0
-    frames = -(-offset // bulk_pipe.FW_CHUNK_MAX)
-    return ok, offset, why, frames
+            ok, offset, why = bulk_pipe.stream_firmware(pipe, payload, log=log)
+        except OSError as exc:
+            return False, 0, f"pipe error: {exc}", 0
+        return ok, offset, why, -(-offset // bulk_pipe.FW_CHUNK_MAX)
+
+    return stream, (lambda: os.close(fd))
 
 
 def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[str], None],
@@ -641,10 +645,15 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
     """BEGIN a resource slot over HID, RESET, stream ``size`` bytes into it over
     ``transport`` (``"hid"`` or ``"pipe"``), READ the window, then COMMIT.
 
-    The erase (BEGIN) and the reload (COMMIT) stay outside the window: they cost
-    the same on both transports, and the question is the transfer. ``stream`` lets
-    a test replace the transport; it takes the payload and returns
-    ``(ok, offset, reason, units)``."""
+    The erase (BEGIN), the pipe's port setup and the reload (COMMIT) stay outside
+    the window: they cost the same on both transports, or are host-side, and the
+    question is the transfer. ``stream`` lets a test replace the transport; it
+    takes the payload and returns ``(ok, offset, reason, units)``.
+
+    From the BEGIN on, the keyboard is in fw_up mode until a COMMIT. Every exit,
+    including an exception from the profiler or the transport, ends with a COMMIT
+    (the abort is one), so a failed measurement never leaves the keyboard waiting
+    for chunks that will not come."""
     if transport not in RESOURCE_TRANSPORTS:
         raise ValueError(f"unknown resource transport: {transport!r}")
     payload = resource_pipe_payload(size)
@@ -659,38 +668,51 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
     if not ready:
         out["error"] = f"FONTPACK_BEGIN did not become ready: {reply!r}"
         log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
+        # A BEGIN that was accepted and then stopped answering may still have
+        # armed fw_up mode on the keyboard; the abort is harmless otherwise.
+        _fontpack_abort(raw)
         return out
 
-    if stream is None:
-        if transport == "hid":
-            def stream(data):
-                return _stream_slot_over_hid(raw, data)
-        else:
-            def stream(data):
-                return _stream_slot_over_pipe(data, log)
-
-    profiler.reset()
-    t0 = time.perf_counter()
+    close = None
+    committed = False
     try:
-        ok, offset, reason, units = stream(payload)
-    except BaseException:
-        # A transport error must not leave the keyboard in fw_up mode with a
-        # half-written slot: the abort (a COMMIT) clears it on both halves.
-        _fontpack_abort(raw)
-        raise
-    wall_s = time.perf_counter() - t0
-    # Both transports end with a reply from the master (the last chunk's ACK, the
-    # last frame's cursor), so the window closes right here. The settle check
-    # comes after the READ: it is a health check, not part of the transfer.
-    prof = profiler.read()
-    settled = _settle_after_burst(raw, log)
+        if stream is None:
+            if transport == "hid":
+                def stream(data):
+                    return _stream_slot_over_hid(raw, data)
+            else:
+                try:
+                    stream, close = _open_pipe_stream(log)
+                except OSError as exc:
+                    out["error"] = f"pipe error: {exc}"
+                    log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
+                    return out
 
-    if ok:
-        reply = raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
-        commit_ok = bool(reply and len(reply) >= 3 and reply[2] == ACK)
-    else:
-        _fontpack_abort(raw)
-        commit_ok = False
+        profiler.reset()
+        t0 = time.perf_counter()
+        ok, offset, reason, units = stream(payload)
+        wall_s = time.perf_counter() - t0
+        # Both transports end with a reply from the master (the last chunk's ACK,
+        # the last frame's cursor), so the window closes right here. The settle
+        # check comes after the READ: it is a health check, not part of the
+        # transfer.
+        prof = profiler.read()
+        settled = _settle_after_burst(raw, log)
+
+        if ok:
+            reply = raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
+            commit_ok = bool(reply and len(reply) >= 3 and reply[2] == ACK)
+        else:
+            _fontpack_abort(raw)
+            commit_ok = False
+        committed = True
+    finally:
+        if close is not None:
+            close()
+        if not committed:
+            # An exception on the way (a lost profiler reply, a transport error):
+            # the abort, a COMMIT, clears fw_up mode on both halves.
+            _fontpack_abort(raw)
 
     out.update(prof.to_dict())
     out.update(profiler.window_info())
