@@ -48,7 +48,14 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   one 56-byte chunk per pass, over the pipe `virtser_task()` handles every frame in
   flight (`FW_CHUNK_WINDOW`, 4) before the loop runs again. So `mean_iter_ms` and
   the iteration histogram of this window are the scan interval during a transfer,
-  which is what decides whether typing stays usable. `--resource-kb` sets the size,
+  which is what decides whether typing stays usable. The BEGIN before each transfer
+  has a window of its own (`erase`): the firmware erases the slot one unit per
+  main-loop pass with interrupts off (about 150 ms per 64 KB block, about 60 ms per
+  4 KB sector, from `fw_staging.c`), so its `worst_iter_ms` is the longest hole in
+  the matrix scan and `passes_ge_50ms` counts the erase steps. A field reflash of
+  the nine bundles over HID (2026-10-20) showed stalls that match these steps; the
+  console tail keeps the `FONTPACK_BEGIN` / `fw_staging_process_deferred` lines
+  with the unit counts. `--resource-kb` sets the size,
   `0` skips the workload. A pipe the rig cannot use (`fw_chunk_skip_reason`) is
   recorded as `{"skipped": reason}` so the report says why the row is missing.
 - **Run it**: `python -m station.perf_runner --left …_perf_hil_left.uf2 --right
