@@ -471,11 +471,21 @@ class TestResourceTransferWorkload(unittest.TestCase):
             def close(self):
                 self.closed = True
 
+            def drain(self, max_reports=64):
+                # Record the drain as a report on the device's log, so a test can
+                # assert it sits between the RESET and the first chunk.
+                tests.current_dev.send(bytes([POLY_CHANNEL, 0xDD]), 0)
+                return 0
+
             def xfer(self, payload, timeout_ms):
                 tests.current_dev.send(bytes(payload), timeout_ms)
+                if tests.stale_reply is not None:
+                    reply, tests.stale_reply = tests.stale_reply, None
+                    return reply
                 return bytes([POLY_CHANNEL, payload[1], ACK]).ljust(64, b"\x00")
         self.link_opens = True
         self.current_dev = None
+        self.stale_reply = None      # what the first xfer() reads instead of its own reply
         patcher = mock.patch.object(perf, "_FwLink", FakeLink)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -513,6 +523,10 @@ class TestResourceTransferWorkload(unittest.TestCase):
         # One persistent handle for the chunks, opened before the RESET and closed.
         self.assertEqual(len(self.links), 1)
         self.assertTrue(self.links[0].closed)
+        # The handle is drained between the RESET (whose reply hidraw queued on
+        # it too) and the first chunk.
+        self.assertLess(cmds.index(perf.CMD_PROFILE), cmds.index(0xDD))
+        self.assertLess(cmds.index(0xDD), cmds.index(0x51))
         self.assertEqual(out["transport"], "hid")
         self.assertEqual(out["bytes"], 56 * 3 + 10)
         self.assertEqual(out["reports"], 4)
@@ -586,6 +600,15 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertEqual(out["frames"], 2, "only the confirmed frames")
         self.assertIn("472 of 2000", out["error"])
         self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran once")
+
+    def test_a_stale_profiler_reply_is_not_a_chunk_ack(self):
+        dev = FakeProfilerDevice()
+        self._recording(dev)
+        self.stale_reply = bytes([POLY_CHANNEL, perf.CMD_PROFILE, ACK]).ljust(64, b"\x00")
+        out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                             "hid", size=56 * 2)
+        self.assertFalse(out["valid"])
+        self.assertIn("FONTPACK_CHUNK @ 0 not ACKed", out["error"])
 
     def test_unopenable_hid_interface_aborts_before_any_window(self):
         dev = FakeProfilerDevice()

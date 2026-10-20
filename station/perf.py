@@ -614,6 +614,11 @@ def _open_hid_stream(raw: RawHID) -> tuple:
         raise OSError(f"raw HID interface cannot be opened: {link.last_error or 'not found'}")
 
     def stream(payload):
+        # The profiler RESET went out through RawHID.send()'s own handle after
+        # this one was opened, and hidraw queued its reply here as well. Drop it,
+        # or the first chunk would read the RESET's ACK and every later chunk the
+        # reply before its own. The command byte check below is the second guard.
+        link.drain()
         reports = 0
         for off in range(0, len(payload), FONTPACK_CHUNK_SIZE):
             part = payload[off:off + FONTPACK_CHUNK_SIZE]
@@ -621,7 +626,8 @@ def _open_hid_stream(raw: RawHID) -> tuple:
             chunk = bytes([POLY_CHANNEL, CMD_FONTPACK_CHUNK]) + struct.pack("<I", off) + padded
             reply = link.xfer(chunk, 8000)
             reports += 1
-            if not (reply and len(reply) >= 3 and reply[2] == ACK):
+            if not (reply and len(reply) >= 3 and reply[1] == CMD_FONTPACK_CHUNK
+                    and reply[2] == ACK):
                 return False, off, f"FONTPACK_CHUNK @ {off} not ACKed: {reply!r}", reports
         return True, len(payload), "", reports
 
