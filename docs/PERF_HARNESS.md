@@ -50,8 +50,9 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   the iteration histogram of this window are the scan interval during a transfer,
   which is what decides whether typing stays usable. The BEGIN before each transfer
   has a window of its own (`erase`): the firmware erases the slot one unit per
-  main-loop pass with interrupts off (about 150 ms per 64 KB block, about 60 ms per
-  4 KB sector, from `fw_staging.c`), so its `worst_iter_ms` is the longest hole in
+  main-loop pass with interrupts off (measured 238 to 268 ms per 64 KB block and 71
+  to 96 ms per 4 KB sector, runs 1493 and 1495 on 2026-10-20; the datasheet typical
+  values of 150 ms and 45 ms are not what the loop sees), so its `worst_iter_ms` is the longest hole in
   the matrix scan and `passes_ge_50ms` counts the erase steps. A field reflash of
   the nine bundles over HID (2026-10-20) showed stalls that match these steps; the
   console tail keeps the `FONTPACK_BEGIN` / `fw_staging_process_deferred` lines
