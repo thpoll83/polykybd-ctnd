@@ -519,6 +519,46 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertEqual([r[1] for r in sent].count(0x52), 1)
         self.assertFalse(out["commit_ok"])
 
+    def test_stopped_stream_reports_confirmed_frames_only(self):
+        from unittest import mock
+        from station import bulk_pipe
+        with mock.patch.object(bulk_pipe, "find_port", return_value="/dev/ttyACM9"), \
+             mock.patch.object(bulk_pipe, "open_raw", return_value=7), \
+             mock.patch.object(bulk_pipe, "stream_firmware", return_value=(False, 472, "quiet", )), \
+             mock.patch("os.close"):
+            ok, offset, why, frames = perf._stream_slot_over_pipe(b"x" * 2000, _quiet)
+        self.assertFalse(ok)
+        self.assertEqual((offset, frames), (472, 2))
+        with mock.patch.object(bulk_pipe, "find_port", return_value="/dev/ttyACM9"), \
+             mock.patch.object(bulk_pipe, "open_raw", return_value=7), \
+             mock.patch.object(bulk_pipe, "stream_firmware", return_value=(True, 2000, "")), \
+             mock.patch("os.close"):
+            ok, offset, why, frames = perf._stream_slot_over_pipe(b"x" * 2000, _quiet)
+        self.assertTrue(ok)
+        self.assertEqual(frames, 9)
+
+    def test_raising_stream_aborts_the_transfer_and_propagates(self):
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+
+        def stream(payload):
+            raise OSError("port went away")
+        with self.assertRaises(OSError):
+            perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                           "pipe", size=600, stream=stream)
+        cmds = [r[1] for r in sent]
+        self.assertEqual(cmds.count(0x52), 1, "the abort COMMIT ran")
+        self.assertGreater(cmds.index(0x52), cmds.index(perf.CMD_PROFILE))
+
+    def test_window_closes_before_the_settle_check(self):
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet, "hid", size=56)
+        cmds = [r[1] for r in sent]
+        last_read = len(cmds) - 1 - cmds[::-1].index(perf.CMD_PROFILE)
+        self.assertGreater(cmds.index(0x06), last_read, "GET_ID settle after the READ")
+        self.assertGreater(cmds.index(0x52), cmds.index(0x06), "COMMIT after the settle")
+
     def test_commit_nack_is_invalid(self):
         dev = FakeProfilerDevice()
         self._recording(dev, nack_cmds=(0x52,))

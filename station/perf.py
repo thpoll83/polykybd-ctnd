@@ -617,7 +617,9 @@ def _stream_slot_over_hid(raw: RawHID, payload: bytes) -> tuple:
 
 def _stream_slot_over_pipe(payload: bytes, log: Callable[[str], None]) -> tuple:
     """FW_CHUNK frames over the CDC port, ``FW_CHUNK_WINDOW`` ahead of their
-    replies, like the host's pipe phase. Returns ``(ok, offset, reason, frames)``."""
+    replies, like the host's pipe phase. Returns ``(ok, offset, reason, frames)``;
+    ``frames`` counts the frames the keyboard confirmed, so a stopped stream
+    reports what reached the slot, not what the host queued."""
     port = bulk_pipe.find_port()
     if port is None:
         return False, 0, "the CDC port vanished before the transfer", 0
@@ -629,7 +631,7 @@ def _stream_slot_over_pipe(payload: bytes, log: Callable[[str], None]) -> tuple:
             os.close(fd)
     except OSError as exc:
         return False, 0, f"pipe error: {exc}", 0
-    frames = -(-len(payload) // bulk_pipe.FW_CHUNK_MAX)
+    frames = -(-offset // bulk_pipe.FW_CHUNK_MAX)
     return ok, offset, why, frames
 
 
@@ -669,10 +671,19 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
 
     profiler.reset()
     t0 = time.perf_counter()
-    ok, offset, reason, units = stream(payload)
-    settled = _settle_after_burst(raw, log)
+    try:
+        ok, offset, reason, units = stream(payload)
+    except BaseException:
+        # A transport error must not leave the keyboard in fw_up mode with a
+        # half-written slot: the abort (a COMMIT) clears it on both halves.
+        _fontpack_abort(raw)
+        raise
     wall_s = time.perf_counter() - t0
+    # Both transports end with a reply from the master (the last chunk's ACK, the
+    # last frame's cursor), so the window closes right here. The settle check
+    # comes after the READ: it is a health check, not part of the transfer.
     prof = profiler.read()
+    settled = _settle_after_burst(raw, log)
 
     if ok:
         reply = raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
