@@ -73,6 +73,7 @@ TRACKED_METRICS = [
     ("resource_transfer.pipe.worst_iter_ms", "Resource transfer (pipe) — worst loop pass", "ms", True),
     ("resource_transfer.pipe.mean_iter_ms",  "Resource transfer (pipe) — mean loop pass", "ms", True),
     ("resource_transfer.pipe.kb_per_s",      "Resource transfer (pipe) — rate",           "KB/s", False),
+    ("resource_transfer.hid.erase.worst_iter_ms", "Slot erase (BEGIN) — worst loop pass",  "ms", True),
     ("hid_latency.p50",                   "HID round-trip p50",                        "ms",   True),
     ("hid_latency.p95",                   "HID round-trip p95",                        "ms",   True),
     ("hid_latency.max",                   "HID round-trip max",                        "ms",   True),
@@ -88,7 +89,10 @@ DEFAULT_TOLERANCE_PCT = 15.0
 
 # Console lines worth keeping in the report for a human reading it later: the
 # profiler's own summary block and the split-link health counter.
-CONSOLE_KEEP_PREFIXES = ("LoopProf:", "  norm", "  ovl", "  ovltot", "Split link:")
+CONSOLE_KEEP_PREFIXES = ("LoopProf:", "  norm", "  ovl", "  ovltot", "Split link:",
+                         # The slot erase's own account: how many units the BEGIN
+                         # erased, which the erase window's pass count is read against.
+                         "FONTPACK_BEGIN:", "FONTPACK_COMMIT:", "fw_staging_process_deferred:")
 CONSOLE_TAIL_MAX = 40
 
 
@@ -111,19 +115,27 @@ def dig(data: dict, path: str):
 
 
 def metric_is_usable(data: dict, path: str) -> bool:
-    """False when the section holding ``path`` marks itself invalid.
+    """False when any section on the way to ``path`` marks itself invalid.
 
     An app-switch phase whose replay stopped on a NACK, or whose master never
     answered again, carries ``"valid": False``. Its numbers describe a clipped
-    window, so they must neither be compared nor stored as a baseline.
+    window, so they must neither be compared nor stored as a baseline. The check
+    walks every ancestor, so a nested section (a transport's ``erase`` window)
+    is out whenever the transport row is.
 
     >>> metric_is_usable({"a": {"b": {"valid": False, "x": 1}}}, "a.b.x")
     False
     >>> metric_is_usable({"a": {"b": {"x": 1}}}, "a.b.x")
     True
+    >>> metric_is_usable({"a": {"valid": False, "b": {"x": 1}}}, "a.b.x")
+    False
     """
-    parent = dig(data, path.rsplit(".", 1)[0]) if "." in path else data
-    return not (isinstance(parent, dict) and parent.get("valid") is False)
+    parts = path.split(".")
+    for depth in range(len(parts) - 1):
+        section = dig(data, ".".join(parts[:depth + 1]))
+        if isinstance(section, dict) and section.get("valid") is False:
+            return False
+    return True
 
 
 def baseline_safe(report: dict) -> dict:
@@ -180,7 +192,7 @@ def same_workload(report: dict, baseline: dict, path: str) -> bool:
     """
     if not path.startswith("resource_transfer."):
         return True
-    section = path.rsplit(".", 1)[0]
+    section = ".".join(path.split(".")[:2])     # resource_transfer.<transport>
     return dig(report, section + ".bytes") == dig(baseline, section + ".bytes")
 
 
@@ -421,6 +433,20 @@ def format_markdown(report: dict, comparison: list = None,
         if invalid:
             lines += [f"> ⚠️ Not a valid measurement: {'; '.join(invalid)}. These rows are "
                       "excluded from the baseline comparison and from `--update-baseline`.", ""]
+        erases = [(t, r["erase"]) for t, r in transfers.items()
+                  if isinstance(r, dict) and isinstance(r.get("erase"), dict)]
+        if erases:
+            lines += ["The slot erase before each transfer (FONTPACK_BEGIN, polled until both "
+                      "halves are done). The firmware erases one unit per main-loop pass with "
+                      "interrupts off, so **worst pass** is the longest hole in the matrix scan, "
+                      "and **passes ≥ 50 ms** counts the erase steps.", "",
+                      "| before | wall | loop passes | worst pass | passes ≥ 10 ms | passes ≥ 50 ms |",
+                      "|---|---:|---:|---:|---:|---:|"]
+            for t, e in erases:
+                lines.append(f"| {t} transfer | {e.get('host_wall_ms', '?')} ms | {e.get('iters', '?')} "
+                             f"| {e.get('worst_iter_ms', '?')} ms | {e.get('long_iters_ge_10ms', '?')} "
+                             f"| {e.get('passes_ge_50ms', '?')} |")
+            lines.append("")
 
     tail = report.get("console_tail") or []
     if tail:

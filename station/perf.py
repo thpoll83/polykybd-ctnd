@@ -658,6 +658,30 @@ def _open_pipe_stream(log: Callable[[str], None]) -> tuple:
     return stream, (lambda: os.close(fd))
 
 
+def erase_summary(prof: LoopProfile, wall_s: float, window_info: dict) -> dict:
+    """The erase window's numbers: how many loop passes the BEGIN took and how long
+    the longest was. ``passes_ge_50ms`` counts the passes in the top bucket, which
+    is where a block or sector erase with interrupts off lands.
+
+    >>> p = LoopProfile(iters=30, max_us=152_000, bkt_norm=[0, 20, 2, 0, 0, 0, 8])
+    >>> e = erase_summary(p, 1.25, {"hid_retries": 0})
+    >>> e["iters"], e["worst_iter_ms"], e["long_iters_ge_10ms"], e["passes_ge_50ms"]
+    (30, 152.0, 8, 8)
+    >>> e["host_wall_ms"]
+    1250.0
+    """
+    out = prof.to_dict()
+    out.update(window_info)
+    out["host_wall_ms"] = round(wall_s * 1000.0, 1)
+    out["passes_ge_50ms"] = prof.bkt_norm[-1] + prof.bkt_ovl[-1]
+    # Its own flag: the erase is a whole measurement once BEGIN became ready,
+    # whatever the transfer after it does. A v1 window that lost a profiler reply
+    # is not (idle_rate). The transport row's flag still covers it for the
+    # comparison and the baseline (perf_runner.metric_is_usable, baseline_safe).
+    out["valid"] = not (prof.window_us is None and window_info.get("hid_retries"))
+    return out
+
+
 def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[str], None],
                               transport: str, size: int = RESOURCE_TRANSFER_BYTES,
                               stream: Callable | None = None) -> dict:
@@ -668,6 +692,13 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
     the window: they cost the same on both transports, or are host-side, and the
     question is the transfer. ``stream`` lets a test replace the transport; it
     takes the payload and returns ``(ok, offset, reason, units)``.
+
+    The BEGIN gets a window of its own, reported under ``erase``: the firmware
+    erases the slot one unit per housekeeping pass with interrupts off (about
+    150 ms per 64 KB block, about 60 ms per 4 KB sector by the firmware's own
+    notes), and each such pass is a hole in the matrix scan that a typist feels.
+    A field reflash of the nine bundles over HID (2026-10-20) showed stalls that
+    match these steps, so the rig reports the measured hole length as well.
 
     From the BEGIN on, the keyboard is in fw_up mode until a COMMIT. Every exit,
     including an exception from the profiler or the transport, ends with a COMMIT
@@ -683,7 +714,12 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
     log(f"[perf] resource transfer ({transport}): {len(payload)} bytes in "
         f"{unit_bytes}-byte {unit_name}")
 
+    # The erase window: RESET, then BEGIN polled until both halves report the
+    # erase done. The polling itself is a few BEGIN requests 0.3 s apart.
+    profiler.reset()
+    t_erase = time.perf_counter()
     ready, reply = _doom_slot_begin(raw, log, payload, DOOMWAD_BUNDLE_ID)
+    erase_wall_s = time.perf_counter() - t_erase
     if not ready:
         out["error"] = f"FONTPACK_BEGIN did not become ready: {reply!r}"
         log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
@@ -695,6 +731,11 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
     close = None
     committed = False
     try:
+        out["erase"] = erase_summary(profiler.read(), erase_wall_s, profiler.window_info())
+        log(f"[perf]   erase: {out['erase']['host_wall_ms']} ms, "
+            f"{out['erase']['iters']} loop passes, worst {out['erase']['worst_iter_ms']} ms, "
+            f"{out['erase']['passes_ge_50ms']} pass(es) >= 50 ms")
+
         if stream is None:
             try:
                 stream, close = (_open_hid_stream(raw) if transport == "hid"

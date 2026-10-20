@@ -514,18 +514,26 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertEqual(len(chunks), 4)
         self.assertEqual([int.from_bytes(r[2:6], "little") for r in chunks], [0, 56, 112, 168])
         self.assertTrue(all(len(r) == 2 + 4 + 56 for r in chunks))
-        # BEGIN before the RESET, COMMIT after the READ: the erase and the reload
-        # stay outside the window.
+        # Two windows: RESET, BEGIN, READ (the erase), then RESET, chunks, READ
+        # (the transfer); COMMIT after the last READ. The reload stays outside.
         cmds = [r[1] for r in sent]
-        self.assertLess(cmds.index(0x50), cmds.index(perf.CMD_PROFILE))
+        resets = [i for i, c in enumerate(sent) if c[1] == perf.CMD_PROFILE
+                  and c[2] == perf.PROF_SUB_RESET]
+        self.assertEqual(len(resets), 2)
+        self.assertLess(resets[0], cmds.index(0x50))
+        self.assertLess(cmds.index(0x50), resets[1])
+        self.assertLess(resets[1], cmds.index(0x51))
         self.assertGreater(cmds.index(0x52), len(cmds) - 1 - cmds[::-1].index(perf.CMD_PROFILE))
-        self.assertEqual(dev.reset_count, 1)
+        self.assertEqual(dev.reset_count, 2)
+        self.assertIn("erase", out)
+        self.assertIn("passes_ge_50ms", out["erase"])
+        self.assertIn("worst_iter_ms", out["erase"])
         # One persistent handle for the chunks, opened before the RESET and closed.
         self.assertEqual(len(self.links), 1)
         self.assertTrue(self.links[0].closed)
-        # The handle is drained between the RESET (whose reply hidraw queued on
-        # it too) and the first chunk.
-        self.assertLess(cmds.index(perf.CMD_PROFILE), cmds.index(0xDD))
+        # The handle is drained between the transfer RESET (whose reply hidraw
+        # queued on it too) and the first chunk.
+        self.assertLess(resets[1], cmds.index(0xDD))
         self.assertLess(cmds.index(0xDD), cmds.index(0x51))
         self.assertEqual(out["transport"], "hid")
         self.assertEqual(out["bytes"], 56 * 3 + 10)
@@ -592,9 +600,12 @@ class TestResourceTransferWorkload(unittest.TestCase):
             out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
                                                  "pipe", size=2000)
         kinds = [e[0] if e[0] != "hid" else (e[1], e[2]) for e in events]
-        self.assertLess(kinds.index("open"), kinds.index((perf.CMD_PROFILE, perf.PROF_SUB_RESET)),
-                        "the port is opened before the RESET")
-        self.assertLess(kinds.index((perf.CMD_PROFILE, perf.PROF_SUB_RESET)), kinds.index("stream"))
+        resets = [i for i, k in enumerate(kinds) if k == (perf.CMD_PROFILE, perf.PROF_SUB_RESET)]
+        self.assertEqual(len(resets), 2, "the erase window, then the transfer window")
+        # The port is opened after the BEGIN and before the transfer's RESET.
+        self.assertLess(kinds.index((0x50, None)), kinds.index("open"))
+        self.assertLess(kinds.index("open"), resets[1], "the port is opened before the RESET")
+        self.assertLess(resets[1], kinds.index("stream"))
         closed.assert_called_once_with(7)
         self.assertFalse(out["valid"])
         self.assertEqual(out["frames"], 2, "only the confirmed frames")
@@ -618,7 +629,7 @@ class TestResourceTransferWorkload(unittest.TestCase):
                                              "hid", size=56)
         self.assertFalse(out["valid"])
         self.assertIn("hid cannot be opened", out["error"])
-        self.assertEqual(dev.reset_count, 0)
+        self.assertEqual(dev.reset_count, 1, "the erase window only")
         self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
 
     def test_unopenable_port_aborts_before_any_window(self):
@@ -632,7 +643,7 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertFalse(out["valid"])
         self.assertIn("pipe cannot be opened", out["error"])
         self.assertIn("vanished", out["error"])
-        self.assertEqual(dev.reset_count, 0)
+        self.assertEqual(dev.reset_count, 1, "the erase window only")
         self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
 
     def test_profiler_failure_after_begin_still_aborts(self):
@@ -677,14 +688,15 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertFalse(out["valid"])
         self.assertIn("COMMIT", out["error"])
 
-    def test_begin_nack_opens_no_window(self):
+    def test_begin_nack_opens_no_transfer_window(self):
         dev = FakeProfilerDevice()
         sent = self._recording(dev, nack_cmds=(0x50,))
         out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
                                              "hid", size=56)
         self.assertFalse(out["valid"])
         self.assertIn("BEGIN", out["error"])
-        self.assertEqual(dev.reset_count, 0)
+        self.assertEqual(dev.reset_count, 1, "only the erase window was opened")
+        self.assertNotIn("erase", out)
         self.assertNotIn("worst_iter_ms", out)
         self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
 
@@ -712,13 +724,54 @@ class TestResourceTransferWorkload(unittest.TestCase):
         rep = {"resource_transfer": {
             "hid": {"bytes": 65536, "host_wall_ms": 5900.0, "kb_per_s": 11.1, "iters": 1170,
                     "mean_iter_ms": 5.04, "worst_iter_ms": 7.3, "long_iters_ge_10ms": 0,
-                    "valid": True, "hist_norm": {"<1ms": 1, "1-2ms": 0}},
+                    "valid": True, "hist_norm": {"<1ms": 1, "1-2ms": 0},
+                    "erase": {"host_wall_ms": 1250.0, "iters": 30, "worst_iter_ms": 152.0,
+                              "long_iters_ge_10ms": 8, "passes_ge_50ms": 8}},
             "pipe": {"skipped": "pipe protocol 1: FW_CHUNK needs 2"},
         }}
         md = format_markdown(rep)
         self.assertIn("| hid | 65536 | 5900.0 ms | 11.1 KB/s | 1170 | 5.04 ms | 7.3 ms | 0 |", md)
         self.assertIn("| pipe | skipped: pipe protocol 1: FW_CHUNK needs 2 |", md)
         self.assertIn("Resource transfer (hid) — main-loop iteration histogram", md)
+        self.assertIn("| hid transfer | 1250.0 ms | 30 | 152.0 ms | 8 | 8 |", md)
+
+    def test_erase_window_counts_the_top_bucket(self):
+        prof = perf.LoopProfile(iters=30, max_us=152_000,
+                                bkt_norm=[0, 20, 2, 0, 0, 0, 7], bkt_ovl=[0, 0, 0, 0, 0, 0, 1])
+        e = perf.erase_summary(prof, 1.25, {"hid_retries": 0})
+        self.assertEqual((e["iters"], e["worst_iter_ms"], e["passes_ge_50ms"],
+                          e["long_iters_ge_10ms"], e["host_wall_ms"]), (30, 152.0, 8, 8, 1250.0))
+        self.assertTrue(e["valid"])
+        v1 = perf.LoopProfile(iters=30, version=1)
+        self.assertFalse(perf.erase_summary(v1, 1.0, {"hid_retries": 2})["valid"])
+        self.assertTrue(perf.erase_summary(v1, 1.0, {"hid_retries": 0})["valid"])
+
+    def test_erase_of_an_invalid_transfer_is_not_compared(self):
+        cur = {"resource_transfer": {"hid": {"valid": False, "bytes": 65536,
+                                             "erase": {"valid": True, "worst_iter_ms": 999.0}}}}
+        base = {"resource_transfer": {"hid": {"valid": True, "bytes": 65536,
+                                              "erase": {"valid": True, "worst_iter_ms": 150.0}}}}
+        metrics = {c["metric"] for c in compare_to_baseline(cur, base)}
+        self.assertNotIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
+        metrics = {c["metric"] for c in compare_to_baseline(base, cur)}
+        self.assertNotIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
+        ok = {"resource_transfer": {"hid": {"valid": True, "bytes": 65536,
+                                            "erase": {"valid": True, "worst_iter_ms": 160.0}}}}
+        metrics = {c["metric"] for c in compare_to_baseline(ok, base)}
+        self.assertIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
+        # An erase window that is itself invalid (a v1 window with lost replies)
+        # is out even on a valid transfer.
+        ok["resource_transfer"]["hid"]["erase"]["valid"] = False
+        metrics = {c["metric"] for c in compare_to_baseline(ok, base)}
+        self.assertNotIn("resource_transfer.hid.erase.worst_iter_ms", metrics)
+
+    def test_erase_metric_compares_on_the_transports_bytes(self):
+        from station.perf_runner import same_workload
+        a = {"resource_transfer": {"hid": {"bytes": 1, "erase": {"worst_iter_ms": 1.0}}}}
+        b = {"resource_transfer": {"hid": {"bytes": 2, "erase": {"worst_iter_ms": 1.0}}}}
+        self.assertFalse(same_workload(a, b, "resource_transfer.hid.erase.worst_iter_ms"))
+        b["resource_transfer"]["hid"]["bytes"] = 1
+        self.assertTrue(same_workload(a, b, "resource_transfer.hid.erase.worst_iter_ms"))
 
     def test_markdown_marks_an_invalid_transfer(self):
         rep = {"resource_transfer": {
@@ -786,7 +839,7 @@ class TestBaselineComparison(unittest.TestCase):
             },
             "resource_transfer": {
                 "hid": {"worst_iter_ms": 6.0, "mean_iter_ms": 5.1, "kb_per_s": 11.0,
-                        "valid": True},
+                        "valid": True, "erase": {"worst_iter_ms": 152.0}},
                 "pipe": {"worst_iter_ms": 20.0, "mean_iter_ms": 18.0, "kb_per_s": 52.0,
                          "valid": True},
             },
