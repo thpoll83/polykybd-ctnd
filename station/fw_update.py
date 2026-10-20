@@ -105,6 +105,23 @@ class _FwLink:
                 pass
             self._dev = None
 
+    def drain(self, max_reports: int = 64) -> int:
+        """Discard the input reports queued on this handle; returns how many.
+
+        hidraw hands every input report to EVERY open handle of the device, so a
+        reply another handle asked for (a RawHID.send() made while this link was
+        open) is queued here too, and the next xfer() would read it instead of
+        its own reply. Call this after such a send and before the first xfer()."""
+        if self._dev is None:
+            return 0
+        drained = 0
+        try:
+            while drained < max_reports and self._dev.read(64, timeout=0):
+                drained += 1
+        except Exception:
+            self.close()
+        return drained
+
     def xfer(self, payload: bytes, timeout_ms: int) -> bytes | None:
         """Write one report and read one reply. Returns None on timeout/error
         and drops the handle so the caller can reopen()."""
