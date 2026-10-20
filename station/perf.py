@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import bulk_pipe
+from .fw_update import _FwLink
 from .hid import RawHID
 from .hil_tests import (
     POLY_CHANNEL, ACK, CMD_GET_ID, CMD_SEND_OVERLAY, CMD_START_COMPRESSED_OVERLAY,
@@ -600,19 +601,31 @@ RESOURCE_TRANSFER_BYTES = 64 * 1024
 RESOURCE_TRANSPORTS = ("hid", "pipe")
 
 
-def _stream_slot_over_hid(raw: RawHID, payload: bytes) -> tuple:
-    """FONTPACK_CHUNK every 56 bytes, each ACKed, like the host's HID loop.
-    Returns ``(ok, offset, reason, reports)``."""
-    reports = 0
-    for off in range(0, len(payload), FONTPACK_CHUNK_SIZE):
-        part = payload[off:off + FONTPACK_CHUNK_SIZE]
-        padded = part + b"\xff" * (FONTPACK_CHUNK_SIZE - len(part))
-        chunk = bytes([POLY_CHANNEL, CMD_FONTPACK_CHUNK]) + struct.pack("<I", off) + padded
-        reply = raw.send(chunk, timeout_ms=8000)
-        reports += 1
-        if not (reply and len(reply) >= 3 and reply[2] == ACK):
-            return False, off, f"FONTPACK_CHUNK @ {off} not ACKed: {reply!r}", reports
-    return True, len(payload), "", reports
+def _open_hid_stream(raw: RawHID) -> tuple:
+    """Open one raw HID handle now, outside the window, and return
+    ``(stream, close)``. ``stream(payload)`` sends FONTPACK_CHUNK every 56 bytes
+    and reads each ACK on that one handle, like the host's HID loop; it returns
+    ``(ok, offset, reason, reports)``. ``RawHID.send()`` opens and closes a
+    handle per call, which would pace the transfer by the rig instead of the
+    keyboard, and under rapid repetition trips the Pi's EPROTO (see
+    ``RawHID.send_repeated``). Raises OSError when the interface cannot be opened."""
+    link = _FwLink(raw._vid, raw._pid)
+    if not link.open(timeout_s=5.0):
+        raise OSError(f"raw HID interface cannot be opened: {link.last_error or 'not found'}")
+
+    def stream(payload):
+        reports = 0
+        for off in range(0, len(payload), FONTPACK_CHUNK_SIZE):
+            part = payload[off:off + FONTPACK_CHUNK_SIZE]
+            padded = part + b"\xff" * (FONTPACK_CHUNK_SIZE - len(part))
+            chunk = bytes([POLY_CHANNEL, CMD_FONTPACK_CHUNK]) + struct.pack("<I", off) + padded
+            reply = link.xfer(chunk, 8000)
+            reports += 1
+            if not (reply and len(reply) >= 3 and reply[2] == ACK):
+                return False, off, f"FONTPACK_CHUNK @ {off} not ACKed: {reply!r}", reports
+        return True, len(payload), "", reports
+
+    return stream, link.close
 
 
 def _open_pipe_stream(log: Callable[[str], None]) -> tuple:
@@ -645,7 +658,7 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
     """BEGIN a resource slot over HID, RESET, stream ``size`` bytes into it over
     ``transport`` (``"hid"`` or ``"pipe"``), READ the window, then COMMIT.
 
-    The erase (BEGIN), the pipe's port setup and the reload (COMMIT) stay outside
+    The erase (BEGIN), the transport's open and the reload (COMMIT) stay outside
     the window: they cost the same on both transports, or are host-side, and the
     question is the transfer. ``stream`` lets a test replace the transport; it
     takes the payload and returns ``(ok, offset, reason, units)``.
@@ -677,16 +690,13 @@ def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[st
     committed = False
     try:
         if stream is None:
-            if transport == "hid":
-                def stream(data):
-                    return _stream_slot_over_hid(raw, data)
-            else:
-                try:
-                    stream, close = _open_pipe_stream(log)
-                except OSError as exc:
-                    out["error"] = f"pipe error: {exc}"
-                    log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
-                    return out
+            try:
+                stream, close = (_open_hid_stream(raw) if transport == "hid"
+                                 else _open_pipe_stream(log))
+            except OSError as exc:
+                out["error"] = f"{transport} cannot be opened: {exc}"
+                log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
+                return out
 
         profiler.reset()
         t0 = time.perf_counter()

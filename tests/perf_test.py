@@ -450,9 +450,40 @@ class TestAppSwitchWorkload(unittest.TestCase):
 class TestResourceTransferWorkload(unittest.TestCase):
     """One font-pack slot over HID and over the pipe, inside a profiler window."""
 
-    @staticmethod
-    def _recording(dev, nack_cmds=()):
+    def setUp(self):
+        # The HID chunks go over one persistent handle (fw_update._FwLink), not
+        # RawHID.send(); route that handle's exchanges through the fake device so
+        # every report of a run is in one ordered record.
+        from unittest import mock
+        self.links = []
+        tests = self
+
+        class FakeLink:
+            def __init__(self, vid, pid):
+                self.vid, self.pid, self.dev, self.closed = vid, pid, None, False
+                self.last_error = None
+                tests.links.append(self)
+
+            def open(self, timeout_s=30.0):
+                self.dev = tests.current_dev
+                return tests.link_opens
+
+            def close(self):
+                self.closed = True
+
+            def xfer(self, payload, timeout_ms):
+                tests.current_dev.send(bytes(payload), timeout_ms)
+                return bytes([POLY_CHANNEL, payload[1], ACK]).ljust(64, b"\x00")
+        self.link_opens = True
+        self.current_dev = None
+        patcher = mock.patch.object(perf, "_FwLink", FakeLink)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _recording(self, dev, nack_cmds=()):
         """Record every HID send; NACK the commands in ``nack_cmds``."""
+        self.current_dev = dev
+        dev._vid, dev._pid = 0x2021, 0x2007      # what _open_hid_stream reads off a RawHID
         sent = []
         real_send = dev.send
 
@@ -479,6 +510,9 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertLess(cmds.index(0x50), cmds.index(perf.CMD_PROFILE))
         self.assertGreater(cmds.index(0x52), len(cmds) - 1 - cmds[::-1].index(perf.CMD_PROFILE))
         self.assertEqual(dev.reset_count, 1)
+        # One persistent handle for the chunks, opened before the RESET and closed.
+        self.assertEqual(len(self.links), 1)
+        self.assertTrue(self.links[0].closed)
         self.assertEqual(out["transport"], "hid")
         self.assertEqual(out["bytes"], 56 * 3 + 10)
         self.assertEqual(out["reports"], 4)
@@ -553,6 +587,17 @@ class TestResourceTransferWorkload(unittest.TestCase):
         self.assertIn("472 of 2000", out["error"])
         self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran once")
 
+    def test_unopenable_hid_interface_aborts_before_any_window(self):
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        self.link_opens = False
+        out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                             "hid", size=56)
+        self.assertFalse(out["valid"])
+        self.assertIn("hid cannot be opened", out["error"])
+        self.assertEqual(dev.reset_count, 0)
+        self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
+
     def test_unopenable_port_aborts_before_any_window(self):
         from unittest import mock
         from station import bulk_pipe
@@ -562,6 +607,7 @@ class TestResourceTransferWorkload(unittest.TestCase):
             out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
                                                  "pipe", size=600)
         self.assertFalse(out["valid"])
+        self.assertIn("pipe cannot be opened", out["error"])
         self.assertIn("vanished", out["error"])
         self.assertEqual(dev.reset_count, 0)
         self.assertEqual([r[1] for r in sent].count(0x52), 1, "the abort COMMIT ran")
