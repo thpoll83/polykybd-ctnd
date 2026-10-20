@@ -33,10 +33,12 @@ import os
 import sys
 import time
 
+from . import bulk_pipe
 from .hid import HIDConsole
 from .perf import (
-    Profiler, ProfilerUnavailable, load_app_switch_fixtures, measure_app_switch,
-    measure_hid_latency, measure_idle_overhead, measure_overlay_burst,
+    RESOURCE_TRANSFER_BYTES, Profiler, ProfilerUnavailable, load_app_switch_fixtures,
+    measure_app_switch, measure_hid_latency, measure_idle_overhead, measure_overlay_burst,
+    measure_resource_transfer,
 )
 from .test_runner import (
     POLY_CHANNEL, CMD_GET_ID, TestRunner, _derive_label,
@@ -65,6 +67,12 @@ TRACKED_METRICS = [
     ("app_switch.word.warm.host_wall_ms", "App switch Word (warm) — host wall",     "ms",   True),
     ("app_switch.word.warm.ovl_wall_ms",  "App switch Word (warm) — overlay time",  "ms",   True),
     ("app_switch.jetbrains.cold.host_wall_ms", "App switch JetBrains (cold) — host wall", "ms", True),
+    ("resource_transfer.hid.worst_iter_ms",  "Resource transfer (HID) — worst loop pass", "ms", True),
+    ("resource_transfer.hid.mean_iter_ms",   "Resource transfer (HID) — mean loop pass",  "ms", True),
+    ("resource_transfer.hid.kb_per_s",       "Resource transfer (HID) — rate",            "KB/s", False),
+    ("resource_transfer.pipe.worst_iter_ms", "Resource transfer (pipe) — worst loop pass", "ms", True),
+    ("resource_transfer.pipe.mean_iter_ms",  "Resource transfer (pipe) — mean loop pass", "ms", True),
+    ("resource_transfer.pipe.kb_per_s",      "Resource transfer (pipe) — rate",           "KB/s", False),
     ("hid_latency.p50",                   "HID round-trip p50",                        "ms",   True),
     ("hid_latency.p95",                   "HID round-trip p95",                        "ms",   True),
     ("hid_latency.max",                   "HID round-trip max",                        "ms",   True),
@@ -131,6 +139,9 @@ def baseline_safe(report: dict) -> dict:
     {'valid': False}
     >>> "idle" in baseline_safe({"idle": {"valid": False, "iters_per_s": 3013.0}})
     False
+    >>> r = {"resource_transfer": {"hid": {"valid": True}, "pipe": {"valid": False}}}
+    >>> baseline_safe(r)["resource_transfer"]
+    {'hid': {'valid': True}}
     """
     out = {k: v for k, v in report.items()
            if not (isinstance(v, dict) and v.get("valid") is False)}
@@ -139,6 +150,11 @@ def baseline_safe(report: dict) -> dict:
         out["app_switch"] = {
             name: {ph: r for ph, r in phases.items() if r.get("valid") is not False}
             for name, phases in apps.items()
+        }
+    transfers = report.get("resource_transfer")
+    if transfers:
+        out["resource_transfer"] = {
+            t: r for t, r in transfers.items() if r.get("valid") is not False
         }
     return out
 
@@ -224,6 +240,8 @@ def format_markdown(report: dict, comparison: list = None,
              "overlay_compressed") if isinstance(report.get(k), dict)]
     for name, phases in (report.get("app_switch") or {}).items():
         lossy += [(f"{name} {ph}", r.get("hid_retries", 0)) for ph, r in phases.items()]
+    for t, r in (report.get("resource_transfer") or {}).items():
+        lossy.append((f"resource transfer {t}", r.get("hid_retries", 0)))
     lossy = [(k, n) for k, n in lossy if n]
     if lossy:
         where = ", ".join(f"{k} ({n})" for k, n in lossy)
@@ -271,10 +289,13 @@ def format_markdown(report: dict, comparison: list = None,
 
     # The bucket histograms answer "how many iterations were long enough to eat a
     # keystroke", which the scalar table cannot show.
-    for key, title in (("overlay_plain", "Overlay burst (plain)"),
-                       ("overlay_compressed", "Overlay burst (RLE/core1)"),
-                       ("idle", "Idle")):
-        section = report.get(key)
+    histograms = [("overlay_plain", "Overlay burst (plain)"),
+                  ("overlay_compressed", "Overlay burst (RLE/core1)"),
+                  ("idle", "Idle")]
+    histograms += [(("resource_transfer", t), f"Resource transfer ({t})")
+                   for t in (report.get("resource_transfer") or {})]
+    for key, title in histograms:
+        section = dig(report, ".".join(key)) if isinstance(key, tuple) else report.get(key)
         if not section:
             continue
         norm, ovl = section.get("hist_norm", {}), section.get("hist_ovl", {})
@@ -318,6 +339,37 @@ def format_markdown(report: dict, comparison: list = None,
                       "stopped on an unacknowledged request, or the master did not answer "
                       "again afterwards. These rows are excluded from the baseline "
                       "comparison and from `--update-baseline`.", ""]
+
+    transfers = report.get("resource_transfer") or {}
+    if transfers:
+        lines += ["### Resource transfer (one font-pack slot)", "",
+                  "The chunks the host sends when it flashes a bundle at connect, over raw HID "
+                  "(one 56-byte report per main-loop pass) and over the bulk pipe "
+                  f"({bulk_pipe.FW_CHUNK_MAX}-byte frames, {bulk_pipe.FW_CHUNK_WINDOW} in "
+                  "flight). The main loop scans the key matrix once per pass, so **mean pass** "
+                  "is the scan interval a user types against during the transfer.", "",
+                  "| transport | bytes | host wall | rate | loop passes | mean pass | "
+                  "worst pass | passes ≥ 10 ms |",
+                  "|---|---:|---:|---:|---:|---:|---:|---:|"]
+        invalid = []
+        for t, r in transfers.items():
+            if r.get("skipped"):
+                lines.append(f"| {t} | skipped: {r['skipped']} | | | | | | |")
+                continue
+            mark = ""
+            if r.get("valid") is False:
+                mark = " ⚠️"
+                invalid.append(f"{t} ({r.get('error', 'clipped window')})")
+            rate = f"{r['kb_per_s']} KB/s" if r.get("kb_per_s") is not None else "n/a"
+            mean = f"{r['mean_iter_ms']} ms" if r.get("mean_iter_ms") is not None else "n/a"
+            lines.append(
+                f"| {t}{mark} | {r.get('bytes', '?')} | {r.get('host_wall_ms', '?')} ms | {rate} "
+                f"| {r.get('iters', '?')} | {mean} | {r.get('worst_iter_ms', '?')} ms "
+                f"| {r.get('long_iters_ge_10ms', '?')} |")
+        lines.append("")
+        if invalid:
+            lines += [f"> ⚠️ Not a valid measurement: {'; '.join(invalid)}. These rows are "
+                      "excluded from the baseline comparison and from `--update-baseline`.", ""]
 
     tail = report.get("console_tail") or []
     if tail:
@@ -395,7 +447,8 @@ class PerfRunner:
 
     def run(self, left_uf2: str = None, right_uf2: str = None, *,
             label: str = "", keys: int = 8, latency_n: int = 100,
-            idle_s: float = 3.0, app_switch: bool = True) -> dict:
+            idle_s: float = 3.0, app_switch: bool = True,
+            resource_bytes: int = RESOURCE_TRANSFER_BYTES) -> dict:
         timing = {}
         console_started = False
         try:
@@ -468,6 +521,21 @@ class PerfRunner:
                            for phase in ("cold", "warm")}
                     for name, fx in fixtures.items()
                 }
+            # One font-pack slot over each transport, HID first. A skipped pipe
+            # (no CDC port, a firmware without FW_CHUNK) is recorded as such, so the
+            # report says why one row is missing. ``resource_bytes`` 0 turns the
+            # workload off.
+            if resource_bytes > 0:
+                transfers = {"hid": measure_resource_transfer(
+                    raw, profiler, self.log, "hid", size=resource_bytes)}
+                reason = bulk_pipe.fw_chunk_skip_reason()
+                if reason:
+                    self.log(f"[perf] resource transfer (pipe): skipped: {reason}")
+                    transfers["pipe"] = {"skipped": reason}
+                else:
+                    transfers["pipe"] = measure_resource_transfer(
+                        raw, profiler, self.log, "pipe", size=resource_bytes)
+                report["resource_transfer"] = transfers
             # Latency last: it is the only workload with no profiler window, and
             # running it after the bursts also samples the post-overlay recovery
             # the host actually experiences on a program switch.
@@ -541,6 +609,10 @@ def main(argv=None) -> int:
                         help="GET_ID sends in the latency burst (default: 100)")
     parser.add_argument("--idle-seconds", type=float, default=3.0,
                         help="Idle baseline window in seconds (default: 3)")
+    parser.add_argument("--resource-kb", type=int, default=RESOURCE_TRANSFER_BYTES // 1024,
+                        help="Bytes (in KB) flashed into a font-pack slot over HID and over "
+                             f"the bulk pipe (default: {RESOURCE_TRANSFER_BYTES // 1024}; "
+                             "0 skips the workload)")
     parser.add_argument("--json", dest="json_path", default=None,
                         help="Write the full report as JSON here")
     parser.add_argument("--markdown", dest="md_path", default=None,
@@ -568,7 +640,7 @@ def main(argv=None) -> int:
             None if args.no_flash else args.left,
             None if args.no_flash else args.right,
             label=label, keys=args.keys, latency_n=args.latency_n,
-            idle_s=args.idle_seconds)
+            idle_s=args.idle_seconds, resource_bytes=args.resource_kb * 1024)
     except Exception as exc:
         # A measurement failure is a real failure (wrong build flashed, device
         # dead) — unlike a regression, which is only reported.

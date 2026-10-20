@@ -29,6 +29,9 @@ What is measured
   per-keycap re-render, or the rest of the loop.
 * **HID round-trip latency**: host-side GET_ID percentiles, which is what a user
   perceives as "the keyboard went deaf for a moment".
+* **Resource transfer**: one font-pack slot flashed over HID and over the bulk
+  pipe. The main-loop iteration histogram during the transfer is the matrix scan
+  interval a user types against while the host flashes the bundles at connect.
 * **Boot-to-responsive**: how long after a cold flash the master starts serving
   HID stably (supplied by the runner, which owns the flash timing).
 
@@ -45,10 +48,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import bulk_pipe
 from .hid import RawHID
 from .hil_tests import (
     POLY_CHANNEL, ACK, CMD_GET_ID, CMD_SEND_OVERLAY, CMD_START_COMPRESSED_OVERLAY,
-    KC_A, NUM_SEGMENTS, PLAIN_SEG_BYTES, _BLANK_OVERLAY_RLE,
+    CMD_FONTPACK_CHUNK, CMD_FONTPACK_COMMIT, DOOMWAD_BUNDLE_ID, FONTPACK_CHUNK_SIZE,
+    KC_A, NUM_SEGMENTS, PLAIN_SEG_BYTES, _BLANK_OVERLAY_RLE, _doom_slot_begin,
+    _fontpack_abort, resource_pipe_payload,
 )
 
 # --- profiler control command (mirrors firmware hid_com.c case 32) -------------
@@ -574,6 +580,133 @@ def measure_hid_latency(raw: RawHID, log: Callable[[str], None], n: int = 100) -
             f"p95 {out['p95']} ms, max {out['max']} ms, {misses} miss(es)")
     else:
         log(f"[perf] HID latency: no replies out of {n} sends")
+    return out
+
+
+# --- resource transfer -----------------------------------------------------------
+#
+# The host flashes the font-pack bundles, the icon library, the game data and the
+# engine pack at connect, while the user may be typing. Over HID the firmware takes
+# one 56-byte chunk per main-loop pass, so the matrix is scanned between chunks.
+# Over the bulk pipe the FW_CHUNK handler runs inside virtser_task()'s drain loop,
+# which handles every frame the host has in flight (bulk_pipe.FW_CHUNK_WINDOW)
+# before the main loop runs again. Nothing measured that until this workload: the
+# loop iteration histogram during the transfer IS the scan interval, and the
+# iteration count over the keyboard's window gives the mean. The slot is the
+# game-data pseudo bundle, as in the HIL suite's `doom game-data slot over the bulk
+# pipe` test, so the transfer is the real FONTPACK_BEGIN / chunk / COMMIT path.
+
+RESOURCE_TRANSFER_BYTES = 64 * 1024
+RESOURCE_TRANSPORTS = ("hid", "pipe")
+
+
+def _stream_slot_over_hid(raw: RawHID, payload: bytes) -> tuple:
+    """FONTPACK_CHUNK every 56 bytes, each ACKed, like the host's HID loop.
+    Returns ``(ok, offset, reason, reports)``."""
+    reports = 0
+    for off in range(0, len(payload), FONTPACK_CHUNK_SIZE):
+        part = payload[off:off + FONTPACK_CHUNK_SIZE]
+        padded = part + b"\xff" * (FONTPACK_CHUNK_SIZE - len(part))
+        chunk = bytes([POLY_CHANNEL, CMD_FONTPACK_CHUNK]) + struct.pack("<I", off) + padded
+        reply = raw.send(chunk, timeout_ms=8000)
+        reports += 1
+        if not (reply and len(reply) >= 3 and reply[2] == ACK):
+            return False, off, f"FONTPACK_CHUNK @ {off} not ACKed: {reply!r}", reports
+    return True, len(payload), "", reports
+
+
+def _stream_slot_over_pipe(payload: bytes, log: Callable[[str], None]) -> tuple:
+    """FW_CHUNK frames over the CDC port, ``FW_CHUNK_WINDOW`` ahead of their
+    replies, like the host's pipe phase. Returns ``(ok, offset, reason, frames)``."""
+    port = bulk_pipe.find_port()
+    if port is None:
+        return False, 0, "the CDC port vanished before the transfer", 0
+    try:
+        fd = bulk_pipe.open_raw(port)
+        try:
+            ok, offset, why = bulk_pipe.stream_firmware(bulk_pipe.Pipe(fd), payload, log=log)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        return False, 0, f"pipe error: {exc}", 0
+    frames = -(-len(payload) // bulk_pipe.FW_CHUNK_MAX)
+    return ok, offset, why, frames
+
+
+def measure_resource_transfer(raw: RawHID, profiler: Profiler, log: Callable[[str], None],
+                              transport: str, size: int = RESOURCE_TRANSFER_BYTES,
+                              stream: Callable | None = None) -> dict:
+    """BEGIN a resource slot over HID, RESET, stream ``size`` bytes into it over
+    ``transport`` (``"hid"`` or ``"pipe"``), READ the window, then COMMIT.
+
+    The erase (BEGIN) and the reload (COMMIT) stay outside the window: they cost
+    the same on both transports, and the question is the transfer. ``stream`` lets
+    a test replace the transport; it takes the payload and returns
+    ``(ok, offset, reason, units)``."""
+    if transport not in RESOURCE_TRANSPORTS:
+        raise ValueError(f"unknown resource transport: {transport!r}")
+    payload = resource_pipe_payload(size)
+    unit_bytes = FONTPACK_CHUNK_SIZE if transport == "hid" else bulk_pipe.FW_CHUNK_MAX
+    unit_name = "reports" if transport == "hid" else "frames"
+    out = {"transport": transport, "bytes": len(payload), "unit_bytes": unit_bytes,
+           "valid": False}
+    log(f"[perf] resource transfer ({transport}): {len(payload)} bytes in "
+        f"{unit_bytes}-byte {unit_name}")
+
+    ready, reply = _doom_slot_begin(raw, log, payload, DOOMWAD_BUNDLE_ID)
+    if not ready:
+        out["error"] = f"FONTPACK_BEGIN did not become ready: {reply!r}"
+        log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
+        return out
+
+    if stream is None:
+        if transport == "hid":
+            def stream(data):
+                return _stream_slot_over_hid(raw, data)
+        else:
+            def stream(data):
+                return _stream_slot_over_pipe(data, log)
+
+    profiler.reset()
+    t0 = time.perf_counter()
+    ok, offset, reason, units = stream(payload)
+    settled = _settle_after_burst(raw, log)
+    wall_s = time.perf_counter() - t0
+    prof = profiler.read()
+
+    if ok:
+        reply = raw.send(bytes([POLY_CHANNEL, CMD_FONTPACK_COMMIT]), timeout_ms=8000)
+        commit_ok = bool(reply and len(reply) >= 3 and reply[2] == ACK)
+    else:
+        _fontpack_abort(raw)
+        commit_ok = False
+
+    out.update(prof.to_dict())
+    out.update(profiler.window_info())
+    rate = idle_rate(prof, wall_s, profiler.host_window_s, profiler.retries)
+    out.update(rate)
+    window_s = out.get("window_s") or 0.0
+    out.update({
+        unit_name: units,
+        "host_wall_ms": round(wall_s * 1000.0, 1),
+        "kb_per_s": round(len(payload) / 1024.0 / wall_s, 1) if wall_s > 0 and ok else None,
+        # Mean time between two main-loop passes, i.e. between two matrix scans.
+        "mean_iter_ms": round(window_s * 1000.0 / prof.iters, 2) if prof.iters else None,
+        "settled": settled,
+        "commit_ok": commit_ok,
+        # A v1 window that lost a profiler reply is not valid either (idle_rate).
+        "valid": ok and settled and commit_ok and rate.get("valid", True),
+    })
+    if not ok:
+        out["error"] = f"stopped at {offset} of {len(payload)} bytes: {reason}"
+        log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
+    elif not commit_ok:
+        out["error"] = "FONTPACK_COMMIT did not ACK after the transfer"
+        log(f"[perf]   WARNING: {out['error']} — not a valid measurement")
+    log(f"[perf]   {out['host_wall_ms']} ms host wall ({out['kb_per_s']} KB/s), "
+        f"{out['iters']} loop passes, mean {out['mean_iter_ms']} ms between passes, "
+        f"worst {out['worst_iter_ms']} ms, "
+        f"{out['long_iters_ge_10ms']} pass(es) >= 10 ms")
     return out
 
 

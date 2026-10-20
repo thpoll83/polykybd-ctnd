@@ -447,6 +447,135 @@ class TestAppSwitchWorkload(unittest.TestCase):
             self.assertFalse(warm_cmds & image_cmds, f"{name}: warm uploads nothing")
 
 
+class TestResourceTransferWorkload(unittest.TestCase):
+    """One font-pack slot over HID and over the pipe, inside a profiler window."""
+
+    @staticmethod
+    def _recording(dev, nack_cmds=()):
+        """Record every HID send; NACK the commands in ``nack_cmds``."""
+        sent = []
+        real_send = dev.send
+
+        def send(data, timeout_ms=3000, attempts=3):
+            sent.append(bytes(data))
+            if data[1] in nack_cmds:
+                return bytes([POLY_CHANNEL, data[1], NACK]).ljust(64, b"\x00")
+            return real_send(data, timeout_ms, attempts)
+        dev.send = send
+        return sent
+
+    def test_hid_transfer_is_one_acked_chunk_per_56_bytes(self):
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                             "hid", size=56 * 3 + 10)
+        chunks = [r for r in sent if r[1] == 0x51]
+        self.assertEqual(len(chunks), 4)
+        self.assertEqual([int.from_bytes(r[2:6], "little") for r in chunks], [0, 56, 112, 168])
+        self.assertTrue(all(len(r) == 2 + 4 + 56 for r in chunks))
+        # BEGIN before the RESET, COMMIT after the READ: the erase and the reload
+        # stay outside the window.
+        cmds = [r[1] for r in sent]
+        self.assertLess(cmds.index(0x50), cmds.index(perf.CMD_PROFILE))
+        self.assertGreater(cmds.index(0x52), len(cmds) - 1 - cmds[::-1].index(perf.CMD_PROFILE))
+        self.assertEqual(dev.reset_count, 1)
+        self.assertEqual(out["transport"], "hid")
+        self.assertEqual(out["bytes"], 56 * 3 + 10)
+        self.assertEqual(out["reports"], 4)
+        self.assertEqual(out["unit_bytes"], 56)
+        self.assertTrue(out["commit_ok"])
+        self.assertTrue(out["valid"])
+        self.assertIsNotNone(out["kb_per_s"])
+        self.assertIn("long_iters_ge_10ms", out)
+
+    def test_pipe_transfer_uses_the_stream_and_counts_frames(self):
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        streamed = []
+
+        def stream(payload):
+            streamed.append(payload)
+            return True, len(payload), "", 3
+        out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                             "pipe", size=600, stream=stream)
+        self.assertEqual(len(streamed), 1)
+        self.assertEqual(streamed[0][:4], b"IWHX")
+        self.assertEqual(len(streamed[0]), 600)
+        self.assertNotIn(0x51, [r[1] for r in sent], "nothing goes over HID chunks")
+        self.assertEqual(out["frames"], 3)
+        self.assertEqual(out["unit_bytes"], 236)
+        self.assertTrue(out["valid"])
+
+    def test_stopped_stream_aborts_and_is_invalid(self):
+        dev = FakeProfilerDevice()
+        sent = self._recording(dev)
+        out = perf.measure_resource_transfer(
+            dev, perf.Profiler(dev, _quiet), _quiet, "pipe", size=600,
+            stream=lambda payload: (False, 236, "frame 2 never answered", 2))
+        self.assertFalse(out["valid"])
+        self.assertIn("236 of 600", out["error"])
+        self.assertIsNone(out["kb_per_s"])
+        # The abort is a COMMIT, which clears fw_up mode on both halves.
+        self.assertEqual([r[1] for r in sent].count(0x52), 1)
+        self.assertFalse(out["commit_ok"])
+
+    def test_commit_nack_is_invalid(self):
+        dev = FakeProfilerDevice()
+        self._recording(dev, nack_cmds=(0x52,))
+        out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                             "hid", size=56)
+        self.assertFalse(out["valid"])
+        self.assertIn("COMMIT", out["error"])
+
+    def test_begin_nack_opens_no_window(self):
+        dev = FakeProfilerDevice()
+        self._recording(dev, nack_cmds=(0x50,))
+        out = perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet,
+                                             "hid", size=56)
+        self.assertFalse(out["valid"])
+        self.assertIn("BEGIN", out["error"])
+        self.assertEqual(dev.reset_count, 0)
+        self.assertNotIn("worst_iter_ms", out)
+
+    def test_unknown_transport_is_rejected(self):
+        dev = FakeProfilerDevice()
+        with self.assertRaises(ValueError):
+            perf.measure_resource_transfer(dev, perf.Profiler(dev, _quiet), _quiet, "uart")
+
+    def test_markdown_has_a_row_per_transport_and_names_a_skip(self):
+        rep = {"resource_transfer": {
+            "hid": {"bytes": 65536, "host_wall_ms": 5900.0, "kb_per_s": 11.1, "iters": 1170,
+                    "mean_iter_ms": 5.04, "worst_iter_ms": 7.3, "long_iters_ge_10ms": 0,
+                    "valid": True, "hist_norm": {"<1ms": 1, "1-2ms": 0}},
+            "pipe": {"skipped": "pipe protocol 1: FW_CHUNK needs 2"},
+        }}
+        md = format_markdown(rep)
+        self.assertIn("| hid | 65536 | 5900.0 ms | 11.1 KB/s | 1170 | 5.04 ms | 7.3 ms | 0 |", md)
+        self.assertIn("| pipe | skipped: pipe protocol 1: FW_CHUNK needs 2 |", md)
+        self.assertIn("Resource transfer (hid) — main-loop iteration histogram", md)
+
+    def test_markdown_marks_an_invalid_transfer(self):
+        rep = {"resource_transfer": {
+            "pipe": {"bytes": 65536, "host_wall_ms": 1.0, "kb_per_s": None, "iters": 3,
+                     "mean_iter_ms": None, "worst_iter_ms": 0.1, "long_iters_ge_10ms": 0,
+                     "valid": False, "error": "stopped at 236 of 65536 bytes: x"},
+        }}
+        md = format_markdown(rep)
+        self.assertIn("| pipe ⚠️ |", md)
+        self.assertIn("Not a valid measurement: pipe (stopped at 236 of 65536 bytes: x)", md)
+
+    def test_invalid_transfer_is_not_compared_or_baselined(self):
+        from station.perf_runner import baseline_safe
+        cur = {"resource_transfer": {"pipe": {"valid": False, "worst_iter_ms": 999.0},
+                                     "hid": {"valid": True, "worst_iter_ms": 6.0}}}
+        base = {"resource_transfer": {"pipe": {"valid": True, "worst_iter_ms": 20.0},
+                                      "hid": {"valid": True, "worst_iter_ms": 6.0}}}
+        metrics = {c["metric"] for c in compare_to_baseline(cur, base)}
+        self.assertNotIn("resource_transfer.pipe.worst_iter_ms", metrics)
+        self.assertIn("resource_transfer.hid.worst_iter_ms", metrics)
+        self.assertEqual(list(baseline_safe(cur)["resource_transfer"]), ["hid"])
+
+
 class TestLatencyStats(unittest.TestCase):
     def test_percentiles_are_observed_samples(self):
         out = perf.percentiles([10.0, 20.0, 30.0, 40.0, 50.0])
@@ -488,6 +617,12 @@ class TestBaselineComparison(unittest.TestCase):
                 "word": {"cold": {"host_wall_ms": 1500.0, "ovl_wall_ms": 400.0},
                          "warm": {"host_wall_ms": 60.0, "ovl_wall_ms": 30.0}},
                 "jetbrains": {"cold": {"host_wall_ms": 4500.0}},
+            },
+            "resource_transfer": {
+                "hid": {"worst_iter_ms": 6.0, "mean_iter_ms": 5.1, "kb_per_s": 11.0,
+                        "valid": True},
+                "pipe": {"worst_iter_ms": 20.0, "mean_iter_ms": 18.0, "kb_per_s": 52.0,
+                         "valid": True},
             },
         }
         for path, value in over.items():

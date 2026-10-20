@@ -39,6 +39,18 @@ poke the keyboard, paste the `LoopProf:` block from the console".
   pauses) the heaviest. Re-record when the host's encoder, mapping packing or
   pacing changes, and say so in the commit. The synthetic 8-key bursts stay:
   they are the long-running comparable series.
+- **Resource transfer** (`measure_resource_transfer`): one 64 KB font-pack slot
+  (the game-data pseudo bundle, as in the HIL suite's `doom game-data slot over the
+  bulk pipe` test) flashed over raw HID and then over the bulk pipe, each inside its
+  own profiler window. BEGIN (the erase) and COMMIT (the reload) stay outside the
+  window. The host flashes the bundles at connect, while the user may be typing,
+  and the main loop scans the key matrix once per pass: over HID the firmware takes
+  one 56-byte chunk per pass, over the pipe `virtser_task()` handles every frame in
+  flight (`FW_CHUNK_WINDOW`, 4) before the loop runs again. So `mean_iter_ms` and
+  the iteration histogram of this window are the scan interval during a transfer,
+  which is what decides whether typing stays usable. `--resource-kb` sets the size,
+  `0` skips the workload. A pipe the rig cannot use (`fw_chunk_skip_reason`) is
+  recorded as `{"skipped": reason}` so the report says why the row is missing.
 - **Run it**: `python -m station.perf_runner --left …_perf_hil_left.uf2 --right
   …_perf_hil_right.uf2 --json perf.json --markdown perf.md`. `--no-flash`
   measures whatever is already on the rig (handy when iterating on the harness).
