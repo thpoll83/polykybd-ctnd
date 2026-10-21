@@ -42,7 +42,9 @@ def set_handedness(master_is_left: bool, raw: "RawHID | None" = None,
         f"(slave = {'RIGHT' if master_is_left else 'LEFT'}); the keyboard reboots to apply")
     payload = bytes([POLY_CHANNEL, CMD_SET_HANDEDNESS, 0 if master_is_left else 1])
     try:
-        resp = raw.send(payload, timeout_ms=500)
+        # attempts=1: the command reboots both halves, and a retry after a lost
+        # reply would land on the rebooting board as a second reboot.
+        resp = raw.send(payload, timeout_ms=500, attempts=1)
     except Exception as exc:
         # The half drops USB as it soft-resets — expected, not a failure.
         log(f"[handedness] command sent; keyboard rebooting ({exc})")

@@ -411,7 +411,7 @@ and relative links were adjusted to suit a standalone file.
   after any reboot that node is gone, every later `read` raises, and the old loop
   just slept on the exception — silently, with nothing logged. `HIDConsole._loop` now reopens (after
   `_REOPEN_AFTER_ERRORS` consecutive failures, so a momentary USB hiccup does not
-  make it fight `RawHID`, which opens its own handle per call). Lines printed
+  reopen it during normal traffic). Lines printed
   while the device is away are lost and always will be — the firmware drops
   console output nobody is draining.
   - ⚠️ **`stop()`'s join is TIMED, so it can return with the reader still alive —
@@ -603,6 +603,21 @@ instead of going red.
 `send_and_read_all()` (one report, *all* replies — for multi-packet commands like
 GET_LANG_LIST), and `write_reports()` (a burst with no reply — for the overlay upload
 commands, which the firmware does not ACK; follow with a `send(GET_ID)` liveness check).
+
+`send()` keeps one hidraw handle open across calls (2026-10-21). With a new handle
+per call a GET_ID round trip took 72 to 88 ms; `send_repeated()`'s kept handle on the
+same rig and run answered in 3 ms. Every open hidraw handle receives every input
+report, so a report already waiting before a write (a late reply, or a reply to
+another handle's request) is drained and counted in `stale_replies`, never returned.
+A `P` reply whose command byte differs from the request's is skipped the same way
+when it arrives after the write (the firmware echoes the command byte in every
+reply).
+A handle from before a re-enumeration fails its write; `send()` reopens once and
+writes again. A read that fails after the write drops the handle and raises, and the
+request is not written again (a second cmd 43 would be a second reboot).
+`tests/hid_test.py` pins each of these. Whether the kept handle also lowers the lost-reply
+rate below is not measured yet: compare the "recovered N read timeout(s)" counts of
+the HIL runs before and after.
 
 ⚠️ **`send()` RETRIES by re-writing the request, and that is only safe because the
 commands are idempotent — `GET_ID` is the one exception.** It consumes the firmware's

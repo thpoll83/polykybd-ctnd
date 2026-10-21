@@ -1342,6 +1342,8 @@ class TestRunner:
     def cleanup(self) -> None:
         self._flash.cleanup()
         self._console.stop()
+        # RawHID.send() keeps its handle open between calls; release it with the run.
+        self._raw.close()
 
 
 def _derive_label(left_uf2: str) -> str:
