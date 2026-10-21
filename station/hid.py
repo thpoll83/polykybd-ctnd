@@ -103,7 +103,8 @@ class HIDConsole:
         The reopen is deliberately slow to trigger (``_REOPEN_AFTER_ERRORS``
         consecutive failures, then a poll): a read error is also what a
         momentary USB hiccup looks like, and re-enumerating on every one of
-        those would fight ``RawHID``, which opens its own handle per call.
+        those would reopen the console during normal traffic. (``RawHID`` keeps
+        its own handle and reopens it only when a write on it fails.)
 
         Lines printed while the device is away are lost, and there is no way
         around that — the firmware drops console output nobody is draining.
@@ -193,6 +194,11 @@ class HIDConsole:
             self._dev = None
 
 
+# hidraw keeps 64 reports per open handle, so a drain longer than that only means
+# reports are still arriving; stop there rather than loop.
+_DRAIN_MAX_REPORTS = 64
+
+
 class RawHID:
     """Sends and receives Raw HID reports (same protocol as PolyKybdHost)."""
 
@@ -209,6 +215,15 @@ class RawHID:
         # timeouts_recovered counts a request once however many writes it took, so
         # it cannot say how long a caller actually waited.
         self.lost_replies = 0
+        # Reports found waiting on the kept handle before a write and discarded:
+        # late replies to an earlier request, or replies to another handle's
+        # request (every open hidraw handle receives every input report).
+        self.stale_replies = 0
+        # How often send() had to open the interface (the first call, and again
+        # after the board went away or a leftover handle failed).
+        self.handle_opens = 0
+        self._dev = None
+        self._lock = threading.Lock()
 
     def send(self, data: bytes, timeout_ms: int = 3000, attempts: int = 3) -> bytes | None:
         """Write one report and read one reply (or None after all attempts time out).
@@ -223,8 +238,18 @@ class RawHID:
         so total tolerance is ~attempts × timeout_ms.
 
         Safe because every command sent via send() is idempotent (a query, or a set
-        to a fixed value), so re-issuing is harmless; a fresh handle is opened per
-        call so a stale late reply never bleeds into the next command.
+        to a fixed value), so re-issuing is harmless.
+
+        **One handle, kept open**, like PolyKybdHost's. A new handle per call cost
+        ~75 ms per request on the Pi (a GET_ID round trip took 72..88 ms, against
+        3 ms on the kept handle of ``send_repeated()``) and lost replies: 2 of 20
+        GET_IDs in one rig run, 0 of 20 in another (2026-10-21). A report already waiting on the handle
+        before the write is a late or foreign reply, so it is drained and counted
+        in ``stale_replies``, never returned. A handle left over from before the
+        board re-enumerated fails its write; send() then reopens once and writes
+        again, so the request is still sent exactly once. A read that fails AFTER
+        the write (the board reset mid-command) drops the handle and raises,
+        without writing the request again.
 
         ⚠️ **GET_ID is the one exception, and callers that care must pass
         ``attempts=1``.** It consumes the firmware's one-shot fresh-boot marker, so
@@ -237,15 +262,20 @@ class RawHID:
         A genuine
         hang still returns None (all attempts time out) — the runner's
         freeze-signature logic (consecutive misses) is what flags a real fault, so
-        masking a single blip here does not hide a true regression."""
-        path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
-        if path is None:
-            raise RuntimeError("QMK Raw HID interface not found")
-        dev = hid.Device(path=path)
-        try:
+        masking a single blip here does not hide a true regression.
+
+        Raises ``RuntimeError("QMK Raw HID interface not found")`` when the
+        interface is missing; ``_wait_for_reboot`` reads that as the board having
+        gone away."""
+        report = _frame(data)
+        with self._lock:
             for attempt in range(max(1, attempts)):
-                dev.write(_frame(data))
-                response = dev.read(64, timeout=timeout_ms)
+                dev = self._write(report)
+                try:
+                    response = dev.read(64, timeout=timeout_ms)
+                except Exception:
+                    self._drop()
+                    raise
                 if response:
                     if attempt:
                         self.timeouts_recovered += 1
@@ -253,8 +283,54 @@ class RawHID:
                 self.lost_replies += 1
             self.timeouts_failed += 1
             return None
-        finally:
-            dev.close()
+
+    def close(self) -> None:
+        """Close the kept handle; the next send() opens a new one."""
+        with self._lock:
+            self._drop()
+
+    def _open(self):
+        path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
+        if path is None:
+            raise RuntimeError("QMK Raw HID interface not found")
+        self._dev = hid.Device(path=path)
+        self.handle_opens += 1
+        return self._dev
+
+    def _drop(self) -> None:
+        if self._dev is not None:
+            try:
+                self._dev.close()
+            except Exception:
+                pass
+            self._dev = None
+
+    def _write(self, report: bytes):
+        """Write ``report`` on the kept handle, after draining what waits on it.
+
+        A failure here means the request never left: a handle from before a
+        re-enumeration fails at once. So reopen and write again, once; a failure
+        on the new handle propagates."""
+        if self._dev is not None:
+            try:
+                self._drain(self._dev)
+                self._dev.write(report)
+                return self._dev
+            except Exception:
+                self._drop()
+        dev = self._open()
+        try:
+            dev.write(report)
+        except Exception:
+            self._drop()
+            raise
+        return dev
+
+    def _drain(self, dev) -> None:
+        for _ in range(_DRAIN_MAX_REPORTS):
+            if not dev.read(64, timeout=0):
+                return
+            self.stale_replies += 1
 
     def send_and_read_all(
         self,
@@ -265,8 +341,8 @@ class RawHID:
     ) -> list[bytes]:
         """Write one command, then read *every* input report it produces.
 
-        ``send()`` opens a fresh handle and reads exactly once, so it only ever
-        sees the first 64-byte packet. Some firmware commands answer with more
+        ``send()`` reads exactly once per request, so it only ever sees the first
+        64-byte packet (and would drain the rest as stale before its next write). Some firmware commands answer with more
         than one — e.g. GET_LANG_LIST splits the language codes across many
         reports (15 codes per packet, so 143 languages = 10 reports). This opens
         the handle once, writes, then keeps reading (with a short per-read

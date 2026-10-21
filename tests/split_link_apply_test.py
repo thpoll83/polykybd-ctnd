@@ -230,8 +230,8 @@ class ConsoleReopenTest(unittest.TestCase):
 
     def test_a_single_read_error_does_not_reopen(self):
         # A read error is also what a momentary USB hiccup looks like, and
-        # RawHID opens its own handle per call — re-enumerating on every blip
-        # would fight it.
+        # re-enumerating on every one would reopen the console during normal
+        # traffic.
         class Blippy(FakeHidDevice):
             def read(self, size, timeout=0):
                 self._reads += 1
