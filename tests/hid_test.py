@@ -59,14 +59,19 @@ class FakeHandle:
         self.closed = False
         self.dead = False
         self.reset_on_next_write = False
+        self.fail_writes = False
+        self.late_after_write = None          # a report that arrives right after the next write
 
     def write(self, report):
-        if self.dead:
+        if self.dead or self.fail_writes:
             raise OSError("device disconnected")
         if self.reset_on_next_write:          # the request lands, then the board resets
             self.board.writes.append(report)
             self.dead = True
             return
+        if self.late_after_write is not None:
+            self.queue.append(self.late_after_write)
+            self.late_after_write = None
         self.board.reply_to(report)
 
     def read(self, size, timeout=0):
@@ -108,6 +113,25 @@ class RawHIDKeptHandleTest(unittest.TestCase):
         self.assertEqual(resp[:3], b"P\x16.")
         self.assertEqual(self.raw.handle_opens, 2)
         self.assertEqual([w[1:3] for w in self.board.writes].count(b"P\x16"), 1)
+
+    def test_a_failed_write_on_a_readable_handle_reopens_and_sends_once(self):
+        self.raw.send(b"P\x06")
+        self.raw._dev.fail_writes = True                       # drain works, the write fails
+        resp = self.raw.send(b"P\x16")
+        self.assertEqual(resp[:3], b"P\x16.")
+        self.assertEqual(self.raw.handle_opens, 2)
+        self.assertEqual([w[1:3] for w in self.board.writes].count(b"P\x16"), 1)
+
+    def test_a_late_reply_to_another_command_after_the_drain_is_skipped(self):
+        self.raw.send(b"P\x06")
+        self.raw._dev.late_after_write = b"P\x27." + bytes(61)  # arrives after the drain
+        resp = self.raw.send(b"P\x16")
+        self.assertEqual(resp[:3], b"P\x16.")
+        self.assertEqual(self.raw.stale_replies, 1)
+
+    def test_a_legacy_command_reply_is_not_checked(self):
+        resp = self.raw.send(bytes([0x06]))                    # VIA keymap reset: replies 0x06 ...
+        self.assertIsNotNone(resp)
 
     def test_a_missing_interface_raises_as_before(self):
         self.raw.send(b"P\x06")

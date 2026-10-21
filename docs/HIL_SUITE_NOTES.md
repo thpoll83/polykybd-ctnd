@@ -609,10 +609,13 @@ per call a GET_ID round trip took 72 to 88 ms; `send_repeated()`'s kept handle o
 same rig and run answered in 3 ms. Every open hidraw handle receives every input
 report, so a report already waiting before a write (a late reply, or a reply to
 another handle's request) is drained and counted in `stale_replies`, never returned.
+A `P` reply whose command byte differs from the request's is skipped the same way
+when it arrives after the write (the firmware echoes the command byte in every
+reply).
 A handle from before a re-enumeration fails its write; `send()` reopens once and
 writes again. A read that fails after the write drops the handle and raises, and the
 request is not written again (a second cmd 43 would be a second reboot).
-`tests/hid_test.py` pins all four. Whether the kept handle also lowers the lost-reply
+`tests/hid_test.py` pins each of these. Whether the kept handle also lowers the lost-reply
 rate below is not measured yet: compare the "recovered N read timeout(s)" counts of
 the HIL runs before and after.
 

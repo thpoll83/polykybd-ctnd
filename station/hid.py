@@ -199,6 +199,17 @@ class HIDConsole:
 _DRAIN_MAX_REPORTS = 64
 
 
+def _answers(report: bytes, reply: bytes) -> bool:
+    """Whether ``reply`` can be the answer to the framed ``report``. A 'P'
+    request is answered by a 'P' reply with the same command byte (hid_com.c
+    echoes it in every reply); anything else (legacy keymap commands) is not
+    checked."""
+    channel, cmd = report[1], report[2]
+    if channel != 0x50 or len(reply) < 2 or reply[0] != 0x50:
+        return True
+    return reply[1] == cmd
+
+
 class RawHID:
     """Sends and receives Raw HID reports (same protocol as PolyKybdHost)."""
 
@@ -245,7 +256,8 @@ class RawHID:
         3 ms on the kept handle of ``send_repeated()``) and lost replies: 2 of 20
         GET_IDs in one rig run, 0 of 20 in another (2026-10-21). A report already waiting on the handle
         before the write is a late or foreign reply, so it is drained and counted
-        in ``stale_replies``, never returned. A handle left over from before the
+        in ``stale_replies``, never returned; so is a 'P' reply to a different
+        command that arrives after the write. A handle left over from before the
         board re-enumerated fails its write; send() then reopens once and writes
         again, so the request is still sent exactly once. A read that fails AFTER
         the write (the board reset mid-command) drops the handle and raises,
@@ -272,7 +284,7 @@ class RawHID:
             for attempt in range(max(1, attempts)):
                 dev = self._write(report)
                 try:
-                    response = dev.read(64, timeout=timeout_ms)
+                    response = self._read_reply(dev, report, timeout_ms)
                 except Exception:
                     self._drop()
                     raise
@@ -283,6 +295,25 @@ class RawHID:
                 self.lost_replies += 1
             self.timeouts_failed += 1
             return None
+
+    def _read_reply(self, dev, report: bytes, timeout_ms: int) -> bytes | None:
+        """The reply to ``report``, or None when ``timeout_ms`` passes without one.
+
+        The firmware echoes the command byte in every 'P' reply, so a 'P' reply
+        to a different command is a late reply that arrived after the drain
+        (a timed-out request, or another handle's): counted and skipped."""
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            left_ms = int((deadline - time.monotonic()) * 1000)
+            if left_ms <= 0:
+                return None
+            chunk = dev.read(64, timeout=left_ms)
+            if not chunk:
+                return None
+            reply = bytes(chunk)
+            if _answers(report, reply):
+                return reply
+            self.stale_replies += 1
 
     def close(self) -> None:
         """Close the kept handle; the next send() opens a new one."""
