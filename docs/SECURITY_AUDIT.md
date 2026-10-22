@@ -61,7 +61,7 @@ signing the firmware image alone was not enough.**
 | HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk, host | ✅ fixed (qmk #251; host copy found and fixed 2026-10-09) |
 | HOST-4 | `Pillow` unpinned — CVE-2026-54058 reachable via overlay image open-by-filename | host | ✅ fixed (PR #201) |
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
-| HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | 🔲 fix written and reviewed in host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428), NOT merged — still present on host `main`, and reaches users only on the release after it merges |
+| HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | ✅ fixed — host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428) (`12589656`), released in [v1.17.40](https://github.com/thpoll83/PolyKybdHost/releases/tag/v1.17.40) |
 | SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged against host `057559da` (1.17.34), none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
 
 ---
@@ -520,7 +520,7 @@ The CodeQL check on a PR compares against the base, so this backlog is also why 
 can go red on alerts it did not introduce (host #403): the check says so itself when
 "the code changes were too large".
 
-### HOST-5 — the user's coordinates reach every log bundle (FIX OPEN, host #428)
+### HOST-5 — the user's coordinates reached every log bundle (FIXED, RELEASED 1.17.40)
 
 `sunlight_helper` resolves a coarse location by IP for the daylight-brightness
 periodic, then asks open-meteo for irradiance. It keeps exact coordinates out of
@@ -563,20 +563,34 @@ sites has no reachable leak today (the geolocation URL has no coordinates), so
 that test was vacuous and was removed rather than left to look like coverage; the
 call stays, with the reason in a comment.
 
-⚠️ **Not fixed yet, and this entry must not be read as saying it is** (CodeRabbit,
-ctnd #125). The scrub is written and reviewed in host
-[#428](https://github.com/thpoll83/PolyKybdHost/pull/428) — `ff2fb9bb` the scrub and
-its tests, `3aeda3e8` synthetic coordinates in the example, `a06cb617` the
-quoted-value and scientific-notation shapes — but that PR is **open**. On host
-`main`, including the `057559da` this entry was scanned against, the WARNING line
-still carries the coordinates. And a host change reaches users only on the release
-after it merges, so there are two steps left, not one. Change this status when
-#428 merges, and say which host version first carries it.
+Fixed by [#428](https://github.com/thpoll83/PolyKybdHost/pull/428), merged
+2026-10-22 as `12589656`: the scrub and its tests, synthetic coordinates in the
+example, and the quoted-value and scientific-notation shapes.
 
-Not changed, and deliberately left to the maintainer: whether `redact_text` should
-also mask coordinates. With nothing writing them any more it would only help for the logs
-already on disk, and it would add a second, non-title rule to a function whose
-contract is titles.
+**Released the same day in [v1.17.40](https://github.com/thpoll83/PolyKybdHost/releases/tag/v1.17.40)**
+(published 07:09 UTC, tag `20f9c945`), so the fix reaches users on update. Checked
+against the tag rather than assumed: its tree contains `scrub_coords`, declares
+`__patch__ = 40`, and has the fix merge as an ancestor.
+
+Logs written by an older host keep the coordinates, since nothing rewrites a log
+already on disk. They rotate out, and `redact_text` does not mask coordinates, so a
+bundle collected from a long-lived installation can still carry them. **The
+maintainer accepted that residual exposure on 2026-10-22**: the installed base is
+his own testers, and a bundle from one of them reaches him and nobody else. Do not
+re-raise it at that scale. It is worth re-reading if the host ever ships to users
+who are not testers, because then a bundle attached to a public issue is a bundle
+anyone can download.
+
+The version was written only after its bump commit existed on `main`, per the
+release rule in `polykybd-claude/CLAUDE.md`: parallel sessions take the next
+numbers, and docs#104 named a version that three later merges took.
+
+Not changed, and **decided rather than left open**: `redact_text` does not mask
+coordinates and will not be changed to. With 1.17.40 writing none, it would only
+help for logs already on disk, and it would add a second, non-title rule to a
+function whose contract is titles. The maintainer accepted that on 2026-10-22 for
+the current tester audience — recorded here so the next scan or session finds a
+decision instead of an open question.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
