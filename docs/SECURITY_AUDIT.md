@@ -515,7 +515,7 @@ logged them at **WARNING**, which is the default level:
 
 ```
 Online irradiance lookup failed (ProxyError: HTTPSConnectionPool(host=…): Max
-retries exceeded with url: /v1/forecast?latitude=52.5219&longitude=13.4132&…)
+retries exceeded with url: /v1/forecast?latitude=12.3456&longitude=65.4321&…)
 ```
 
 Measured, not reasoned: a real `requests.get` against an unreachable host produced
