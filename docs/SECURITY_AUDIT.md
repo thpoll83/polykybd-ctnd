@@ -61,6 +61,8 @@ signing the firmware image alone was not enough.**
 | HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk, host | ✅ fixed (qmk #251; host copy found and fixed 2026-10-09) |
 | HOST-4 | `Pillow` unpinned — CVE-2026-54058 reachable via overlay image open-by-filename | host | ✅ fixed (PR #201) |
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
+| HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | 🔲 fix written and reviewed in host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428), NOT merged — still present on host `main`, and reaches users only on the release after it merges |
+| SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged against host `057559da` (1.17.34), none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
 
 ---
 
@@ -461,6 +463,120 @@ has no argument list, because the wrapper validates its own arguments, so the
 wrapper is the boundary. `grant_missing()` probes the grant by running the wrapper as
 root with no arguments. The wrapper's first check (`$# -ge 2`) exits 2 on that before
 any write.
+
+### SCAN-2 — the CodeQL backlog on PolyKybdHost (206 alerts, 2026-10-21)
+
+`codeql.yml` analyses every PR, and its alerts had accumulated unread: 203 open in
+the Security tab. The whole set was reproduced locally with the CodeQL CLI 2.27.3 and
+the same suite GitHub runs (`python-security-and-quality`) over a clean `git archive`
+of `main` — 206 results, the same 21 rules, counts within three of the tab's
+(`py/import-and-import-from` 48 vs 45, from commits since the last scan). So the
+dispositions below are against the engine's own locations, not a reconstruction.
+
+⚠️ **The scanned tree was host `057559da` (version 1.17.34), and every line number
+below is against that commit, not against today's `main`.** `main` moved three
+patch versions while this entry was in review, so without the sha the line numbers
+decay into guesses (Greptile, ctnd #125). To re-derive the same set:
+
+```bash
+cd PolyKybdHost
+# `tar -C` needs the directory to exist, and a reused one would add leftover
+# files to the scan, so make a fresh pair.
+SRC=$(mktemp -d); DB=$(mktemp -d)/db
+git archive 057559da | tar -x -C "$SRC"      # 573 .py files
+codeql database create "$DB" --language=python --source-root="$SRC"
+codeql database analyze "$DB" \
+    codeql/python-queries:codeql-suites/python-security-and-quality.qls \
+    --format=sarif-latest --output=results.sarif
+```
+
+These were run as written, not composed from memory: the first version named a
+`/tmp/scan-src` that nothing created, so `tar` exited with "Cannot open: No such
+file or directory" and the block could not reproduce anything (Greptile,
+ctnd #125).
+
+**Not one of the 206 needed a code change.** The one real problem, HOST-5 below,
+is not in this list: CodeQL did not raise it, and it was found by reading the code
+around two of its false positives.
+
+The rows below sum to the 206 (97 itemised + 109 lumped). The lumped figure read 140
+in the first version of this table, which made the rows sum to 237 — caught in review
+on ctnd #125.
+
+| rule | n | where | disposition |
+|---|---|---|---|
+| `py/clear-text-logging-sensitive-data` | 5 | `sunlight_helper.py:41` ×2, `:101`, `:110`; `brightness_diag.py:115` | **all false, and all near a real one.** `:41` is `log.debug("Location lat %f long %f", …)`, DEBUG on purpose with the reason in a comment above it. `:101`/`:110` are tainted through the HTTP round trip — CodeQL applies the request URL's taint to the response, and what those lines log is open-meteo's `time` table, which holds timestamps. `brightness_diag.py:115` is a `print` in a module run by hand (`python -m polyhost.services.brightness_diag`); its output is not collected. |
+| `py/tarslip` | 1 | `updater.py:634` | False. That is the `tar.extractall(path=dest)` of the **legacy branch**, which runs only below Python 3.12 and only after the loop above it rejects link members and resolves every member against `dest`. CodeQL does not model the loop as a sanitizer. From 3.12 the function delegates to `extractall(filter="data")`. Both branches are pinned by `updater_test.py`, which asserts a refusal AND that nothing was written outside `dest` (host #403). |
+| `py/bind-socket-all-network-interfaces` | 1 | `remote_window.py:46` | Known and gated. This is the legacy plaintext relay of HOST-1, `enable_legacy_relay=False` by default and started only when `dev_legacy_plaintext_relay` opts in. The wildcard bind of `WindowReportServer` is deliberate and authenticated, and is not what CodeQL flagged. |
+| `py/catch-base-exception` | 3 | `hid_worker.py:285`, `:292`, `:308` | Deliberate. The HID worker thread must not die from a job, an `on_done` or a periodic; each handler calls `log.exception()`, so nothing is swallowed silently. |
+| `py/uninitialized-local-variable` | 1 | `main_app.py:264` | False. `is_plain_gui` is assigned unconditionally at `:242` at function-body indent; there is no `try`, loop or `del` between the two lines, and CodeQL reports no path of its own for this one. |
+| `py/empty-except` | 51 (38 in `polyhost/`) | `protocol.py`, `instance.py`, `mpc_listener.py`, `poly_kybd.py`, … | No change. Every one read is a NARROW typed except (`except OSError: pass`, `except FileNotFoundError: pass`) on a best-effort cleanup path, with a comment. The rule fires on the bare `pass`, not on the breadth of the catch. ⚠️ One is worth a note rather than a fix: `protocol.py:290` tightens the control socket to 0600 and passes on `OSError`, so a failed `chmod` is silent. The authkey is the actual gate, so a looser mode grants nothing on its own, but a WARNING there would be one line. |
+| `py/file-not-closed` | 33 | 31 in `tools/`+`scripts/`, 1 test, `crash_log.py:380` | No change. The `crash_log.py` one is REQUIRED to stay open: `faulthandler` owns that descriptor, and closing it is the rule this repo already states. The rest are hand-run developer scripts. |
+| `py/side-effect-in-assert` | 1 | `tests/device/overlay_cmdctrl_test.py:65` | Real pattern, test-only: `assert conv.open(png)` does the loading, so `python -O` would skip it. Nothing here runs tests with `-O`. One-line fix when that file is next touched. |
+| `py/implicit-string-concatenation-in-list` | 1 | `problem_report.py:158` | False. One sentence wrapped over three source lines inside a list of Markdown parts — not a missing comma. (Checked because a missing comma in a curated pattern list is exactly how `CONSOLE_PATTERNS` would lose an entry; this is not that list.) |
+| `py/missing-call-to-init`, `py/overwritten-inherited-attribute`, `py/unused-import`, `py/import-and-import-from`, `py/repeated-import`, `py/unused-global-variable`, `py/unused-local-variable`, `py/commented-out-code`, `py/imprecise-assert`, `py/mixed-returns`, `py/multiple-definition`, `py/overly-complex-delete` | 109 | mostly `tests/` and `tools/` | Known style backlog with a written stance already: `PolyKybdHost/docs/testing.md` → *No test CI* names five of these rules and the fix for each (host #301), and `.claude/rules/tests.md` repeats them. The two error/warning-severity ones are the documented pair — `_Helper(HidHelper)` skipping `super().__init__()` (`hid_reboot_wait_test.py:25`) and the `log` attribute in `observable.py:37` — whose settled shape is the `HidHelper._enumerate()`/`_open()` hook. No security content. One visible side effect: that stub's `_open` returns a bare `object()`, so `HidHelper.__del__` prints an `AttributeError` traceback into the suite output on every run. Noise, not a failure. |
+
+The CodeQL check on a PR compares against the base, so this backlog is also why a PR
+can go red on alerts it did not introduce (host #403): the check says so itself when
+"the code changes were too large".
+
+### HOST-5 — the user's coordinates reach every log bundle (FIX OPEN, host #428)
+
+`sunlight_helper` resolves a coarse location by IP for the daylight-brightness
+periodic, then asks open-meteo for irradiance. It keeps exact coordinates out of
+routine logs on purpose:
+
+```python
+self.log.info("Location resolved (timezone %s)", data.get("timezone", "?"))
+self.log.debug("Location lat %f long %f", self.latitude, self.longitude)
+```
+
+The irradiance URL, though, is built from those coordinates — and a `requests`
+exception includes the whole request URL in its `str()`. So the handler below it
+logged them at **WARNING**, which is the default level:
+
+```
+Online irradiance lookup failed (ProxyError: HTTPSConnectionPool(host=…): Max
+retries exceeded with url: /v1/forecast?latitude=12.3456&longitude=65.4321&…)
+```
+
+Measured, not reasoned: a real `requests.get` against an unreachable host produced
+exactly that string, with full 4-decimal precision — about 11 m.
+
+Why it leaves the machine: that logger is `PolyHost`, so the line is in `host_log.txt`
+/ `daemon_log.txt`, both in `log_bundle.LOG_SOURCES`, which is what "Collect logs…"
+and the Report a Problem dialog attach to a GitHub issue. The bundle's redaction
+masks **window titles** (`_TITLE_PATTERNS`) and two settings values
+(`browser_report_token`, `telemetry_install_id`). Coordinates match neither, with
+`redact=True` as much as without — and the dialog's own reassurance to the user is
+about window titles.
+
+Fixed in the host by scrubbing every logged string that can hold a coordinate
+(`scrub_coords`), at the irradiance handler, the geolocation handler and the
+geolocation response body. The diagnosis a support round needs — exception type,
+host, cause — survives the scrub.
+
+⚠️ **Two separators, not one.** The first pattern matched `latitude=52.52` and
+missed `'lat': 52.52`, which is how a logged response **dict** reads; the
+geolocation-body test caught it. A mutation sweep then showed one of the three call
+sites has no reachable leak today (the geolocation URL has no coordinates), so
+that test was vacuous and was removed rather than left to look like coverage; the
+call stays, with the reason in a comment.
+
+⚠️ **Not fixed yet, and this entry must not be read as saying it is** (CodeRabbit,
+ctnd #125). The scrub is written and reviewed in host
+[#428](https://github.com/thpoll83/PolyKybdHost/pull/428) — `ff2fb9bb` the scrub and
+its tests, `3aeda3e8` synthetic coordinates in the example, `a06cb617` the
+quoted-value and scientific-notation shapes — but that PR is **open**. On host
+`main`, including the `057559da` this entry was scanned against, the WARNING line
+still carries the coordinates. And a host change reaches users only on the release
+after it merges, so there are two steps left, not one. Change this status when
+#428 merges, and say which host version first carries it.
+
+Not changed, and deliberately left to the maintainer: whether `redact_text` should
+also mask coordinates. With nothing writing them any more it would only help for the logs
+already on disk, and it would add a second, non-title rule to a function whose
+contract is titles.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
