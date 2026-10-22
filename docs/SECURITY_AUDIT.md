@@ -61,8 +61,8 @@ signing the firmware image alone was not enough.**
 | HIL-10 | `bump-version.yml` interpolates a PR label into a `run:` body — shell injection | qmk, host | ✅ fixed (qmk #251; host copy found and fixed 2026-10-09) |
 | HOST-4 | `Pillow` unpinned — CVE-2026-54058 reachable via overlay image open-by-filename | host | ✅ fixed (PR #201) |
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
-| HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | ✅ fixed (scrubbed at the three log sites) |
-| SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged, none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
+| HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | ✅ fixed — host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428), scrubbed at the three log sites |
+| SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged against host `057559da` (1.17.34), none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
 
 ---
 
@@ -473,6 +473,19 @@ of `main` — 206 results, the same 21 rules, counts within three of the tab's
 (`py/import-and-import-from` 48 vs 45, from commits since the last scan). So the
 dispositions below are against the engine's own locations, not a reconstruction.
 
+⚠️ **The scanned tree was host `057559da` (version 1.17.34), and every line number
+below is against that commit, not against today's `main`.** `main` moved three
+patch versions while this entry was in review, so without the sha the line numbers
+decay into guesses (Greptile, ctnd #125). To re-derive the same set:
+
+```bash
+cd PolyKybdHost && git archive 057559da | tar -x -C /tmp/scan-src
+codeql database create db --language=python --source-root=/tmp/scan-src
+codeql database analyze db \
+    codeql/python-queries:codeql-suites/python-security-and-quality.qls \
+    --format=sarif-latest --output=results.sarif
+```
+
 **Not one of the 206 needed a code change.** The one real problem, HOST-5 below,
 is not in this list: CodeQL did not raise it, and it was found by reading the code
 around two of its false positives.
@@ -540,6 +553,10 @@ geolocation-body test caught it. A mutation sweep then showed one of the three c
 sites has no reachable leak today (the geolocation URL has no coordinates), so
 that test was vacuous and was removed rather than left to look like coverage; the
 call stays, with the reason in a comment.
+
+Fixed in host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428):
+`ff2fb9bb` the scrub and its tests, `3aeda3e8` synthetic coordinates in the example,
+`a06cb617` the quoted-value and scientific-notation shapes.
 
 Not changed, and deliberately left to the maintainer: whether `redact_text` should
 also mask coordinates. With nothing writing them any more it would only help for the logs
