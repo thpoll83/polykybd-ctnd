@@ -479,12 +479,21 @@ patch versions while this entry was in review, so without the sha the line numbe
 decay into guesses (Greptile, ctnd #125). To re-derive the same set:
 
 ```bash
-cd PolyKybdHost && git archive 057559da | tar -x -C /tmp/scan-src
-codeql database create db --language=python --source-root=/tmp/scan-src
-codeql database analyze db \
+cd PolyKybdHost
+# `tar -C` needs the directory to exist, and a reused one would add leftover
+# files to the scan, so make a fresh pair.
+SRC=$(mktemp -d); DB=$(mktemp -d)/db
+git archive 057559da | tar -x -C "$SRC"      # 573 .py files
+codeql database create "$DB" --language=python --source-root="$SRC"
+codeql database analyze "$DB" \
     codeql/python-queries:codeql-suites/python-security-and-quality.qls \
     --format=sarif-latest --output=results.sarif
 ```
+
+These were run as written, not composed from memory: the first version named a
+`/tmp/scan-src` that nothing created, so `tar` exited with "Cannot open: No such
+file or directory" and the block could not reproduce anything (Greptile,
+ctnd #125).
 
 **Not one of the 206 needed a code change.** The one real problem, HOST-5 below,
 is not in this list: CodeQL did not raise it, and it was found by reading the code
