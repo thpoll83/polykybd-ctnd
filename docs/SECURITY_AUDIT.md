@@ -573,17 +573,24 @@ against the tag rather than assumed: its tree contains `scrub_coords`, declares
 `__patch__ = 40`, and has the fix merge as an ancestor.
 
 Logs written by an older host keep the coordinates, since nothing rewrites a log
-already on disk. They rotate out, and `redact_text` does not mask coordinates (see
-below), so a bundle collected from a long-lived installation can still carry them.
+already on disk. They rotate out, and `redact_text` does not mask coordinates, so a
+bundle collected from a long-lived installation can still carry them. **The
+maintainer accepted that residual exposure on 2026-10-22**: the installed base is
+his own testers, and a bundle from one of them reaches him and nobody else. Do not
+re-raise it at that scale. It is worth re-reading if the host ever ships to users
+who are not testers, because then a bundle attached to a public issue is a bundle
+anyone can download.
 
 The version was written only after its bump commit existed on `main`, per the
 release rule in `polykybd-claude/CLAUDE.md`: parallel sessions take the next
 numbers, and docs#104 named a version that three later merges took.
 
-Not changed, and deliberately left to the maintainer: whether `redact_text` should
-also mask coordinates. With nothing writing them any more it would only help for the logs
-already on disk, and it would add a second, non-title rule to a function whose
-contract is titles.
+Not changed, and **decided rather than left open**: `redact_text` does not mask
+coordinates and will not be changed to. With 1.17.40 writing none, it would only
+help for logs already on disk, and it would add a second, non-title rule to a
+function whose contract is titles. The maintainer accepted that on 2026-10-22 for
+the current tester audience — recorded here so the next scan or session finds a
+decision instead of an open question.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
