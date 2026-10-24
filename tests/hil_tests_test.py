@@ -452,6 +452,68 @@ class MappingFlagsTest(unittest.TestCase):
         self.assertEqual(entry["min_protocol"], 21)
         self.assertTrue(entry.get("needs_console"))
 
+class MappingNoLegendTest(unittest.TestCase):
+    """test_mapping_no_legend_cmd_44 against a fake keyboard with a console."""
+
+    class _Raw:
+        def __init__(self, known=0x01, console=True, cleanup_ok=True):
+            self.known, self.console, self.cleanup_ok = known, console, cleanup_ok
+            self.sent = []
+
+        def write_reports(self, reports):
+            from station.console_log import TAP
+            for r in reports:
+                self.sent.append(bytes(r))
+                if self.console and r[1] == hil_tests.CMD_SEND_OVERLAY_MAPPING_W2 \
+                        and r[3] & ~self.known & 0xFF:
+                    TAP.feed(f"{hil_tests.MAPPING_UNKNOWN_FLAGS_LINE} 0x{r[3]:02x}\n")
+
+        def send(self, data, *a, **k):
+            self.sent.append(bytes(data))
+            cmd = data[1]
+            if cmd == hil_tests.CMD_GET_ID:
+                return b"P\x06.Split72 1.3.0 P25 HW1 \x00".ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_OVERLAY_FLAGS_ON:
+                return bytes([0x50, cmd, ord(".") if self.cleanup_ok else ord("!")]).ljust(64, b"\x00")
+            return None
+
+    def setUp(self):
+        self._settle = hil_tests.PRC_SETTLE_S
+        hil_tests.PRC_SETTLE_S = 0.2
+
+    def tearDown(self):
+        hil_tests.PRC_SETTLE_S = self._settle
+
+    def _run(self, raw):
+        return hil_tests.test_mapping_no_legend_cmd_44(raw, lambda *_a: None)
+
+    def test_a_v25_decoder_passes_and_cleans_up(self):
+        raw = self._Raw()
+        self.assertTrue(self._run(raw))
+        w2 = [r for r in raw.sent if r[1] == hil_tests.CMD_SEND_OVERLAY_MAPPING_W2]
+        self.assertEqual([r[3] for r in w2], [0x01, 0x02])
+        self.assertTrue(all(len(r) == 64 and r[2] == 9 for r in w2))
+
+    def test_the_report_carries_the_cmd_33_pairs_from_byte_4(self):
+        w2, pairs = hil_tests._overlay_map_w2_report(9, 0x01)
+        w, _ = hil_tests._overlay_map_w_report(9)
+        self.assertEqual(w2[4:], w[3:3 + 60])
+        self.assertEqual(pairs, 26)        # 60*8//9 = 53 values
+
+    def test_a_decoder_that_ignores_the_flag_byte_fails(self):
+        self.assertFalse(self._run(self._Raw(known=0xFF)))
+
+    def test_a_silent_console_fails_rather_than_passing(self):
+        self.assertFalse(self._run(self._Raw(console=False)))
+
+    def test_a_refused_cleanup_fails(self):
+        self.assertFalse(self._run(self._Raw(cleanup_ok=False)))
+
+    def test_entry_is_gated_on_v25_and_the_console(self):
+        entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_mapping_no_legend_cmd_44)
+        self.assertEqual(entry["min_protocol"], 25)
+        self.assertTrue(entry.get("needs_console"))
+
 class TwoPacketOverlayTest(unittest.TestCase):
     """The compressed-overlay stream must genuinely need the cmd-17 continuation."""
 
