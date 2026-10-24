@@ -452,6 +452,82 @@ class MappingFlagsTest(unittest.TestCase):
         self.assertEqual(entry["min_protocol"], 21)
         self.assertTrue(entry.get("needs_console"))
 
+class MappingNoLegendTest(unittest.TestCase):
+    """test_mapping_no_legend_pairs against a fake keyboard with a console."""
+
+    class _Raw:
+        def __init__(self, knows_offset=True, console=True, cleanup_ok=True):
+            self.knows_offset, self.console, self.cleanup_ok = knows_offset, console, cleanup_ok
+            self.sent = []
+
+        def write_reports(self, reports):
+            from station.console_log import TAP
+            for r in reports:
+                self.sent.append(bytes(r))
+                width = r[2] & 0x1F
+                acc = int.from_bytes(r[3:], "little")
+                values = [(acc >> (i * width)) & ((1 << width) - 1)
+                          for i in range(len(r[3:]) * 8 // width)]
+                for frm, to in zip(values[0::2], values[1::2]):
+                    if self.knows_offset and 600 <= to < 1200:
+                        to -= 600
+                    if frm < 1440 and to >= 600 and self.console:
+                        TAP.feed(f"{hil_tests.MAPPING_OUT_OF_POOL_LINE} {frm} to {to}\n")
+
+        def send(self, data, *a, **k):
+            self.sent.append(bytes(data))
+            cmd = data[1]
+            if cmd == hil_tests.CMD_GET_ID:
+                return b"P\x06.Split72 1.3.0 P25 HW1 \x00".ljust(64, b"\x00")
+            if cmd == hil_tests.CMD_OVERLAY_FLAGS_ON:
+                return bytes([0x50, cmd, ord(".") if self.cleanup_ok else ord("!")]).ljust(64, b"\x00")
+            return None
+
+    def setUp(self):
+        self._settle = hil_tests.PRC_SETTLE_S
+        hil_tests.PRC_SETTLE_S = 0.2
+
+    def tearDown(self):
+        hil_tests.PRC_SETTLE_S = self._settle
+
+    def _run(self, raw):
+        return hil_tests.test_mapping_no_legend_pairs(raw, lambda *_a: None)
+
+    def test_a_v25_decoder_passes_and_cleans_up(self):
+        raw = self._Raw()
+        self.assertTrue(self._run(raw))
+        maps = [r for r in raw.sent if r[1] == hil_tests.CMD_SEND_OVERLAY_MAPPING_W]
+        self.assertEqual(len(maps), 2)
+        self.assertTrue(all(len(r) == 64 and r[2] == 11 for r in maps))
+        # The cleanup must reset mapping and usage, not merely be ACKed.
+        cleanup = [r for r in raw.sent if r[1] == hil_tests.CMD_OVERLAY_FLAGS_ON]
+        self.assertEqual(len(cleanup), 1)
+        self.assertEqual(cleanup[0][2], hil_tests.OVERLAY_MAPPING_RESET_BITS)
+
+    def test_the_report_offsets_every_to(self):
+        report, pairs = hil_tests._overlay_map_offset_report(11, 600)
+        acc = int.from_bytes(report[3:], "little")
+        values = [(acc >> (i * 11)) & 0x7FF for i in range(pairs * 2)]
+        self.assertEqual(pairs, 22)                 # 61*8//11 = 44 values
+        self.assertEqual(values[0::2], list(range(22)))
+        tos = values[1::2]
+        self.assertEqual((tos[0], tos[-1]), (600, 1199))      # both ends of the range
+        self.assertEqual(tos, sorted(set(tos)))               # 22 distinct slots
+
+    def test_a_v24_decoder_fails(self):
+        self.assertFalse(self._run(self._Raw(knows_offset=False)))
+
+    def test_a_silent_console_fails_rather_than_passing(self):
+        self.assertFalse(self._run(self._Raw(console=False)))
+
+    def test_a_refused_cleanup_fails(self):
+        self.assertFalse(self._run(self._Raw(cleanup_ok=False)))
+
+    def test_entry_is_gated_on_v25_and_the_console(self):
+        entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_mapping_no_legend_pairs)
+        self.assertEqual(entry["min_protocol"], 25)
+        self.assertTrue(entry.get("needs_console"))
+
 class TwoPacketOverlayTest(unittest.TestCase):
     """The compressed-overlay stream must genuinely need the cmd-17 continuation."""
 

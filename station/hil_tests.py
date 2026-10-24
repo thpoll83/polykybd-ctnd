@@ -2526,6 +2526,80 @@ def test_mapping_flags_ride_cmd_33(raw: RawHID, log: Callable[[str], None]) -> b
             + ("ok" if ok else "FAILED — rig left with test mappings until next boot"))
     return passed and ok
 
+
+# --- No-legend mapping pairs (protocol v25) -----------------------------------------
+#
+# A cmd 33 pair's `to` of NUM_OVERLAY_SLOTS..2*NUM_OVERLAY_SLOTS-1 is pool slot
+# `to - NUM_OVERLAY_SLOTS`, drawn without the key legend (OVERLAY_MAP_NO_LEGEND_OFFSET).
+MAPPING_NO_LEGEND_MIN_PROTOCOL = 25
+MAPPING_NO_LEGEND_OFFSET       = 600    # NUM_OVERLAY_SLOTS
+MAPPING_OUT_OF_POOL_LINE       = "REJECTED overlay mapping from"
+
+
+def _overlay_map_offset_report(width: int, offset: int) -> tuple[bytes, int]:
+    """One full cmd-33 report whose every `to` is a real slot plus ``offset``.
+
+    ``from`` values come from 0..(pairs-1), real display positions. The slots
+    are spread evenly over 0..NUM_OVERLAY_SLOTS-1, both ends included, so with
+    offset 600 the `to` values cover the whole no-legend range 600..1199; with
+    1200 every `to` is out of the pool."""
+    pairs = (OVERLAY_MAP_W_BYTES * 8 // width) // 2
+    values: list[int] = []
+    for i in range(pairs):
+        values.append(i)
+        values.append(offset + i * (NUM_OVERLAY_SLOTS - 1) // (pairs - 1))
+    data = _pack_mapping_values(values, OVERLAY_MAP_W_BYTES, width)
+    return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W, width]) + data, pairs
+
+
+def test_mapping_no_legend_pairs(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """cmd 33 (v25) accepts a `to` offset by 600 as a no-legend pair, and still
+    refuses a `to` past 1199.
+
+    The rig has no camera, so it cannot see that the legend is gone. What it can
+    see: a full width-11 report of no-legend pairs (decoded on both halves) leaves
+    the master alive and prints no ``REJECTED overlay mapping from`` line; v24
+    firmware prints one per pair. A report whose `to` values are 1200..1799 must
+    still be refused with that line. That refusal is the positive control: it
+    proves the console is live when the silence is measured. ``needs_console``.
+
+    Cleanup in a finally: cmd 11 resets mapping and usage (which also clears the
+    no-legend bits, stored in the mapping table), and a cleanup the keyboard does
+    not ACK fails the test.
+    """
+    passed = False
+    try:
+        report, pairs = _overlay_map_offset_report(11, MAPPING_NO_LEGEND_OFFSET)
+        mark = TAP.mark()
+        raw.write_reports([report])
+        log(f"sent cmd 33 width 11: {pairs} no-legend pairs (to = 600..1199)")
+        if not _master_alive(raw, log):
+            log("  FAIL: master unresponsive after a no-legend mapping report")
+            return False
+        line = TAP.wait_for(MAPPING_OUT_OF_POOL_LINE, mark, timeout=PRC_SETTLE_S)
+        if line is not None:
+            log(f"  FAIL: a no-legend pair was refused: {line.strip()} — the firmware "
+                "does not know the offset (pre-v25 decoder)")
+            return False
+        log(f"  no rejection line within {PRC_SETTLE_S:.0f}s")
+
+        bad, _ = _overlay_map_offset_report(11, 2 * MAPPING_NO_LEGEND_OFFSET)
+        mark = TAP.mark()
+        raw.write_reports([bad])
+        line = TAP.wait_for(MAPPING_OUT_OF_POOL_LINE, mark, timeout=PRC_SETTLE_S)
+        if line is None:
+            log("  FAIL: no rejection line for to = 1200..1799 — either the console "
+                "is not live or the decoder accepts values past the offset range")
+            return False
+        log(f"  to = 1200 refused: {line.strip()}")
+        passed = _master_alive(raw, log)
+    finally:
+        restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON, OVERLAY_MAPPING_RESET_BITS]))
+        ok = _resp_ok(restore, CMD_OVERLAY_FLAGS_ON, lambda *_a: None, expect_status=ACK)
+        log("  reset mapping + usage bits to identity: "
+            + ("ok" if ok else "FAILED — rig left with test mappings until next boot"))
+    return passed and ok
+
 # GET_ID stress pass/fail tuning. ``send_repeated`` already retries transient
 # host-side USB errors internally, so each no-answer counted here is a *sustained*
 # silence (~retries x timeout). Two failure shapes must be told apart:
@@ -3895,6 +3969,8 @@ TESTS = [
      "min_protocol": 12},
     {"name": "mapping flags ride cmd 33 (v21, console)", "fn": test_mapping_flags_ride_cmd_33,
      "min_protocol": MAPPING_FLAGS_MIN_PROTOCOL, "needs_console": True},
+    {"name": "no-legend mapping pairs (v25, console)", "fn": test_mapping_no_legend_pairs,
+     "min_protocol": MAPPING_NO_LEGEND_MIN_PROTOCOL, "needs_console": True},
     # PRC overlays (cmd 41): real records decoded on both halves, the longest
     # decode, and the three malformed records. The console twin proves the
     # malformed ones are REFUSED rather than merely survived.
