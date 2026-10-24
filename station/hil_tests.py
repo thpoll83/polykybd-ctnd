@@ -2539,14 +2539,15 @@ MAPPING_OUT_OF_POOL_LINE       = "REJECTED overlay mapping from"
 def _overlay_map_offset_report(width: int, offset: int) -> tuple[bytes, int]:
     """One full cmd-33 report whose every `to` is a real slot plus ``offset``.
 
-    ``from`` values come from 0..(pairs-1), real display positions; ``to`` is
-    ``offset + i % 4``. With offset 600 every pair is a no-legend pair; with
+    ``from`` values come from 0..(pairs-1), real display positions. The slots
+    are spread evenly over 0..NUM_OVERLAY_SLOTS-1, both ends included, so with
+    offset 600 the `to` values cover the whole no-legend range 600..1199; with
     1200 every `to` is out of the pool."""
     pairs = (OVERLAY_MAP_W_BYTES * 8 // width) // 2
     values: list[int] = []
     for i in range(pairs):
         values.append(i)
-        values.append(offset + i % 4)
+        values.append(offset + i * (NUM_OVERLAY_SLOTS - 1) // (pairs - 1))
     data = _pack_mapping_values(values, OVERLAY_MAP_W_BYTES, width)
     return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W, width]) + data, pairs
 
@@ -2558,7 +2559,7 @@ def test_mapping_no_legend_pairs(raw: RawHID, log: Callable[[str], None]) -> boo
     The rig has no camera, so it cannot see that the legend is gone. What it can
     see: a full width-11 report of no-legend pairs (decoded on both halves) leaves
     the master alive and prints no ``REJECTED overlay mapping from`` line; v24
-    firmware prints one per pair. A report whose `to` values are 1200..1203 must
+    firmware prints one per pair. A report whose `to` values are 1200..1799 must
     still be refused with that line. That refusal is the positive control: it
     proves the console is live when the silence is measured. ``needs_console``.
 
@@ -2571,7 +2572,7 @@ def test_mapping_no_legend_pairs(raw: RawHID, log: Callable[[str], None]) -> boo
         report, pairs = _overlay_map_offset_report(11, MAPPING_NO_LEGEND_OFFSET)
         mark = TAP.mark()
         raw.write_reports([report])
-        log(f"sent cmd 33 width 11: {pairs} no-legend pairs (to = 600..603)")
+        log(f"sent cmd 33 width 11: {pairs} no-legend pairs (to = 600..1199)")
         if not _master_alive(raw, log):
             log("  FAIL: master unresponsive after a no-legend mapping report")
             return False
@@ -2587,7 +2588,7 @@ def test_mapping_no_legend_pairs(raw: RawHID, log: Callable[[str], None]) -> boo
         raw.write_reports([bad])
         line = TAP.wait_for(MAPPING_OUT_OF_POOL_LINE, mark, timeout=PRC_SETTLE_S)
         if line is None:
-            log("  FAIL: no rejection line for to = 1200..1203 — either the console "
+            log("  FAIL: no rejection line for to = 1200..1799 — either the console "
                 "is not live or the decoder accepts values past the offset range")
             return False
         log(f"  to = 1200 refused: {line.strip()}")

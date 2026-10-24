@@ -116,7 +116,7 @@ and relative links were adjusted to suit a standalone file.
     the key legend. The rig cannot see a legend, so it asserts what it can: a full
     width-11 report of such pairs leaves the master alive and prints no
     `REJECTED overlay mapping from` line (v24 prints one per pair), and a report
-    with `to` = 1200..1203 is still refused with that line. That refusal is the
+    with `to` = 1200..1799 is still refused with that line. That refusal is the
     positive control that the console is live when the silence is measured.
     Mutate+restore: a `finally` resets the mapping and usage bits to the power-on
     identity via cmd 11 `MAPPING_RESET|USAGE_RESET` (`0xC0`). ⚠️ `_pack_mapping_values`

@@ -499,6 +499,10 @@ class MappingNoLegendTest(unittest.TestCase):
         maps = [r for r in raw.sent if r[1] == hil_tests.CMD_SEND_OVERLAY_MAPPING_W]
         self.assertEqual(len(maps), 2)
         self.assertTrue(all(len(r) == 64 and r[2] == 11 for r in maps))
+        # The cleanup must reset mapping and usage, not merely be ACKed.
+        cleanup = [r for r in raw.sent if r[1] == hil_tests.CMD_OVERLAY_FLAGS_ON]
+        self.assertEqual(len(cleanup), 1)
+        self.assertEqual(cleanup[0][2], hil_tests.OVERLAY_MAPPING_RESET_BITS)
 
     def test_the_report_offsets_every_to(self):
         report, pairs = hil_tests._overlay_map_offset_report(11, 600)
@@ -506,7 +510,9 @@ class MappingNoLegendTest(unittest.TestCase):
         values = [(acc >> (i * 11)) & 0x7FF for i in range(pairs * 2)]
         self.assertEqual(pairs, 22)                 # 61*8//11 = 44 values
         self.assertEqual(values[0::2], list(range(22)))
-        self.assertEqual(values[1::2], [600 + i % 4 for i in range(22)])
+        tos = values[1::2]
+        self.assertEqual((tos[0], tos[-1]), (600, 1199))      # both ends of the range
+        self.assertEqual(tos, sorted(set(tos)))               # 22 distinct slots
 
     def test_a_v24_decoder_fails(self):
         self.assertFalse(self._run(self._Raw(knows_offset=False)))
