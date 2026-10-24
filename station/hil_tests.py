@@ -83,7 +83,6 @@ CMD_GET_LANG_LIST_PACKED    = 27  # language codes as 2-byte ISO index pairs (pr
 CMD_CHANGE_LANG             = 9   # set language by 4-char code
 CMD_SEND_OVERLAY            = 10  # uncompressed overlay segment (no ACK)
 CMD_SEND_OVERLAY_MAPPING_W  = 33  # overlay mapping, host-chosen value width (protocol v12+; no ACK)
-CMD_SEND_OVERLAY_MAPPING_W2 = 44  # cmd 33 plus a flag byte in data[3] (protocol v25+; no ACK)
 CMD_OVERLAY_FLAGS_ON        = 11  # set overlay flag bits
 CMD_OVERLAY_FLAGS_OFF       = 12  # clear overlay flag bits
 CMD_SET_BRIGHTNESS          = 13  # set OLED contrast (0..FULL_BRIGHT)
@@ -2528,40 +2527,40 @@ def test_mapping_flags_ride_cmd_33(raw: RawHID, log: Callable[[str], None]) -> b
     return passed and ok
 
 
-# --- No-legend mapping, cmd 44 (protocol v25) ----------------------------------------
+# --- No-legend mapping pairs (protocol v25) -----------------------------------------
 #
-# Cmd 33 with a second flag byte at data[3]; bit 0 draws the report's pairs without
-# the key legend. The pairs start at byte 4, one byte later than in cmd 33.
+# A cmd 33 pair's `to` of NUM_OVERLAY_SLOTS..2*NUM_OVERLAY_SLOTS-1 is pool slot
+# `to - NUM_OVERLAY_SLOTS`, drawn without the key legend (OVERLAY_MAP_NO_LEGEND_OFFSET).
 MAPPING_NO_LEGEND_MIN_PROTOCOL = 25
-MAPPING_W2_FLAG_NO_LEGEND      = 0x01   # OVERLAY_MAP_W2_NO_LEGEND
-MAPPING_W2_UNKNOWN_FLAG        = 0x02   # not defined: the firmware must refuse it
-MAPPING_W2_BYTES               = 64 - 4 # 60 data bytes per report
-MAPPING_REJECTED_LINE          = "REJECTED overlay mapping report"
-MAPPING_UNKNOWN_FLAGS_LINE     = "REJECTED overlay mapping report: unknown flags"
+MAPPING_NO_LEGEND_OFFSET       = 600    # NUM_OVERLAY_SLOTS
+MAPPING_OUT_OF_POOL_LINE       = "REJECTED overlay mapping from"
 
 
-def _overlay_map_w2_report(width: int, flags2: int) -> tuple[bytes, int]:
-    """One cmd-44 report: the pairs of ``_overlay_map_w_report`` in 60 bytes.
+def _overlay_map_offset_report(width: int, offset: int) -> tuple[bytes, int]:
+    """One full cmd-33 report whose every `to` is a real slot plus ``offset``.
 
-    The firmware decodes ``(60*8)//width`` values from it. The cmd-33 stream
-    packs its pairs from the first bit, so the first 60 bytes hold the same
-    pairs; an odd value left at the end has no partner and is ignored."""
-    report, _ = _overlay_map_w_report(width)
-    pairs = (MAPPING_W2_BYTES * 8 // width) // 2
-    return (bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W2, width, flags2])
-            + report[3:3 + MAPPING_W2_BYTES]), pairs
+    ``from`` values come from 0..(pairs-1), real display positions; ``to`` is
+    ``offset + i % 4``. With offset 600 every pair is a no-legend pair; with
+    1200 every `to` is out of the pool."""
+    pairs = (OVERLAY_MAP_W_BYTES * 8 // width) // 2
+    values: list[int] = []
+    for i in range(pairs):
+        values.append(i)
+        values.append(offset + i % 4)
+    data = _pack_mapping_values(values, OVERLAY_MAP_W_BYTES, width)
+    return bytes([POLY_CHANNEL, CMD_SEND_OVERLAY_MAPPING_W, width]) + data, pairs
 
 
-def test_mapping_no_legend_cmd_44(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """cmd 44 (v25) accepts a no-legend mapping report and refuses an unknown flag.
+def test_mapping_no_legend_pairs(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """cmd 33 (v25) accepts a `to` offset by 600 as a no-legend pair, and still
+    refuses a `to` past 1199.
 
     The rig has no camera, so it cannot see that the legend is gone. What it can
-    see: the master stays alive after a full no-legend report at width 9 (both
-    halves decode it, the slave over OVERLAY_MAP_SYNC_NO_LEGEND), the console
-    prints no ``REJECTED overlay mapping report`` line for it, and a report with
-    the undefined bit 0x02 in data[3] is refused with ``... unknown flags``. That
-    refusal is the positive control: it proves the console is live when the
-    silence is measured. ``needs_console``.
+    see: a full width-11 report of no-legend pairs (decoded on both halves) leaves
+    the master alive and prints no ``REJECTED overlay mapping from`` line; v24
+    firmware prints one per pair. A report whose `to` values are 1200..1203 must
+    still be refused with that line. That refusal is the positive control: it
+    proves the console is live when the silence is measured. ``needs_console``.
 
     Cleanup in a finally: cmd 11 resets mapping and usage (which also clears the
     no-legend bits, stored in the mapping table), and a cleanup the keyboard does
@@ -2569,28 +2568,29 @@ def test_mapping_no_legend_cmd_44(raw: RawHID, log: Callable[[str], None]) -> bo
     """
     passed = False
     try:
-        report, pairs = _overlay_map_w2_report(9, MAPPING_W2_FLAG_NO_LEGEND)
+        report, pairs = _overlay_map_offset_report(11, MAPPING_NO_LEGEND_OFFSET)
         mark = TAP.mark()
         raw.write_reports([report])
-        log(f"sent cmd 44 width 9, flags2 {MAPPING_W2_FLAG_NO_LEGEND:#04x}: {pairs} pairs")
+        log(f"sent cmd 33 width 11: {pairs} no-legend pairs (to = 600..603)")
         if not _master_alive(raw, log):
-            log("  FAIL: master unresponsive after a cmd 44 report")
+            log("  FAIL: master unresponsive after a no-legend mapping report")
             return False
-        line = TAP.wait_for(MAPPING_REJECTED_LINE, mark, timeout=PRC_SETTLE_S)
+        line = TAP.wait_for(MAPPING_OUT_OF_POOL_LINE, mark, timeout=PRC_SETTLE_S)
         if line is not None:
-            log(f"  FAIL: the no-legend report was refused: {line.strip()}")
+            log(f"  FAIL: a no-legend pair was refused: {line.strip()} — the firmware "
+                "does not know the offset (pre-v25 decoder)")
             return False
         log(f"  no rejection line within {PRC_SETTLE_S:.0f}s")
 
-        bad, _ = _overlay_map_w2_report(9, MAPPING_W2_UNKNOWN_FLAG)
+        bad, _ = _overlay_map_offset_report(11, 2 * MAPPING_NO_LEGEND_OFFSET)
         mark = TAP.mark()
         raw.write_reports([bad])
-        line = TAP.wait_for(MAPPING_UNKNOWN_FLAGS_LINE, mark, timeout=PRC_SETTLE_S)
+        line = TAP.wait_for(MAPPING_OUT_OF_POOL_LINE, mark, timeout=PRC_SETTLE_S)
         if line is None:
-            log(f"  FAIL: no unknown-flags line for flags2 {MAPPING_W2_UNKNOWN_FLAG:#04x} — "
-                "either the console is not live or the firmware ignored the bit")
+            log("  FAIL: no rejection line for to = 1200..1203 — either the console "
+                "is not live or the decoder accepts values past the offset range")
             return False
-        log(f"  flags2 {MAPPING_W2_UNKNOWN_FLAG:#04x} refused: {line.strip()}")
+        log(f"  to = 1200 refused: {line.strip()}")
         passed = _master_alive(raw, log)
     finally:
         restore = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON, OVERLAY_MAPPING_RESET_BITS]))
@@ -3968,7 +3968,7 @@ TESTS = [
      "min_protocol": 12},
     {"name": "mapping flags ride cmd 33 (v21, console)", "fn": test_mapping_flags_ride_cmd_33,
      "min_protocol": MAPPING_FLAGS_MIN_PROTOCOL, "needs_console": True},
-    {"name": "no-legend mapping rides cmd 44 (v25, console)", "fn": test_mapping_no_legend_cmd_44,
+    {"name": "no-legend mapping pairs (v25, console)", "fn": test_mapping_no_legend_pairs,
      "min_protocol": MAPPING_NO_LEGEND_MIN_PROTOCOL, "needs_console": True},
     # PRC overlays (cmd 41): real records decoded on both halves, the longest
     # decode, and the three malformed records. The console twin proves the

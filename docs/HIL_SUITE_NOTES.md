@@ -110,14 +110,14 @@ and relative links were adjusted to suit a standalone file.
     7 and 17 confirm the `OVERLAY_MAP_WIDTH_MIN/MAX` guard drops the report
     instead of slicing garbage (the firmware logs `REJECTED overlay mapping
     report: bad width`, which shows up in the captured console on a failure).
-  - The **`no-legend mapping rides cmd 44 (v25, console)`** test
-    (`test_mapping_no_legend_cmd_44`, `min_protocol: 25`, `needs_console`) covers
-    cmd 44, cmd 33 with a second flag byte whose bit 0 draws the pairs without the
-    key legend. The rig cannot see a legend, so it asserts what it can: a full
-    width-9 no-legend report leaves the master alive and prints no `REJECTED
-    overlay mapping report` line, and a report with the undefined bit 0x02 is
-    refused with `... unknown flags`. That refusal is the positive control that
-    the console is live when the silence is measured.
+  - The **`no-legend mapping pairs (v25, console)`** test
+    (`test_mapping_no_legend_pairs`, `min_protocol: 25`, `needs_console`) covers
+    the v25 mapping encoding: a `to` of 600..1199 is slot `to - 600` drawn without
+    the key legend. The rig cannot see a legend, so it asserts what it can: a full
+    width-11 report of such pairs leaves the master alive and prints no
+    `REJECTED overlay mapping from` line (v24 prints one per pair), and a report
+    with `to` = 1200..1203 is still refused with that line. That refusal is the
+    positive control that the console is live when the silence is measured.
     Mutate+restore: a `finally` resets the mapping and usage bits to the power-on
     identity via cmd 11 `MAPPING_RESET|USAGE_RESET` (`0xC0`). ⚠️ `_pack_mapping_values`
     mirrors PolyKybdHost `bit_packing.pack_values` — verified byte-identical and
