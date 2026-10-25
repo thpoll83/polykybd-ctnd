@@ -12,7 +12,8 @@ them. That scan also reached a **fifth** repo the ID scheme did not cover
 (`Adafruit-GFX-Library`); tracked under `SCAN-1` rather than a new prefix, since the
 finding was in an accidentally-committed build directory rather than in our code.
 
-**2026-08-06**: HOST-3 added alongside
+**2026-10-25**: HOST-3 extended with the daily archive's read token (no change needed;
+recorded). **2026-08-06**: HOST-3 added alongside
 the telemetry feature — a single new surface reviewed on its own, not a fresh sweep of the
 tracker, so the review scope below still stands. Last full review **2026-08-05 (evening)** —
 a *fresh* evaluation of the surfaces FW-2 changed, plus one never examined before. It
@@ -239,8 +240,34 @@ to act on — taken while the user base is a handful of known testers who were t
 It is the weakest part of this entry, and the part to revisit first if the install base ever
 stops being people we know.
 
+**A read credential exists since 2026-10-22, outside the Worker.** The Worker still has no read
+route. A daily archive reads D1 directly instead: the private repo
+`thpoll83/polykybd-telemetry-data` runs a scheduled workflow that exports every finished UTC day
+to `data/YYYY/YYYY-MM-DD.json` and commits a rendered `dashboard.html`
+(`PolyKybdHost/telemetry-collector/SETUP.md` §7). What that adds:
+
+- **A Cloudflare API token that can read the whole `ping` table**, stored as that repo's
+  `CLOUDFLARE_API_TOKEN` secret. It is a custom token with D1 permission only, separate from the
+  deploy token in PolyKybdHost (Workers Scripts: Edit), so it cannot change or redeploy the
+  Worker. A leak exposes the raw rows: `install_id`, country, versions, OS and counters, no IP.
+  Rotation: create a new token, replace the secret, delete the old token
+  (`polykybd-telemetry-data/README.md`).
+- **A second copy of the dataset**, in a private GitHub repo. Anyone with read access to that
+  repo can read every row. Today that is the maintainer only.
+- **Code from another repo runs with the token.** The workflow checks out
+  `telemetry-collector/` from PolyKybdHost `main` and runs `dashboard.py` with the token in its
+  environment, and `npx` installs `wrangler@4.119.0` (pinned exact, like the deploy job). So
+  anyone who can merge to PolyKybdHost `main` can make the next run send the token or the data
+  elsewhere. Today that is the maintainer only. A manual run can name another PolyKybdHost ref
+  (`host_ref`); only people with write access to the private repo can start one.
+
+The public *Usage Data & Privacy* page describes what a report contains and what it never
+contains. It says nothing about where the collected rows are kept, so the archive changes no
+statement on it.
+
 **Accepted.** Revisit if the endpoint ever grows a read API (it has none by design — the Worker
-only accepts writes, so there is no route to leak the dataset), if the payload gains a field that
+only accepts writes, so there is no route to leak the dataset), if anyone besides the maintainer
+gets write access to PolyKybdHost `main` or read access to `polykybd-telemetry-data`, if the payload gains a field that
 is not obviously non-identifying, or when the install base is large enough that "anonymous" should
 mean an anonymity set rather than just an absence of identifiers.
 
