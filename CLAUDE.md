@@ -25,7 +25,7 @@ only rig rules. `.claude/rules/*.md` add warnings when you Read a matching file.
 | `station/ui/` | Flask + Flask-SocketIO (threading mode) touch UI |
 | `config/config.yaml.example` | GPIO pins, uhubctl ports, VID/PID `0x2021:0x2007`, raw usage `0xFF61`/`0x62` (from qmk `split72/config.h`); copy to the gitignored `config/config.yaml` |
 | `systemd/`, `scripts/` | units, `setup.sh`, `self-update.sh`, `register-runner.sh`, `runner-ctl.sh`, kiosk and backlight scripts |
-| `tests/` | offline unit tests (no hardware) |
+| `tests/` | offline unit tests (no hardware). Run them with `python3 -m unittest discover -s tests -t . -p "*_test.py"`: without `-p` the default pattern matches nothing and reports `Ran 0 tests … OK` |
 | `perf/baselines/`, `perf/fixtures/` | committed perf baselines |
 | `.github/workflows/qmk-test.yml` | an old 94-line template. The live workflow is in `qmk_firmware` (1000+ lines); don't copy this one over it |
 

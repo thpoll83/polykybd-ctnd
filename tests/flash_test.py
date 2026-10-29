@@ -32,14 +32,18 @@ Bus 001 Device 017: ID 2e8a:0003 Raspberry Pi RP2 Boot
 
 
 class FakeFlasher(flash.FlashController):
-    """lsusb answers come from a script: one set per poll, the last repeating."""
+    """lsusb answers come from a script: one set per poll, the last repeating.
+    An entry that is an exception is raised instead, like a failed lsusb."""
 
     def __init__(self, polls):
         super().__init__()
         self._polls = list(polls)
 
-    def _bootsel_devices(self):
-        return set(self._polls.pop(0) if len(self._polls) > 1 else self._polls[0])
+    def _scan_bootsel(self):
+        item = self._polls.pop(0) if len(self._polls) > 1 else self._polls[0]
+        if isinstance(item, Exception):
+            raise item
+        return set(item)
 
 
 class ParseTest(unittest.TestCase):
@@ -74,6 +78,48 @@ class WaitTest(unittest.TestCase):
     def test_two_new_devices_is_an_error_not_a_guess(self):
         with self.assertRaisesRegex(RuntimeError, "cannot tell which"):
             self.wait([{(1, 20), (1, 21)}], before=set())
+
+
+class LsusbFailureTest(unittest.TestCase):
+    """An unreadable lsusb must never pass for "no bootrom" (review on ctnd#130)."""
+
+    def test_scan_raises_on_nonzero_exit(self):
+        res = subprocess.CompletedProcess(["lsusb"], 1, stdout="", stderr="boom")
+        with mock.patch.object(subprocess, "run", return_value=res):
+            with self.assertRaisesRegex(RuntimeError, "lsusb exited 1"):
+                flash.FlashController()._scan_bootsel()
+
+    def test_scan_raises_on_timeout(self):
+        with mock.patch.object(subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("lsusb", 5)):
+            with self.assertRaisesRegex(RuntimeError, "lsusb failed"):
+                flash.FlashController()._scan_bootsel()
+
+    def test_best_effort_count_still_returns_zero(self):
+        with mock.patch.object(subprocess, "run", side_effect=OSError("no lsusb")):
+            self.assertEqual(flash.FlashController()._count_bootsel_devices(), 0)
+
+    def test_flash_refuses_without_a_baseline(self):
+        # The field risk: the other half is in BOOTSEL, the baseline read fails,
+        # and the first good poll would pass that half off as this one.
+        f = FakeFlasher([RuntimeError("lsusb failed"), {(1, 14)}])
+        with mock.patch.object(flash.time, "sleep"), \
+             mock.patch.object(f, "_flash_with_picotool") as load:
+            with self.assertRaisesRegex(RuntimeError, "lsusb failed"):
+                f.flash("right", "fw.uf2", log=lambda *_: None)
+        load.assert_not_called()
+
+    def test_every_poll_failing_names_lsusb_not_the_cable(self):
+        f = FakeFlasher([RuntimeError("lsusb exited 1: boom")])
+        with self.assertRaisesRegex(RuntimeError, "could not read USB.*lsusb exited 1"):
+            f._wait_for_bootsel("right", 22, 23, log=lambda *_: None,
+                                timeout=0.05, poll=0.0, before={(1, 14)})
+
+    def test_a_failed_poll_is_skipped_not_counted(self):
+        f = FakeFlasher([RuntimeError("lsusb failed"), {(1, 14), (1, 18)}])
+        self.assertEqual(f._wait_for_bootsel("right", 22, 23, log=lambda *_: None,
+                                             timeout=1.0, poll=0.0, before={(1, 14)}),
+                         (1, 18))
 
 
 class PicotoolCallTest(unittest.TestCase):
