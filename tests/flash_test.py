@@ -109,6 +109,12 @@ class LsusbFailureTest(unittest.TestCase):
                 f.flash("right", "fw.uf2", log=lambda *_: None)
         load.assert_not_called()
 
+    def test_every_poll_failing_names_lsusb_not_the_cable(self):
+        f = FakeFlasher([RuntimeError("lsusb exited 1: boom")])
+        with self.assertRaisesRegex(RuntimeError, "could not read USB.*lsusb exited 1"):
+            f._wait_for_bootsel("right", 22, 23, log=lambda *_: None,
+                                timeout=0.05, poll=0.0, before={(1, 14)})
+
     def test_a_failed_poll_is_skipped_not_counted(self):
         f = FakeFlasher([RuntimeError("lsusb failed"), {(1, 14), (1, 18)}])
         self.assertEqual(f._wait_for_bootsel("right", 22, 23, log=lambda *_: None,

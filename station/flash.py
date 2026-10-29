@@ -163,11 +163,14 @@ class FlashController:
         The caller keeps BOOTSEL asserted throughout so the bootrom keeps
         sampling it."""
         deadline = time.monotonic() + timeout
+        scanned, scan_error = False, None
         while time.monotonic() < deadline:
             try:
                 new = self._scan_bootsel() - set(before)
-            except RuntimeError:
-                time.sleep(poll)   # a failed read says nothing; poll again
+                scanned = True
+            except RuntimeError as exc:
+                scan_error = exc   # a failed read says nothing; poll again
+                time.sleep(poll)
                 continue
             if len(new) == 1:
                 device = next(iter(new))
@@ -181,6 +184,13 @@ class FlashController:
                     f"half; cannot tell which one is this half: {sorted(new)}"
                 )
             time.sleep(poll)
+        if not scanned:
+            # Every poll failed: the half may be in BOOTSEL, nobody could look.
+            # Say so, rather than send the operator to check the cable.
+            raise RuntimeError(
+                f"could not read USB while waiting for the {side} half to enter "
+                f"BOOTSEL: {scan_error}"
+            ) from scan_error
         already = f"; {len(before)} other RP2040(s) were in BOOTSEL before" if before else ""
         raise RuntimeError(
             f"{side} half never entered BOOTSEL within {timeout:.0f}s "
