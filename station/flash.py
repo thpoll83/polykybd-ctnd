@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -49,6 +50,27 @@ def _ensure_gpio():
     _gpio_ready = True
 
 
+_LSUSB_BOOTSEL = re.compile(r"^Bus (\d+) Device (\d+): ID 2e8a:0003\b", re.I)
+
+
+def parse_bootsel_devices(lsusb_output: str) -> set:
+    """(bus, address) pairs of the RP2040 bootroms in ``lsusb`` output."""
+    found = set()
+    for line in lsusb_output.splitlines():
+        m = _LSUSB_BOOTSEL.match(line.strip())
+        if m:
+            found.add((int(m.group(1)), int(m.group(2))))
+    return found
+
+
+def _picotool_target(device) -> list:
+    """picotool's device-selection arguments for one (bus, address), or none."""
+    if device is None:
+        return []
+    bus, address = device
+    return ["--bus", str(bus), "--address", str(address)]
+
+
 class FlashController:
     def __init__(self):
         _ensure_gpio()
@@ -61,7 +83,7 @@ class FlashController:
             check=True, capture_output=True,
         )
 
-    def _flash_with_picotool(self, firmware_path: str, log) -> None:
+    def _flash_with_picotool(self, firmware_path: str, log, device=None) -> None:
         # picotool talks to the RP2040 bootrom over the PICOBOOT USB interface
         # (VID:PID 2e8a:0003), which the bootrom exposes whenever the chip is in
         # BOOTSEL mode. This is independent of whether valid firmware is already
@@ -72,10 +94,18 @@ class FlashController:
         #
         # picotool accepts .uf2, .bin and .elf. It writes diagnostics to stdout,
         # not stderr.
-        log(f"[flash] loading with picotool: {firmware_path}")
+        #
+        # ``device`` is the (bus, address) of the half this flash put into
+        # BOOTSEL. Without it picotool refuses to choose when the OTHER half is in
+        # BOOTSEL too ("Command requires a single RP-series device to be
+        # targeted", exit 248), and every run then aborts at the first flash
+        # until someone resets that half by hand (qmk#363, 2026-10-29).
+        target = _picotool_target(device)
+        log(f"[flash] loading with picotool: {firmware_path}"
+            + (f" (bus {device[0]} address {device[1]})" if device else ""))
         try:
             subprocess.run(
-                ["sudo", "picotool", "load", firmware_path, "--update"],
+                ["sudo", "picotool", "load", firmware_path, "--update", *target],
                 check=True, capture_output=True,
             )
         except subprocess.CalledProcessError as exc:
@@ -84,24 +114,34 @@ class FlashController:
             raise RuntimeError(
                 f"picotool exited {exc.returncode}: {err or out or '(no output)'}"
             ) from exc
-        subprocess.run(["sudo", "picotool", "reboot"], check=True, capture_output=True)
+        subprocess.run(["sudo", "picotool", "reboot", *target], check=True, capture_output=True)
 
-    def _count_bootsel_devices(self) -> int:
-        """Number of RP-series chips currently in BOOTSEL — the PICOBOOT
-        interface enumerates as USB VID:PID 2e8a:0003 (the same probe the CI
-        failure diagnostics use). lsusb needs no root."""
+    def _bootsel_devices(self) -> set:
+        """(bus, address) of every RP-series chip currently in BOOTSEL — the
+        PICOBOOT interface enumerates as USB VID:PID 2e8a:0003 (the same probe the
+        CI failure diagnostics use). lsusb needs no root."""
         try:
             out = subprocess.run(
                 ["lsusb"], capture_output=True, text=True, timeout=5
             ).stdout
         except Exception:
-            return 0
-        return sum("2e8a:0003" in line for line in out.splitlines())
+            return set()
+        return parse_bootsel_devices(out)
+
+    def _count_bootsel_devices(self) -> int:
+        return len(self._bootsel_devices())
 
     def _wait_for_bootsel(self, side: str, run_pin: int, bootsel_pin: int,
-                          log=print, timeout: float = 10.0, poll: float = 0.25) -> None:
-        """Block until an RP2040 appears in BOOTSEL, then return; raise a clear,
-        side-specific error if none shows within ``timeout``.
+                          log=print, timeout: float = 10.0, poll: float = 0.25,
+                          before=frozenset()):
+        """Block until an RP2040 appears in BOOTSEL that was not in ``before``,
+        and return its (bus, address); raise a clear, side-specific error if none
+        shows within ``timeout``.
+
+        ``before`` is the BOOTSEL set taken just before this half was reset. The
+        reset re-enumerates the half, so it comes back at a new address even when
+        it was in BOOTSEL already, and the new entry is this half whatever state
+        the other one is in.
 
         Replaces a blind ``sleep`` before picotool: a board enumerates ~0.5–2 s
         after reset, but the second half flashed (the first reboots and churns the
@@ -112,13 +152,23 @@ class FlashController:
         sampling it."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self._count_bootsel_devices() > 0:
-                log(f"[flash:{side}] BOOTSEL device present")
-                return
+            new = self._bootsel_devices() - set(before)
+            if len(new) == 1:
+                device = next(iter(new))
+                others = f", {len(before)} other(s) already in BOOTSEL" if before else ""
+                log(f"[flash:{side}] BOOTSEL device present (bus {device[0]} "
+                    f"address {device[1]}{others})")
+                return device
+            if len(new) > 1:
+                raise RuntimeError(
+                    f"{len(new)} RP2040s entered BOOTSEL while flashing the {side} "
+                    f"half; cannot tell which one is this half: {sorted(new)}"
+                )
             time.sleep(poll)
+        already = f"; {len(before)} other RP2040(s) were in BOOTSEL before" if before else ""
         raise RuntimeError(
             f"{side} half never entered BOOTSEL within {timeout:.0f}s "
-            f"(no 2e8a:0003 on USB). Check that half's USB cable/power and its "
+            f"(no new 2e8a:0003 on USB{already}). Check that half's USB cable/power and its "
             f"RUN/BOOTSEL wiring (BCM{run_pin}/BCM{bootsel_pin}); if the other "
             f"half flashes OK the fault is specific to this half."
         )
@@ -139,6 +189,7 @@ class FlashController:
         #   2. Assert BOOTSEL while RESET is held (BOOTSEL LOW)
         #   3. Release RESET (RUN HIGH) — board boots with BOOTSEL held → BOOTSEL mode
         #   4. Release BOOTSEL after enumeration
+        before = self._bootsel_devices()
         log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
         GPIO.output(run_pin, _ASSERT)      # 1. assert reset
         time.sleep(0.05)
@@ -150,7 +201,7 @@ class FlashController:
         # Poll for the RP2 bootrom (PICOBOOT 2e8a:0003) instead of a blind sleep,
         # holding BOOTSEL asserted while we wait so the bootrom keeps sampling it.
         # Raises a clear, side-specific error if the half never shows up.
-        self._wait_for_bootsel(side, run_pin, bootsel_pin, log)
+        device = self._wait_for_bootsel(side, run_pin, bootsel_pin, log, before=before)
 
         # 4. Restore BOOTSEL to whatever the user has set, not necessarily released.
         GPIO.output(bootsel_pin, _ASSERT if _bootsel_asserted[side] else _RELEASE)
@@ -160,7 +211,7 @@ class FlashController:
         # on the OS auto-mounting the RP2040 mass-storage volume, which on the
         # kiosk desktop is intercepted by the file manager's "Removable Medium
         # Found" prompt and never lands under /media.
-        self._flash_with_picotool(firmware_path, log)
+        self._flash_with_picotool(firmware_path, log, device)
 
         log(f"[flash:{side}] complete — waiting for reboot")
         time.sleep(2.5)
