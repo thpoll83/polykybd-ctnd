@@ -491,6 +491,19 @@ wrapper is the boundary. `grant_missing()` probes the grant by running the wrapp
 root with no arguments. The wrapper's first check (`$# -ge 2`) exits 2 on that before
 any write.
 
+### The flasher's picotool targeting adds arguments, not privilege (2026-10-29)
+
+ctnd#130 made `station/flash.py` pass `--bus <n> --address <n>` to `sudo picotool load`
+and `sudo picotool reboot`, so a half already in BOOTSEL no longer makes picotool refuse
+(exit 248). The `/etc/sudoers.d/polykybd-usb` grant is the picotool binary with no
+argument list, so it already allowed these arguments and `setup.sh` is unchanged. Both
+values are integers parsed from `lsusb` output by a regex, never shell-interpolated.
+What the change could break is which board receives an image, not who may write one:
+the review on ctnd#130 found that a failed baseline `lsusb` read counted as "no
+bootrom", which could have flashed the half already in BOOTSEL. The follow-up makes the
+baseline read strict (`_scan_bootsel()` raises, `flash()` refuses). Worst case either
+way is the wrong HIL image on one half, which the next run's BOOTSEL flash replaces.
+
 ### SCAN-2 — the CodeQL backlog on PolyKybdHost (206 alerts, 2026-10-21)
 
 `codeql.yml` analyses every PR, and its alerts had accumulated unread: 203 open in

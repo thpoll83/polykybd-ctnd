@@ -116,17 +116,29 @@ class FlashController:
             ) from exc
         subprocess.run(["sudo", "picotool", "reboot", *target], check=True, capture_output=True)
 
-    def _bootsel_devices(self) -> set:
+    def _scan_bootsel(self) -> set:
         """(bus, address) of every RP-series chip currently in BOOTSEL — the
         PICOBOOT interface enumerates as USB VID:PID 2e8a:0003 (the same probe the
-        CI failure diagnostics use). lsusb needs no root."""
+        CI failure diagnostics use). lsusb needs no root.
+
+        Raises RuntimeError when lsusb fails, times out or exits non-zero: an
+        empty set must mean "no bootrom", never "could not look". flash() takes
+        its baseline from here, and an empty baseline taken while the other half
+        sits in BOOTSEL would make that half look new and get this half's image."""
         try:
-            out = subprocess.run(
-                ["lsusb"], capture_output=True, text=True, timeout=5
-            ).stdout
-        except Exception:
+            res = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=5)
+        except Exception as exc:
+            raise RuntimeError(f"lsusb failed: {exc}") from exc
+        if res.returncode != 0:
+            raise RuntimeError(f"lsusb exited {res.returncode}: {res.stderr.strip()}")
+        return parse_bootsel_devices(res.stdout)
+
+    def _bootsel_devices(self) -> set:
+        """Best-effort _scan_bootsel(): an empty set when lsusb cannot be read."""
+        try:
+            return self._scan_bootsel()
+        except RuntimeError:
             return set()
-        return parse_bootsel_devices(out)
 
     def _count_bootsel_devices(self) -> int:
         return len(self._bootsel_devices())
@@ -152,7 +164,11 @@ class FlashController:
         sampling it."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            new = self._bootsel_devices() - set(before)
+            try:
+                new = self._scan_bootsel() - set(before)
+            except RuntimeError:
+                time.sleep(poll)   # a failed read says nothing; poll again
+                continue
             if len(new) == 1:
                 device = next(iter(new))
                 others = f", {len(before)} other(s) already in BOOTSEL" if before else ""
@@ -189,7 +205,9 @@ class FlashController:
         #   2. Assert BOOTSEL while RESET is held (BOOTSEL LOW)
         #   3. Release RESET (RUN HIGH) — board boots with BOOTSEL held → BOOTSEL mode
         #   4. Release BOOTSEL after enumeration
-        before = self._bootsel_devices()
+        # Strict: without a trustworthy baseline the new device cannot be told
+        # apart from the other half, so refuse to flash rather than guess.
+        before = self._scan_bootsel()
         log(f"[flash:{side}] entering BOOTSEL (RUN=BCM{run_pin}, BOOTSEL=BCM{bootsel_pin})")
         GPIO.output(run_pin, _ASSERT)      # 1. assert reset
         time.sleep(0.05)
