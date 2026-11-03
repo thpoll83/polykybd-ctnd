@@ -64,6 +64,7 @@ signing the firmware image alone was not enough.**
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
 | HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | ✅ fixed — host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428) (`12589656`), released in [v1.17.40](https://github.com/thpoll83/PolyKybdHost/releases/tag/v1.17.40) |
 | SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged against host `057559da` (1.17.34), none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
+| SCAN-3 | 2026-11-03 Sourcery (opengrep): the overlay generators run `scripts/generate_app_overlays.py` with `subprocess.run` (host#508) — an argv list, no shell, repository paths | host | ✅ checked, not vulnerable (audit note + `nosemgrep`) |
 
 ---
 
@@ -631,6 +632,19 @@ help for logs already on disk, and it would add a second, non-title rule to a
 function whose contract is titles. The maintainer accepted that on 2026-10-22 for
 the current tester audience — recorded here so the next scan or session finds a
 decision instead of an open question.
+
+### SCAN-3 — overlay generator scripts run the overlay generator with `subprocess.run` (2026-11-03)
+
+Sourcery (opengrep `dangerous-subprocess-use-audit` and
+`dangerous-subprocess-use-tainted-env-args`) marked two blocking issues on host#508 at
+`polyhost/res/overlay_sources/slicers/gen_slicer_bindings.py`, where `--render` runs
+`scripts/generate_app_overlays.py` once per binding file. The call passes an argv list
+with no shell, the program is `sys.executable`, and the arguments are repository paths
+plus the `--preview` directory the developer typed on their own command line. It is a
+developer tool that is not shipped or run by the app, so no outside input reaches it.
+The call carries a written audit and a `# nosemgrep` marker for both rule ids, the
+repo's pattern for this rule (`_bootstrap.py`, `build_info.py`). `gen_vim_bindings.py`
+(host#493) has the same call and gets the same answer if it is flagged.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
