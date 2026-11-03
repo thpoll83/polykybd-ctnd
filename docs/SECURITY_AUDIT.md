@@ -632,6 +632,19 @@ function whose contract is titles. The maintainer accepted that on 2026-10-22 fo
 the current tester audience — recorded here so the next scan or session finds a
 decision instead of an open question.
 
+### Overlay generator scripts run the overlay generator with `subprocess.run` (2026-11-03)
+
+Sourcery (opengrep `dangerous-subprocess-use-audit` and
+`dangerous-subprocess-use-tainted-env-args`) marked two blocking issues on host#508 at
+`polyhost/res/overlay_sources/slicers/gen_slicer_bindings.py`, where `--render` runs
+`scripts/generate_app_overlays.py` once per binding file. The call passes an argv list
+with no shell, the program is `sys.executable`, and the arguments are repository paths
+plus the `--preview` directory the developer typed on their own command line. It is a
+developer tool that is not shipped or run by the app, so no outside input reaches it.
+The call carries a written audit and a `# nosemgrep` marker for both rule ids, the
+repo's pattern for this rule (`_bootstrap.py`, `build_info.py`). `gen_vim_bindings.py`
+(host#493) has the same call and gets the same answer if it is flagged.
+
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
 The three inert findings above cost real verification and produced no artifact at the time;
