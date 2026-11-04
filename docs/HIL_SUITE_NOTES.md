@@ -91,9 +91,9 @@ and relative links were adjusted to suit a standalone file.
     warning arrives after `TAP.mark()` for the valid report and counts against it.
     Seen 2 of 8 runs on 2026-10-30 (qmk#407's head `0f3d693b` and its merge commit
     `8bcb843c`), while the same image passed the other runs. The fix is to wait until
-    no PRC warning has arrived for a settle window before marking for the valid
-    report, and to require each malformed record's line to arrive after its own
-    write.
+    no PRC warning has arrived for a settle window before EVERY `TAP.mark()`, for each
+    malformed record as well as for the valid report. Otherwise a late warning from
+    record N-1 can still satisfy record N's check.
     Whether the decoded PIXELS are right is not the rig's question: the firmware
     unit test `make test:polykybd_prc_codec` decodes the host's golden vectors
     and compares all 360 bytes. The payloads here are copied from those vectors,
