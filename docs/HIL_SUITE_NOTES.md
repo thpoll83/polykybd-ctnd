@@ -85,6 +85,15 @@ and relative links were adjusted to suit a standalone file.
     `test_prc_malformed_record_is_refused` (`needs_console`) reads the firmware's
     `Warning: malformed PRC record at byte N` line (a `uprintf`, not debug-gated)
     for each malformed record, and asserts a valid report produces no PRC warning.
+    ⚠️ **It fails intermittently on a correct firmware, and the cause is in the
+    test.** The console runs one warning behind: the `refused (…)` line matched for
+    each malformed record can be the previous record's, so the last record's own
+    warning arrives after `TAP.mark()` for the valid report and counts against it.
+    Seen 2 of 8 runs on 2026-10-30 (qmk#407's head `0f3d693b` and its merge commit
+    `8bcb843c`), while the same image passed the other runs. The fix is to wait until
+    no PRC warning has arrived for a settle window before marking for the valid
+    report, and to require each malformed record's line to arrive after its own
+    write.
     Whether the decoded PIXELS are right is not the rig's question: the firmware
     unit test `make test:polykybd_prc_codec` decodes the host's golden vectors
     and compares all 360 bytes. The payloads here are copied from those vectors,
