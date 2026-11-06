@@ -1080,6 +1080,52 @@ def test_glyph_script_expansion(raw: RawHID, log: Callable[[str], None]) -> bool
     return _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK)
 
 
+def test_glyph_script_placement(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """Protocol v26 glyph-script placement (cmd 30's second byte).
+
+    data[3] is an OP: 0 keeps the stored placement, 1 centres, 2 puts the glyph
+    top-left; the reply adds the placement (0 centre, 1 top-left) in data[4]. This
+    pins the three things a v25 board gets wrong or a careless change would break:
+    script 0xFF with an op changes the placement only; a plain script set (op 0,
+    the zero pad every older host sends) keeps the placement; an op of 3 is NACKed
+    and changes nothing. Restores the original script and placement.
+    """
+    def read():
+        r = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
+        if not _resp_ok(r, CMD_GLYPH_SCRIPT, log, expect_status=ACK) or len(r) < 5:
+            log("  FAIL: could not read the glyph script and placement")
+            return None
+        return r[3], r[4]
+
+    start = read()
+    if start is None:
+        return False
+    script0, place0 = start
+    log(f"glyph script {script0}, placement {place0}")
+
+    steps = (
+        # (request bytes, expect ACK?, expected (script, placement) afterwards, what)
+        ((0xFF, 2), True,  (script0, 1), "script 0xFF + op 2 -> top-left, script kept"),
+        ((6, 0),    True,  (6, 1),       "script 6 + op 0 -> placement kept"),
+        ((0xFF, 3), False, (6, 1),       "op 3 -> NACK, nothing changed"),
+        ((0xFF, 1), True,  (6, 0),       "script 0xFF + op 1 -> centre"),
+    )
+    for req, want_ack, want, what in steps:
+        r = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, *req]))
+        log(f"{what}: {r!r}")
+        if not _resp_ok(r, CMD_GLYPH_SCRIPT, log, expect_status=ACK if want_ack else NACK):
+            return False
+        got = read()
+        if got != want:
+            log(f"  FAIL: read back {got}, expected {want}")
+            return False
+
+    restore = raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, script0, place0 + 1]))
+    if not _resp_ok(restore, CMD_GLYPH_SCRIPT, log, expect_status=ACK):
+        return False
+    return read() == (script0, place0)
+
+
 def _look_request(macro_id: int, text=None, style: int = MACRO_STYLE_INDEX,
                   icon: int = 0) -> bytes:
     """Build a MACRO_LOOK report -- a query when `text` is None, else a set.
@@ -3936,6 +3982,7 @@ TESTS = [
     {"name": "OS round-trip (v7)",              "fn": test_os_round_trip, "min_protocol": 7},
     {"name": "glyph script round-trip (v9)",    "fn": test_glyph_script_round_trip, "min_protocol": 9},
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
+    {"name": "glyph script placement (v26)",    "fn": test_glyph_script_placement,  "min_protocol": 26},
     {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},

@@ -1392,5 +1392,39 @@ class BootLoopTest(unittest.TestCase):
                         fns.index(hil_tests.test_boot_loop))
 
 
+
+class GlyphScriptPlacementTest(unittest.TestCase):
+    """test_glyph_script_placement against a v26 board and a v25 one."""
+
+    class _Raw:
+        def __init__(self, v26=True):
+            self.v26, self.script, self.place = v26, 7, 0
+
+        def send(self, data, **_):
+            cmd, arg = data[1], data[2]
+            op = data[3] if len(data) > 3 else 0
+            if self.v26 and op > 2:
+                return bytes([hil_tests.POLY_CHANNEL, cmd, hil_tests.NACK]) + bytes(61)
+            if arg != 0xFF:
+                self.script = arg
+            if self.v26 and op:
+                self.place = op - 1
+            body = bytes([self.script, self.place]) if self.v26 else bytes([self.script])
+            return (bytes([hil_tests.POLY_CHANNEL, cmd, hil_tests.ACK]) + body).ljust(64, b"\x00")
+
+    def test_a_v26_board_passes_and_is_restored(self):
+        raw = self._Raw()
+        self.assertTrue(hil_tests.test_glyph_script_placement(raw, lambda _m: None))
+        self.assertEqual((raw.script, raw.place), (7, 0))
+
+    def test_a_v25_board_fails(self):
+        # A v25 reply carries no placement byte at data[4] that ever changes.
+        self.assertFalse(hil_tests.test_glyph_script_placement(self._Raw(v26=False), lambda _m: None))
+
+    def test_entry_is_gated_on_v26(self):
+        entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_glyph_script_placement)
+        self.assertEqual(entry["min_protocol"], 26)
+
+
 if __name__ == "__main__":
     unittest.main()
