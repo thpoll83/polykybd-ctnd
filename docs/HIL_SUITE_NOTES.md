@@ -47,6 +47,13 @@ and relative links were adjusted to suit a standalone file.
     Same pack-agnostic, mutate+restore shape; a pre-v10 board SKIPs it. `GLYPH_SCRIPT_MAX`
     (=11) tracks the highest *known* `poly_glyph_script`; higher indices are valid on the
     wire and just render the normal legend.
+  - The **`glyph script placement (v26)`** test (`test_glyph_script_placement`,
+    `min_protocol: 26`) covers cmd 30's second byte, the placement OP: `0` keep, `1`
+    centre, `2` top-left, with the placement read back from `data[4]`. It checks that
+    script `0xFF` with an op changes only the placement, that a plain script set (op
+    `0`, the zero pad of every older host) keeps the placement, and that op `3` is
+    NACKed with nothing changed. Unlike the script index, the placement is a CLOSED
+    range. Restores the original script and placement.
   - The **`glyph size round-trip (v13)`** test (`test_glyph_size_round_trip`,
     `min_protocol: 13`) covers HID cmd 34 (`GLYPH_SIZE`) — the keycap legend size, 0
     small / 1 medium / 2 large. It round-trips all three and restores the original,
