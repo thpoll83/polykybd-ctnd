@@ -165,8 +165,9 @@ unattended rig now has a test. Covered:
   `brightness_save_if_pending()` flush (the RP2040 wear-levelling consolidation window), then
   confirm the slave is still responsive. The valid-set + immediate-liveness half is already in
   `test_set_brightness`; this adds the timed wait that targets the slave-unresponsive regression.
-- [ ] **more state through the reboot** — `reboot_persistence` carries exactly one value (the
-  idle style). Language, glyph script and the default layer ride different EEPROM blocks and
+- [ ] **more state through the reboot** — `reboot_persistence` carries the idle style and, on
+  v26+ firmware, the glyph-script placement (`poly_eeconf_t.glyph_place`, the newest tail
+  byte). Language, glyph script and the default layer ride different EEPROM blocks and
   different flush paths; each is a small extension of the same runner-level test, and the
   brightness one needs a read-back command that does not exist yet.
 - [ ] **promote the animation/idle latency to an assertion — THERE IS NOW A BASELINE, and
