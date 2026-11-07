@@ -17,6 +17,7 @@ cleared by the *write*, not by the reply reaching the host — so these tests fa
 if the ``attempts=1`` pin is ever removed.
 """
 import sys
+import threading
 import types
 import unittest
 
@@ -320,6 +321,86 @@ class PrcRecordTest(unittest.TestCase):
                      "Warning: PRC overlay for keycode 0x13 (idx 19) did not reach the slave."]:
             self.assertTrue(hil_tests.PRC_WARNING_RE.search(line), line)
         self.assertIsNone(hil_tests.PRC_WARNING_RE.search("Received overlay for keycode 0x4"))
+
+    class _LateConsoleRaw:
+        """A keyboard whose PRC warning reaches the console ``delay`` s after the
+        report, as on the rig. It warns only for a refused (malformed) report."""
+
+        def __init__(self, delay):
+            self.delay, self.timers = delay, []
+
+        def _late_warning(self, delay):
+            from station.console_log import TAP
+            t = threading.Timer(delay, TAP.feed,
+                                args=("Warning: malformed PRC record at byte 0; "
+                                      "rest of the report dropped.\n",))
+            t.start()
+            self.timers.append(t)
+
+        def write_reports(self, reports):
+            for r in reports:
+                _recs, refused = prc_parse_records(r[2:].ljust(hil_tests.PRC_REPORT_BYTES, b"\0"))
+                if refused is not None:
+                    self._late_warning(self.delay)
+
+        def send(self, data, *a, **k):
+            return b"P\x06.Split72 1.10.2 P27 HW1 \x00".ljust(64, b"\x00")
+
+    def test_late_warnings_from_the_test_before_are_not_counted(self):
+        """The liveness test sends the same three malformed reports without waiting,
+        so their warnings arrive during this test (rig, 2026-11-06/07)."""
+        saved = hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S
+        hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S = 0.3, 0.5
+        raw = self._LateConsoleRaw(delay=0.15)
+        try:
+            for stale in (0.05, 0.10, 0.15):        # the previous test's three warnings
+                raw._late_warning(stale)
+            log = []
+            ok = hil_tests.test_prc_malformed_record_is_refused(raw, log.append)
+        finally:
+            for t in raw.timers:
+                t.join()
+            hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S = saved
+        self.assertTrue(ok, "\n".join(log))
+
+    def test_stale_warnings_do_not_stand_in_for_a_missing_refusal(self):
+        """A firmware that refuses nothing must fail even while the previous test's
+        three warnings are still arriving: each refusal must see its OWN line."""
+        saved = hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S
+        hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S = 0.3, 0.5
+        raw = self._LateConsoleRaw(delay=0.15)
+        raw.write_reports = lambda reports: None       # never warns
+        try:
+            # One stale line per refusal, each after the 0.1 s poll of the one before.
+            for stale in (0.15, 0.35, 0.55):
+                raw._late_warning(stale)
+            ok = hil_tests.test_prc_malformed_record_is_refused(raw, lambda *_a: None)
+        finally:
+            for t in raw.timers:
+                t.join()
+            hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S = saved
+        self.assertFalse(ok)
+
+    def test_a_valid_report_that_warns_still_fails(self):
+        saved = hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S
+        hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S = 0.2, 0.5
+        raw = self._LateConsoleRaw(delay=0.05)
+        orig = raw.write_reports
+
+        def warns_on_everything(reports):
+            orig(reports)
+            for r in reports:
+                _recs, refused = prc_parse_records(r[2:].ljust(hil_tests.PRC_REPORT_BYTES, b"\0"))
+                if refused is None:
+                    raw._late_warning(0.05)
+        raw.write_reports = warns_on_everything
+        try:
+            ok = hil_tests.test_prc_malformed_record_is_refused(raw, lambda *_a: None)
+        finally:
+            for t in raw.timers:
+                t.join()
+            hil_tests.PRC_QUIET_S, hil_tests.PRC_SETTLE_S = saved
+        self.assertFalse(ok)
 
     def test_both_tests_are_registered_and_gated_on_v19(self):
         by_name = {t["fn"].__name__: t for t in hil_tests.TESTS}
