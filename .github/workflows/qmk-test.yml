@@ -20,7 +20,7 @@ jobs:
       split72_hil: ${{ steps.names.outputs.split72_hil }}
       split42: ${{ steps.names.outputs.split42 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -49,7 +49,7 @@ jobs:
           echo "split72_hil=$(ls polykybd_split72_hil*.uf2 2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
           echo "split42=$(ls polykybd_split42_default*.uf2 2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: firmware
           path: "*.uf2"
@@ -81,7 +81,7 @@ jobs:
           fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: firmware
           path: ${{ steps.ctnd.outputs.dir }}/firmware
