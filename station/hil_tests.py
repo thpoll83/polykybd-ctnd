@@ -2315,6 +2315,10 @@ PRC_MALFORMED_LINE = "malformed PRC record"   # fill_overlay.c, uprintf (not deb
 # keycode, and a bridge give-up ("PRC overlay for keycode … did not reach the slave").
 PRC_WARNING_RE = re.compile(r"malformed PRC record|PRC overlay for")
 PRC_SETTLE_S = 3.0
+# How long the console must show no PRC warning before the console test counts
+# its own. The liveness test before it sends the same three malformed reports and
+# does not wait for their warnings, so they can arrive after this test starts.
+PRC_QUIET_S = 1.0
 
 # Real PRC payloads from the host's golden vectors (tests/util/prc_codec_vectors.json,
 # table v1): what the host encoder produced for these shapes. The firmware decodes
@@ -2407,6 +2411,25 @@ def test_prc_overlay_keeps_master_alive(raw: RawHID, log: Callable[[str], None])
     return True
 
 
+def _wait_prc_console_quiet(quiet_s: float, timeout: float) -> bool:
+    """Wait until no PRC warning has reached the console for ``quiet_s``.
+
+    False if warnings keep arriving for the whole ``timeout``."""
+    mark = TAP.mark()
+    deadline = time.monotonic() + timeout
+    seen, changed = 0, time.monotonic()
+    while True:
+        n = len(TAP.find_all(PRC_WARNING_RE, mark))
+        now = time.monotonic()
+        if n != seen:
+            seen, changed = n, now
+        elif now - changed >= quiet_s:
+            return True
+        if now >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def test_prc_malformed_record_is_refused(raw: RawHID, log: Callable[[str], None]) -> bool:
     """The firmware REFUSES a malformed PRC record, and says so on the console.
 
@@ -2416,7 +2439,16 @@ def test_prc_malformed_record_is_refused(raw: RawHID, log: Callable[[str], None]
     stops at a record it cannot parse, so the console can. The inverse is checked
     too: a valid report must produce no such line, or the parser would be refusing
     good records and every PRC keycap would stay blank. ``needs_console``.
+
+    ⚠️ **Wait for a quiet console first.** The liveness test before this one sends
+    the same three malformed reports and does not wait for their warnings. Those
+    arrive late, so without the wait each refusal below matched the PREVIOUS
+    report's warning, and this test's own third warning then arrived after the
+    valid report and was blamed on it (2 of 4 rig runs, 2026-11-06/07).
     """
+    if not _wait_prc_console_quiet(PRC_QUIET_S, timeout=4 * PRC_QUIET_S + PRC_SETTLE_S):
+        log("  FAIL: PRC warnings kept arriving before any report was sent")
+        return False
     for label, report in _prc_malformed_reports():
         mark = TAP.mark()
         raw.write_reports([report])
