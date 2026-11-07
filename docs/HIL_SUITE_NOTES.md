@@ -207,6 +207,8 @@ and relative links were adjusted to suit a standalone file.
   is runner-level (it needs `FlashController.reset()` — which the rig had all along
   and no test had ever used). It sets the idle style, flushes with **cmd 26**
   (`save_all_dirty`), power-cycles the master over the RUN pin and reads it back.
+  On v26+ firmware it also flips the glyph-script placement (cmd 30's op byte) in
+  the same cycle and reads it back from the reply's `data[4]`, then restores both.
   Everything else in the suite asserts RAM state, so a value that is applied
   correctly and never actually persisted passes every other test — which is the
   shape of most of the firmware's EEPROM field bugs (brightness coming up 0, the

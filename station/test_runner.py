@@ -28,6 +28,8 @@ CMD_DISPLAY_OFF  = 0x18
 CMD_IDLE_STYLE   = 0x1C  # 28: get (0xFF) / set the idle anti-burn-in style (v4+)
 CMD_SAVE_EEPROM  = 0x1A  # 26: flush every dirty user-state block to EEPROM
 IDLE_STYLE_MIN_PROTOCOL = 4   # FEATURE_MIN_PROTOCOL entry for cmd 28
+CMD_GLYPH_SCRIPT = 0x1E  # 30: glyph script; v26 adds the placement op byte
+GLYPH_PLACEMENT_MIN_PROTOCOL = 26
 ACK              = ord(".")
 
 # VIA-style "reset dynamic keymap" report. Unlike the 'P'-channel commands above,
@@ -896,12 +898,26 @@ class TestRunner:
             return {"name": "reboot persistence (EEPROM survives a power cycle)",
                     "status": "fail", "error": "idle style unreadable"}
         target = 1 if original != 1 else 0
-        self.log(f"[runner] reboot persistence: idle style {original} -> {target}, "
-                 "flushing to EEPROM, then power-cycling the master")
+        # v26: the glyph-script placement rides the same power cycle. It is the newest
+        # poly_eeconf_t tail byte, so it is the one a layout slip would lose first.
+        place0 = None
+        if proto is not None and proto >= GLYPH_PLACEMENT_MIN_PROTOCOL:
+            place0 = self._glyph_placement()
+            if place0 is None:
+                self.log("[test] FAIL: reboot persistence: could not read the glyph-script "
+                         "placement before the reboot")
+                return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                        "status": "fail", "error": "glyph-script placement unreadable"}
+        place_target = None if place0 is None else (1 if place0 != 1 else 0)
+        self.log(f"[runner] reboot persistence: idle style {original} -> {target}"
+                 + ("" if place0 is None else f", placement {place0} -> {place_target}")
+                 + ", flushing to EEPROM, then power-cycling the master")
 
         try:
             if not self._set_idle_style(target):
                 raise RuntimeError(f"the keyboard refused idle style {target}")
+            if place_target is not None and not self._set_glyph_placement(place_target):
+                raise RuntimeError(f"the keyboard refused glyph-script placement {place_target}")
             if not self._save_eeprom():
                 raise RuntimeError("cmd 26 (save_all_dirty) was not ACKed")
 
@@ -920,8 +936,16 @@ class TestRunner:
                     "or the boot-time load lost it (a poly_eeconf_t layout/version "
                     "change resets user state; QMK's wear levelling reads a cleared "
                     "byte back as 0x00, not 0xFF)")
-            self.log(f"[test] PASS: reboot persistence — idle style {target} survived "
-                     "the power cycle")
+            if place_target is not None:
+                place_after = self._glyph_placement()
+                if place_after != place_target:
+                    raise RuntimeError(
+                        f"glyph-script placement read back as {place_after}, expected "
+                        f"{place_target} — poly_eeconf_t.glyph_place did not survive the "
+                        "power cycle")
+            self.log(f"[test] PASS: reboot persistence — idle style {target}"
+                     + ("" if place_target is None else f" and placement {place_target}")
+                     + " survived the power cycle")
             return {"name": "reboot persistence (EEPROM survives a power cycle)",
                     "status": "pass"}
         except Exception as exc:
@@ -934,6 +958,11 @@ class TestRunner:
             if self._idle_style() != original:
                 restored = self._set_idle_style(original) and self._save_eeprom()
                 self.log(f"[runner] restore idle style {original}: "
+                         + ("ok" if restored else "FAILED — the rig keeps the test "
+                            "value until someone sets it back"))
+            if place0 is not None and self._glyph_placement() != place0:
+                restored = self._set_glyph_placement(place0) and self._save_eeprom()
+                self.log(f"[runner] restore glyph-script placement {place0}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
                             "value until someone sets it back"))
 
@@ -1143,6 +1172,24 @@ class TestRunner:
         resp = self._raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STYLE, style]))
         return bool(resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL
                     and resp[1] == CMD_IDLE_STYLE and resp[2] == ACK)
+
+    def _glyph_placement(self):
+        """Glyph-script placement (cmd 30 v26 reply data[4]: 0 centre, 1 top-left), or None."""
+        try:
+            resp = self._raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF]))
+        except Exception as exc:
+            self.log(f"[runner] glyph-script placement read error: {exc}")
+            return None
+        if (resp and len(resp) >= 5 and resp[0] == POLY_CHANNEL
+                and resp[1] == CMD_GLYPH_SCRIPT and resp[2] == ACK):
+            return resp[4]
+        return None
+
+    def _set_glyph_placement(self, place: int) -> bool:
+        """Script 0xFF keeps the script; the op is placement + 1 (0 would mean keep)."""
+        resp = self._raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF, place + 1]))
+        return bool(resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL
+                    and resp[1] == CMD_GLYPH_SCRIPT and resp[2] == ACK)
 
     def _save_eeprom(self) -> bool:
         """cmd 26 — flush every dirty user-state block to EEPROM now.
