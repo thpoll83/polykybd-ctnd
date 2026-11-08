@@ -4,6 +4,7 @@ import sys
 import time
 from typing import Callable
 
+from . import tap_terms
 from .console_log import TAP, console_sink
 from .flash import FlashController
 from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
@@ -909,8 +910,22 @@ class TestRunner:
                 return {"name": "reboot persistence (EEPROM survives a power cycle)",
                         "status": "fail", "error": "glyph-script placement unreadable"}
         place_target = None if place0 is None else (1 if place0 != 1 else 0)
+        # v28: the tap-hold terms (cmd 44) are the two bytes after glyph_place.
+        # Both are CHANGED, because an unchanged value writes no EEPROM.
+        terms0 = None
+        terms_target = None
+        if proto is not None and proto >= tap_terms.TAP_TERMS_MIN_PROTOCOL:
+            terms0 = self._tap_terms()
+            if terms0 is None:
+                self.log("[test] FAIL: reboot persistence: could not read the tap terms "
+                         "before the reboot")
+                return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                        "status": "fail", "error": "tap terms unreadable"}
+            terms_target = (tap_terms.other_value(terms0[0], 300, 250),
+                            tap_terms.other_value(terms0[1], 90, 60))
         self.log(f"[runner] reboot persistence: idle style {original} -> {target}"
                  + ("" if place0 is None else f", placement {place0} -> {place_target}")
+                 + ("" if terms0 is None else f", tap terms {terms0} -> {terms_target}")
                  + ", flushing to EEPROM, then power-cycling the master")
 
         try:
@@ -918,6 +933,8 @@ class TestRunner:
                 raise RuntimeError(f"the keyboard refused idle style {target}")
             if place_target is not None and not self._set_glyph_placement(place_target):
                 raise RuntimeError(f"the keyboard refused glyph-script placement {place_target}")
+            if terms_target is not None and not self._set_tap_terms(*terms_target):
+                raise RuntimeError(f"the keyboard refused tap terms {terms_target}")
             if not self._save_eeprom():
                 raise RuntimeError("cmd 26 (save_all_dirty) was not ACKed")
 
@@ -943,8 +960,16 @@ class TestRunner:
                         f"glyph-script placement read back as {place_after}, expected "
                         f"{place_target} — poly_eeconf_t.glyph_place did not survive the "
                         "power cycle")
+            if terms_target is not None:
+                terms_after = self._tap_terms()
+                if terms_after != terms_target:
+                    raise RuntimeError(
+                        f"tap terms read back as {terms_after}, expected {terms_target} "
+                        "— poly_eeconf_t.tapping_term / flow_tap_term did not survive "
+                        "the power cycle")
             self.log(f"[test] PASS: reboot persistence — idle style {target}"
                      + ("" if place_target is None else f" and placement {place_target}")
+                     + ("" if terms_target is None else f" and tap terms {terms_target}")
                      + " survived the power cycle")
             return {"name": "reboot persistence (EEPROM survives a power cycle)",
                     "status": "pass"}
@@ -963,6 +988,11 @@ class TestRunner:
             if place0 is not None and self._glyph_placement() != place0:
                 restored = self._set_glyph_placement(place0) and self._save_eeprom()
                 self.log(f"[runner] restore glyph-script placement {place0}: "
+                         + ("ok" if restored else "FAILED — the rig keeps the test "
+                            "value until someone sets it back"))
+            if terms0 is not None and self._tap_terms() != terms0:
+                restored = self._set_tap_terms(*terms0) and self._save_eeprom()
+                self.log(f"[runner] restore tap terms {terms0}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
                             "value until someone sets it back"))
 
@@ -1190,6 +1220,21 @@ class TestRunner:
         resp = self._raw.send(bytes([POLY_CHANNEL, CMD_GLYPH_SCRIPT, 0xFF, place + 1]))
         return bool(resp and len(resp) >= 3 and resp[0] == POLY_CHANNEL
                     and resp[1] == CMD_GLYPH_SCRIPT and resp[2] == ACK)
+
+    def _tap_terms(self):
+        """(tapping ms, flow tap ms) from cmd 44 (v28+), or None."""
+        try:
+            got = tap_terms.parse_reply(self._raw.send(tap_terms.query_request()))
+        except Exception as exc:
+            self.log(f"[runner] tap terms read error: {exc}")
+            return None
+        if got is None or got[0] != ACK:
+            return None
+        return got[1], got[2]
+
+    def _set_tap_terms(self, tapping_ms: int, flow_tap_ms: int) -> bool:
+        got = tap_terms.parse_reply(self._raw.send(tap_terms.set_request(tapping_ms, flow_tap_ms)))
+        return bool(got and got[0] == ACK)
 
     def _save_eeprom(self) -> bool:
         """cmd 26 — flush every dirty user-state block to EEPROM now.
