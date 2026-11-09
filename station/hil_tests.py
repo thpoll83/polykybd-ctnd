@@ -1449,7 +1449,7 @@ def _macro_write(raw: RawHID, log: Callable[[str], None], offset: int,
 
 
 def test_tap_terms_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """TAP_TERMS (cmd 44, protocol v28+): set/read-back of the tapping term and the
+    """TAP_TERMS (cmd 44, protocol v29+): set/read-back of the tapping term and the
     Flow Tap term, the range boundaries, and the NACKs of the CLOSED ranges.
 
     The values reach QMK through get_tapping_term() / get_flow_tap_term(); the rig
@@ -4088,7 +4088,7 @@ TESTS = [
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "glyph script placement (v26)",    "fn": test_glyph_script_placement,  "min_protocol": 26},
     {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
-    {"name": "tap terms round-trip + range NACKs (v28 cmd 44)", "fn": test_tap_terms_round_trip,
+    {"name": "tap terms round-trip + range NACKs (v29 cmd 44)", "fn": test_tap_terms_round_trip,
      "min_protocol": tap_terms.TAP_TERMS_MIN_PROTOCOL},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},

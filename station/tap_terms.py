@@ -1,4 +1,4 @@
-"""Cmd 44 (protocol v28+): the tap-hold terms. Request packing and reply parsing,
+"""Cmd 44 (protocol v29+): the tap-hold terms. Request packing and reply parsing,
 shared by the HIL test and the reboot-persistence check, and unit-tested offline.
 
 Mirrors qmk_firmware keyboards/polykybd/base/tap_terms.h and hid_cmd_44:
@@ -9,7 +9,7 @@ Mirrors qmk_firmware keyboards/polykybd/base/tap_terms.h and hid_cmd_44:
 """
 
 CMD_TAP_TERMS = 44
-TAP_TERMS_MIN_PROTOCOL = 28
+TAP_TERMS_MIN_PROTOCOL = 29
 
 POLY_CHANNEL = ord("P")
 KEEP = 0xFFFF

@@ -80,7 +80,7 @@ class RoundTripTest(unittest.TestCase):
 
     def test_registered_with_the_protocol_gate(self):
         entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_tap_terms_round_trip)
-        self.assertEqual(entry["min_protocol"], 28)
+        self.assertEqual(entry["min_protocol"], 29)
 
 
 if __name__ == "__main__":

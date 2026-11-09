@@ -910,7 +910,7 @@ class TestRunner:
                 return {"name": "reboot persistence (EEPROM survives a power cycle)",
                         "status": "fail", "error": "glyph-script placement unreadable"}
         place_target = None if place0 is None else (1 if place0 != 1 else 0)
-        # v28: the tap-hold terms (cmd 44) are the two bytes after glyph_place.
+        # v29: the tap-hold terms (cmd 44) are the two bytes after glyph_place.
         # Both are CHANGED, because an unchanged value writes no EEPROM.
         terms0 = None
         terms_target = None
@@ -1222,7 +1222,7 @@ class TestRunner:
                     and resp[1] == CMD_GLYPH_SCRIPT and resp[2] == ACK)
 
     def _tap_terms(self):
-        """(tapping ms, flow tap ms) from cmd 44 (v28+), or None."""
+        """(tapping ms, flow tap ms) from cmd 44 (v29+), or None."""
         try:
             got = tap_terms.parse_reply(self._raw.send(tap_terms.query_request()))
         except Exception as exc:

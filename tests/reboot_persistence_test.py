@@ -55,7 +55,7 @@ class _Board:
             body = bytes([self.ram["script"], self.ram["place"]]) if self.protocol >= 26 \
                 else bytes([self.ram["script"]])
             return (ok + body).ljust(64, b"\0")
-        if cmd == tap_terms.CMD_TAP_TERMS and self.protocol >= 28:
+        if cmd == tap_terms.CMD_TAP_TERMS and self.protocol >= 29:
             if arg == 1:
                 tap, flow = data[3] | (data[4] << 8), data[5] | (data[6] << 8)
                 if tap != tap_terms.KEEP:
@@ -108,8 +108,8 @@ class RebootPersistenceTest(unittest.TestCase):
         self.assertEqual(self._run(board)["status"], "pass")
         self.assertFalse(any(p[1] == tr.CMD_GLYPH_SCRIPT for p in board.sent))
 
-    def test_v28_carries_the_tap_terms_and_restores_them(self):
-        board = _Board(protocol=28)
+    def test_v29_carries_the_tap_terms_and_restores_them(self):
+        board = _Board(protocol=29)
         result = self._run(board)
         self.assertEqual(result["status"], "pass", result)
         self.assertIn(tap_terms.set_request(300, 90), board.sent)
@@ -117,12 +117,12 @@ class RebootPersistenceTest(unittest.TestCase):
         self.assertEqual((board.eeprom["tap"], board.eeprom["flow"]), (200, 150))
 
     def test_a_board_that_loses_the_tap_terms_fails(self):
-        result = self._run(_Board(protocol=28, keeps_tap_terms=False))
+        result = self._run(_Board(protocol=29, keeps_tap_terms=False))
         self.assertEqual(result["status"], "fail")
         self.assertIn("tap terms", result["error"])
 
-    def test_v27_never_sends_cmd_44(self):
-        board = _Board(protocol=27)
+    def test_v28_never_sends_cmd_44(self):
+        board = _Board(protocol=28)
         self.assertEqual(self._run(board)["status"], "pass")
         self.assertFalse(any(p[1] == tap_terms.CMD_TAP_TERMS for p in board.sent))
 
