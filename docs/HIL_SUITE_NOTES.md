@@ -66,6 +66,14 @@ and relative links were adjusted to suit a standalone file.
     setting that silently does nothing. The pair is what pins that asymmetry as
     deliberate, so neither should be "made consistent" with the other. It also re-reads
     the size after the refusal: a NACK that still moved the state would otherwise pass.
+  - The **`tap terms round-trip + range NACKs (v29 cmd 44)`** test
+    (`test_tap_terms_round_trip`, `min_protocol: 29`) sets both range ends of the
+    tapping term (100..500 ms) and the Flow Tap term (0..300 ms), each term alone
+    with the other kept (`0xFFFF`), then four out-of-range or off-grid values and one
+    report with one bad field. Each NACK must leave both terms unchanged, because the
+    firmware validates both fields before applying either. Packer and parser:
+    `station/tap_terms.py`. The rig cannot press keys, so this checks the setting,
+    not the tap-hold behaviour. Restores the original terms.
   - The **`layer names (v14)`** test (`test_layer_names`, `min_protocol: 14`) reads
     HID cmd 35 — the names the host layout editor puts on its layer tabs. ⚠️ **Its
     cross-check against `id_dynamic_keymap_get_layer_count` is the POINT of the test,
@@ -209,6 +217,8 @@ and relative links were adjusted to suit a standalone file.
   (`save_all_dirty`), power-cycles the master over the RUN pin and reads it back.
   On v26+ firmware it also flips the glyph-script placement (cmd 30's op byte) in
   the same cycle and reads it back from the reply's `data[4]`, then restores both.
+  On v29+ it also changes both tap-hold terms (cmd 44: tapping 300 or 250 ms, Flow
+  Tap 90 or 60 ms, whichever differs from the current value) and reads them back.
   Everything else in the suite asserts RAM state, so a value that is applied
   correctly and never actually persisted passes every other test — which is the
   shape of most of the firmware's EEPROM field bugs (brightness coming up 0, the

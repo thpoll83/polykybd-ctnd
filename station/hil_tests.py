@@ -67,6 +67,7 @@ from .console_log import TAP, classify_link_health, link_delta
 from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
 from . import bulk_pipe
+from . import tap_terms
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -1445,6 +1446,77 @@ def _macro_write(raw: RawHID, log: Callable[[str], None], offset: int,
             log(f"  FAIL: macro body write failed at offset {off}")
             return False
     return True
+
+
+def test_tap_terms_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """TAP_TERMS (cmd 44, protocol v29+): set/read-back of the tapping term and the
+    Flow Tap term, the range boundaries, and the NACKs of the CLOSED ranges.
+
+    The values reach QMK through get_tapping_term() / get_flow_tap_term(); the rig
+    cannot press a key, so this checks the setting, not the tap-hold behaviour. The
+    write is deferred to the EEPROM flush, so the live state is what reads back;
+    reboot_persistence (test_runner.py) covers the EEPROM.
+
+    The NACK cases are the point: an accepted out-of-range value would be stored
+    and used for every tap-hold key. A report with one bad field must change
+    NEITHER term, because the firmware validates both before applying either.
+    Restores the original terms.
+    """
+    first = tap_terms.parse_reply(raw.send(tap_terms.query_request()))
+    log(f"tap-terms query -> {first}")
+    if first is None or first[0] != ACK:
+        log("  FAIL: no valid cmd 44 query reply")
+        return False
+    _, tap0, flow0, has_flow = first
+    log(f"  current tapping {tap0} ms, flow tap {flow0} ms, flow tap compiled in: {has_flow}")
+
+    def set_and_check(tap, flow, expect_ack, want, what):
+        got = tap_terms.parse_reply(raw.send(tap_terms.set_request(tap, flow)))
+        log(f"  set {tap}/{flow} ({what}) -> {got}")
+        if got is None:
+            log("  FAIL: no valid cmd 44 set reply")
+            return False
+        if (got[0] == ACK) != expect_ack:
+            log(f"  FAIL: expected {'ACK' if expect_ack else 'NACK'}")
+            return False
+        if (got[1], got[2]) != want:
+            log(f"  FAIL: terms now {got[1]}/{got[2]}, expected {want[0]}/{want[1]}")
+            return False
+        back = tap_terms.parse_reply(raw.send(tap_terms.query_request()))
+        if back is None or back[0] != ACK or (back[1], back[2]) != want:
+            log(f"  FAIL: read-back {back} != {want}")
+            return False
+        return True
+
+    K = tap_terms.KEEP
+    lo_t, hi_t = tap_terms.TAPPING_MIN_MS, tap_terms.TAPPING_MAX_MS
+    lo_f, hi_f = tap_terms.FLOW_TAP_MIN_MS, tap_terms.FLOW_TAP_MAX_MS
+    steps = [
+        (lo_t, lo_f, True, (lo_t, lo_f), "both minimums (flow tap off)"),
+        (hi_t, hi_f, True, (hi_t, hi_f), "both maximums"),
+        (250, K, True, (250, hi_f), "tapping only, flow tap kept"),
+        (K, 120, True, (250, 120), "flow tap only, tapping kept"),
+        (lo_t - 10, K, False, (250, 120), "tapping below the range"),
+        (hi_t + 10, K, False, (250, 120), "tapping above the range"),
+        (255, K, False, (250, 120), "tapping off the 10 ms grid"),
+        (K, hi_f + 10, False, (250, 120), "flow tap above the range"),
+        (300, hi_f + 10, False, (250, 120), "one bad field changes neither"),
+    ]
+    ok = True
+    try:
+        for tap, flow, expect_ack, want, what in steps:
+            if not set_and_check(tap, flow, expect_ack, want, what):
+                ok = False
+                break
+    finally:
+        restored = tap_terms.parse_reply(raw.send(tap_terms.set_request(tap0, flow0)))
+        log(f"  restore {tap0}/{flow0} -> {restored}")
+        if restored is None or restored[0] != ACK:
+            log("  FAIL: could not restore the original terms")
+            ok = False
+    if ok:
+        log("  tap terms round-tripped; out-of-range values NACKed and changed nothing")
+    return ok
 
 
 def test_glyph_size_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -4016,6 +4088,8 @@ TESTS = [
     {"name": "glyph script expansion (v10)",    "fn": test_glyph_script_expansion,  "min_protocol": 10},
     {"name": "glyph script placement (v26)",    "fn": test_glyph_script_placement,  "min_protocol": 26},
     {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
+    {"name": "tap terms round-trip + range NACKs (v29 cmd 44)", "fn": test_tap_terms_round_trip,
+     "min_protocol": tap_terms.TAP_TERMS_MIN_PROTOCOL},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},

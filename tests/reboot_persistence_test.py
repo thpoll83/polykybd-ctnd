@@ -25,13 +25,15 @@ if "RPi" not in sys.modules:  # pragma: no cover - environment shim
     sys.modules["RPi"], sys.modules["RPi.GPIO"] = _rpi, _gpio
 
 import station.test_runner as tr  # noqa: E402
+from station import tap_terms  # noqa: E402
 
 
 class _Board:
-    def __init__(self, protocol=26, keeps_placement=True):
+    def __init__(self, protocol=26, keeps_placement=True, keeps_tap_terms=True):
         self.protocol = protocol
         self.keeps_placement = keeps_placement
-        self.ram = {"idle": 0, "place": 0, "script": 7}
+        self.keeps_tap_terms = keeps_tap_terms
+        self.ram = {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150}
         self.eeprom = dict(self.ram)
         self.sent = []
 
@@ -53,12 +55,23 @@ class _Board:
             body = bytes([self.ram["script"], self.ram["place"]]) if self.protocol >= 26 \
                 else bytes([self.ram["script"]])
             return (ok + body).ljust(64, b"\0")
+        if cmd == tap_terms.CMD_TAP_TERMS and self.protocol >= 29:
+            if arg == 1:
+                tap, flow = data[3] | (data[4] << 8), data[5] | (data[6] << 8)
+                if tap != tap_terms.KEEP:
+                    self.ram["tap"] = tap
+                if flow != tap_terms.KEEP:
+                    self.ram["flow"] = flow
+            t, f = self.ram["tap"], self.ram["flow"]
+            return (ok + bytes([t & 0xFF, t >> 8, f & 0xFF, f >> 8, 1])).ljust(64, b"\0")
         raise AssertionError(f"unexpected cmd {cmd}")
 
     def reset(self, _side, _log):
         self.ram = dict(self.eeprom)
         if not self.keeps_placement:
             self.ram["place"] = 0
+        if not self.keeps_tap_terms:
+            self.ram["tap"], self.ram["flow"] = 200, 150
 
 
 class RebootPersistenceTest(unittest.TestCase):
@@ -81,7 +94,7 @@ class RebootPersistenceTest(unittest.TestCase):
         board = _Board()
         result = self._run(board)
         self.assertEqual(result["status"], "pass", result)
-        self.assertEqual(board.ram, {"idle": 0, "place": 0, "script": 7})
+        self.assertEqual(board.ram, {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150})
         self.assertEqual(board.eeprom["place"], 0)       # the restore was flushed too
         self.assertIn(bytes([tr.POLY_CHANNEL, tr.CMD_GLYPH_SCRIPT, 0xFF, 2]), board.sent)
 
@@ -94,6 +107,24 @@ class RebootPersistenceTest(unittest.TestCase):
         board = _Board(protocol=25)
         self.assertEqual(self._run(board)["status"], "pass")
         self.assertFalse(any(p[1] == tr.CMD_GLYPH_SCRIPT for p in board.sent))
+
+    def test_v29_carries_the_tap_terms_and_restores_them(self):
+        board = _Board(protocol=29)
+        result = self._run(board)
+        self.assertEqual(result["status"], "pass", result)
+        self.assertIn(tap_terms.set_request(300, 90), board.sent)
+        self.assertEqual((board.ram["tap"], board.ram["flow"]), (200, 150))
+        self.assertEqual((board.eeprom["tap"], board.eeprom["flow"]), (200, 150))
+
+    def test_a_board_that_loses_the_tap_terms_fails(self):
+        result = self._run(_Board(protocol=29, keeps_tap_terms=False))
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("tap terms", result["error"])
+
+    def test_v28_never_sends_cmd_44(self):
+        board = _Board(protocol=28)
+        self.assertEqual(self._run(board)["status"], "pass")
+        self.assertFalse(any(p[1] == tap_terms.CMD_TAP_TERMS for p in board.sent))
 
 
 if __name__ == "__main__":
