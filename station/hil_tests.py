@@ -1668,8 +1668,14 @@ def test_agent_card_reaches_the_slave(raw: RawHID, log: Callable[[str], None]) -
             "the console does not show the ai: lines")
         return False
     mark = TAP.mark()
-    ok = _agent_card_segments(raw, log, fill=0x33) and _agent_card_segments(raw, log, fill=0)
-    line = TAP.wait_for(AGENT_CARD_RELAY_FAIL, mark, timeout=2.0)
+    ok = False
+    try:
+        ok = _agent_card_segments(raw, log, fill=0x33)
+    finally:
+        if not _agent_card_segments(raw, log, fill=0):
+            log("  FAIL: could not write the slot back to zeros")
+            ok = False
+    line = TAP.wait_for(AGENT_CARD_RELAY_FAIL, mark, timeout=PRC_SETTLE_S)
     if line is not None:
         log(f"  FAIL: {line.strip()}")
         return False
