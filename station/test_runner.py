@@ -923,9 +923,22 @@ class TestRunner:
                         "status": "fail", "error": "tap terms unreadable"}
             terms_target = (tap_terms.other_value(terms0[0], 300, 250),
                             tap_terms.other_value(terms0[1], 90, 60))
+        # v30: Auto Shift is one byte after tail_fmt, with its own marker
+        # (tail2_fmt). Both the switch and the timeout are CHANGED.
+        as0 = None
+        as_target = None
+        if proto is not None and proto >= tap_terms.AUTO_SHIFT_MIN_PROTOCOL:
+            as0 = self._auto_shift()
+            if as0 is None:
+                self.log("[test] FAIL: reboot persistence: could not read Auto Shift "
+                         "before the reboot")
+                return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                        "status": "fail", "error": "auto shift unreadable"}
+            as_target = (not as0[0], tap_terms.other_value(as0[1], 300, 250))
         self.log(f"[runner] reboot persistence: idle style {original} -> {target}"
                  + ("" if place0 is None else f", placement {place0} -> {place_target}")
                  + ("" if terms0 is None else f", tap terms {terms0} -> {terms_target}")
+                 + ("" if as0 is None else f", auto shift {as0} -> {as_target}")
                  + ", flushing to EEPROM, then power-cycling the master")
 
         try:
@@ -935,6 +948,8 @@ class TestRunner:
                 raise RuntimeError(f"the keyboard refused glyph-script placement {place_target}")
             if terms_target is not None and not self._set_tap_terms(*terms_target):
                 raise RuntimeError(f"the keyboard refused tap terms {terms_target}")
+            if as_target is not None and not self._set_auto_shift(*as_target):
+                raise RuntimeError(f"the keyboard refused auto shift {as_target}")
             if not self._save_eeprom():
                 raise RuntimeError("cmd 26 (save_all_dirty) was not ACKed")
 
@@ -967,9 +982,16 @@ class TestRunner:
                         f"tap terms read back as {terms_after}, expected {terms_target} "
                         "— poly_eeconf_t.tapping_term / flow_tap_term did not survive "
                         "the power cycle")
+            if as_target is not None:
+                as_after = self._auto_shift()
+                if as_after != as_target:
+                    raise RuntimeError(
+                        f"auto shift read back as {as_after}, expected {as_target} "
+                        "— poly_eeconf_t.auto_shift did not survive the power cycle")
             self.log(f"[test] PASS: reboot persistence — idle style {target}"
                      + ("" if place_target is None else f" and placement {place_target}")
                      + ("" if terms_target is None else f" and tap terms {terms_target}")
+                     + ("" if as_target is None else f" and auto shift {as_target}")
                      + " survived the power cycle")
             return {"name": "reboot persistence (EEPROM survives a power cycle)",
                     "status": "pass"}
@@ -993,6 +1015,11 @@ class TestRunner:
             if terms0 is not None and self._tap_terms() != terms0:
                 restored = self._set_tap_terms(*terms0) and self._save_eeprom()
                 self.log(f"[runner] restore tap terms {terms0}: "
+                         + ("ok" if restored else "FAILED — the rig keeps the test "
+                            "value until someone sets it back"))
+            if as0 is not None and self._auto_shift() != as0:
+                restored = self._set_auto_shift(*as0) and self._save_eeprom()
+                self.log(f"[runner] restore auto shift {as0}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
                             "value until someone sets it back"))
 
@@ -1234,6 +1261,22 @@ class TestRunner:
 
     def _set_tap_terms(self, tapping_ms: int, flow_tap_ms: int) -> bool:
         got = tap_terms.parse_reply(self._raw.send(tap_terms.set_request(tapping_ms, flow_tap_ms)))
+        return bool(got and got[0] == ACK)
+
+    def _auto_shift(self):
+        """(on, timeout ms) from cmd 44 (v30+), or None."""
+        try:
+            got = tap_terms.parse_auto_shift(self._raw.send(tap_terms.query_request()))
+        except Exception as exc:
+            self.log(f"[runner] auto shift read error: {exc}")
+            return None
+        if got is None or got[0] != ACK:
+            return None
+        return got[2], got[3]
+
+    def _set_auto_shift(self, on: bool, ms: int) -> bool:
+        op = tap_terms.AS_ON if on else tap_terms.AS_OFF
+        got = tap_terms.parse_auto_shift(self._raw.send(tap_terms.auto_shift_request(op, ms)))
         return bool(got and got[0] == ACK)
 
     def _save_eeprom(self) -> bool:
