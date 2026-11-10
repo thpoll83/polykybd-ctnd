@@ -29,11 +29,14 @@ from station import tap_terms  # noqa: E402
 
 
 class _Board:
-    def __init__(self, protocol=26, keeps_placement=True, keeps_tap_terms=True):
+    def __init__(self, protocol=26, keeps_placement=True, keeps_tap_terms=True,
+                 keeps_auto_shift=True):
         self.protocol = protocol
         self.keeps_placement = keeps_placement
         self.keeps_tap_terms = keeps_tap_terms
-        self.ram = {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150}
+        self.keeps_auto_shift = keeps_auto_shift
+        self.ram = {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150,
+                    "as_on": False, "as_ms": 180}
         self.eeprom = dict(self.ram)
         self.sent = []
 
@@ -56,14 +59,25 @@ class _Board:
                 else bytes([self.ram["script"]])
             return (ok + body).ljust(64, b"\0")
         if cmd == tap_terms.CMD_TAP_TERMS and self.protocol >= 29:
+            d = bytes(data).ljust(64, b"\0")
             if arg == 1:
-                tap, flow = data[3] | (data[4] << 8), data[5] | (data[6] << 8)
+                tap, flow = d[3] | (d[4] << 8), d[5] | (d[6] << 8)
                 if tap != tap_terms.KEEP:
                     self.ram["tap"] = tap
                 if flow != tap_terms.KEEP:
                     self.ram["flow"] = flow
+                if self.protocol >= 30:
+                    as_op, as_ms = d[7], d[8] | (d[9] << 8)
+                    if as_ms not in (0, 0xFFFF):
+                        self.ram["as_ms"] = as_ms
+                    if as_op:
+                        self.ram["as_on"] = as_op == tap_terms.AS_ON
             t, f = self.ram["tap"], self.ram["flow"]
-            return (ok + bytes([t & 0xFF, t >> 8, f & 0xFF, f >> 8, 1])).ljust(64, b"\0")
+            flags, tail = 1, [0, 0]
+            if self.protocol >= 30:
+                flags |= tap_terms.FLAG_AUTO_SHIFT | (tap_terms.FLAG_AUTO_SHIFT_ON if self.ram["as_on"] else 0)
+                tail = [self.ram["as_ms"] & 0xFF, self.ram["as_ms"] >> 8]
+            return (ok + bytes([t & 0xFF, t >> 8, f & 0xFF, f >> 8, flags] + tail)).ljust(64, b"\0")
         raise AssertionError(f"unexpected cmd {cmd}")
 
     def reset(self, _side, _log):
@@ -72,6 +86,8 @@ class _Board:
             self.ram["place"] = 0
         if not self.keeps_tap_terms:
             self.ram["tap"], self.ram["flow"] = 200, 150
+        if not self.keeps_auto_shift:
+            self.ram["as_on"], self.ram["as_ms"] = False, 180
 
 
 class RebootPersistenceTest(unittest.TestCase):
@@ -94,7 +110,8 @@ class RebootPersistenceTest(unittest.TestCase):
         board = _Board()
         result = self._run(board)
         self.assertEqual(result["status"], "pass", result)
-        self.assertEqual(board.ram, {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150})
+        self.assertEqual(board.ram, {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150,
+                                     "as_on": False, "as_ms": 180})
         self.assertEqual(board.eeprom["place"], 0)       # the restore was flushed too
         self.assertIn(bytes([tr.POLY_CHANNEL, tr.CMD_GLYPH_SCRIPT, 0xFF, 2]), board.sent)
 
@@ -125,6 +142,24 @@ class RebootPersistenceTest(unittest.TestCase):
         board = _Board(protocol=28)
         self.assertEqual(self._run(board)["status"], "pass")
         self.assertFalse(any(p[1] == tap_terms.CMD_TAP_TERMS for p in board.sent))
+
+    def test_v30_carries_auto_shift_and_restores_it(self):
+        board = _Board(protocol=30)
+        result = self._run(board)
+        self.assertEqual(result["status"], "pass", result)
+        self.assertIn(tap_terms.auto_shift_request(tap_terms.AS_ON, 300), board.sent)
+        self.assertEqual((board.ram["as_on"], board.ram["as_ms"]), (False, 180))
+        self.assertEqual((board.eeprom["as_on"], board.eeprom["as_ms"]), (False, 180))
+
+    def test_a_board_that_loses_auto_shift_fails(self):
+        result = self._run(_Board(protocol=30, keeps_auto_shift=False))
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("auto shift", result["error"])
+
+    def test_v29_never_sends_the_auto_shift_fields(self):
+        board = _Board(protocol=29)
+        self.assertEqual(self._run(board)["status"], "pass")
+        self.assertFalse(any(p[1] == tap_terms.CMD_TAP_TERMS and len(p) > 7 for p in board.sent))
 
 
 if __name__ == "__main__":

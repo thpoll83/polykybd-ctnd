@@ -1533,7 +1533,7 @@ def test_auto_shift_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     first = tap_terms.parse_auto_shift(raw.send(tap_terms.query_request()))
     terms_first = tap_terms.parse_reply(raw.send(tap_terms.query_request()))
     log(f"auto-shift query -> {first}")
-    if first is None or first[0] != ACK or terms_first is None:
+    if first is None or first[0] != ACK or terms_first is None or terms_first[0] != ACK:
         log("  FAIL: no valid cmd 44 query reply")
         return False
     _, compiled, on0, ms0 = first
@@ -1546,13 +1546,16 @@ def test_auto_shift_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     def check(request, expect_ack, want_on, want_ms, want_tap, what):
         got = tap_terms.parse_auto_shift(raw.send(request))
         log(f"  {what} -> {got}")
-        if got is None or (got[0] == ACK) != expect_ack:
+        if got is None or got[0] != (ACK if expect_ack else NACK):
             log(f"  FAIL: expected {'ACK' if expect_ack else 'NACK'}")
             return False
+        return read_back(want_on, want_ms, want_tap)
+
+    def read_back(want_on, want_ms, want_tap):
         back = tap_terms.parse_auto_shift(raw.send(tap_terms.query_request()))
         terms = tap_terms.parse_reply(raw.send(tap_terms.query_request()))
-        if back is None or (back[2], back[3]) != (want_on, want_ms) \
-                or terms is None or terms[1] != want_tap:
+        if back is None or back[0] != ACK or (back[2], back[3]) != (want_on, want_ms) \
+                or terms is None or terms[0] != ACK or terms[1] != want_tap:
             log(f"  FAIL: read-back {back} / tapping {terms and terms[1]}, expected "
                 f"{'on' if want_on else 'off'} {want_ms} ms / tapping {want_tap}")
             return False
@@ -1585,7 +1588,7 @@ def test_auto_shift_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         restored = tap_terms.parse_auto_shift(raw.send(R(
             tap_terms.AS_ON if on0 else tap_terms.AS_OFF, ms0, tapping_ms=tap0)))
         log(f"  restore {'on' if on0 else 'off'} {ms0} ms, tapping {tap0} -> {restored}")
-        if restored is None or restored[0] != ACK:
+        if restored is None or restored[0] != ACK or not read_back(on0, ms0, tap0):
             log("  FAIL: could not restore the original state")
             ok = False
     if ok:

@@ -18,11 +18,13 @@ from station import hil_tests, tap_terms  # noqa: E402
 class FakeBoard:
     """hid_cmd_44: closed ranges, both fields validated before either applies."""
 
-    def __init__(self, validates_first=True, v30=True):
+    def __init__(self, validates_first=True, v30=True, applies_auto_shift=True):
         self.tap, self.flow = 200, 150
         self.as_on, self.as_ms = False, 180
         self.validates_first = validates_first
         self.v30 = v30
+        # False: reports Auto Shift (v30 flags) but ACKs a set and ignores data[7..9].
+        self.applies_auto_shift = applies_auto_shift
 
     @staticmethod
     def _valid(ms, lo, hi):
@@ -32,8 +34,9 @@ class FakeBoard:
         data = bytes(data).ljust(64, b"\0")   # RawHID zero-pads every report
         op = data[2]
         tap, flow = data[3] | (data[4] << 8), data[5] | (data[6] << 8)
-        as_op = data[7] if self.v30 else 0
-        as_ms = (data[8] | (data[9] << 8)) if self.v30 else 0
+        reads_new = self.v30 and self.applies_auto_shift
+        as_op = data[7] if reads_new else 0
+        as_ms = (data[8] | (data[9] << 8)) if reads_new else 0
         ok = op == 0
         if op == 1:
             t_ok = tap == tap_terms.KEEP or self._valid(tap, 100, 500)
@@ -122,8 +125,29 @@ class AutoShiftRoundTripTest(unittest.TestCase):
         self.assertFalse(hil_tests.test_auto_shift_round_trip(board, lambda _m: None))
 
     def test_fails_on_a_board_that_ignores_the_new_bytes(self):
-        """A v29 board ACKs a v30 set and changes nothing: the test must notice."""
+        """A board that reports Auto Shift but ACKs a set and changes nothing: the
+        read-back must notice (the capability check alone would pass it)."""
+        board = FakeBoard(applies_auto_shift=False)
+        self.assertFalse(hil_tests.test_auto_shift_round_trip(board, lambda _m: None))
+
+    def test_fails_on_a_board_without_auto_shift(self):
         self.assertFalse(hil_tests.test_auto_shift_round_trip(FakeBoard(v30=False), lambda _m: None))
+
+    def test_fails_when_a_query_is_nacked(self):
+        """A NACKed query carries values too; they must not count as a read-back."""
+        board = FakeBoard()
+        send = board.send
+        queries = []
+
+        def nack_queries(data, **kw):
+            reply = bytearray(send(data, **kw))
+            if data[2] == 0:
+                queries.append(1)
+                if len(queries) > 2:   # the two start-up queries ACK; read-backs NACK
+                    reply[2] = ord("!")
+            return bytes(reply)
+        board.send = nack_queries
+        self.assertFalse(hil_tests.test_auto_shift_round_trip(board, lambda _m: None))
 
     def test_registered_with_the_protocol_gate(self):
         entry = next(t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_auto_shift_round_trip)
