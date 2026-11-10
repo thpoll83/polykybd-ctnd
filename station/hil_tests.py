@@ -1519,6 +1519,83 @@ def test_tap_terms_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     return ok
 
 
+def test_auto_shift_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """AUTO SHIFT (cmd 44 data[7..9], protocol v30+): on/off and the timeout, the
+    range boundaries, the NACKs of the CLOSED range, and that a v29-form report
+    (terms only) keeps Auto Shift.
+
+    The rig cannot press a key, so this checks the setting, not the shifting.
+    reboot_persistence (test_runner.py) covers the EEPROM byte.
+
+    A report with one bad field must change nothing, including the valid tapping
+    term sent with it. Restores the original state.
+    """
+    first = tap_terms.parse_auto_shift(raw.send(tap_terms.query_request()))
+    terms_first = tap_terms.parse_reply(raw.send(tap_terms.query_request()))
+    log(f"auto-shift query -> {first}")
+    if first is None or first[0] != ACK or terms_first is None or terms_first[0] != ACK:
+        log("  FAIL: no valid cmd 44 query reply")
+        return False
+    _, compiled, on0, ms0 = first
+    tap0 = terms_first[1]
+    if not compiled:
+        log("  FAIL: protocol v30+ but the reply says Auto Shift is not compiled in")
+        return False
+    log(f"  current auto shift {'on' if on0 else 'off'}, {ms0} ms, tapping {tap0} ms")
+
+    def check(request, expect_ack, want_on, want_ms, want_tap, what):
+        got = tap_terms.parse_auto_shift(raw.send(request))
+        log(f"  {what} -> {got}")
+        if got is None or got[0] != (ACK if expect_ack else NACK):
+            log(f"  FAIL: expected {'ACK' if expect_ack else 'NACK'}")
+            return False
+        return read_back(want_on, want_ms, want_tap)
+
+    def read_back(want_on, want_ms, want_tap):
+        back = tap_terms.parse_auto_shift(raw.send(tap_terms.query_request()))
+        terms = tap_terms.parse_reply(raw.send(tap_terms.query_request()))
+        if back is None or back[0] != ACK or (back[2], back[3]) != (want_on, want_ms) \
+                or terms is None or terms[0] != ACK or terms[1] != want_tap:
+            log(f"  FAIL: read-back {back} / tapping {terms and terms[1]}, expected "
+                f"{'on' if want_on else 'off'} {want_ms} ms / tapping {want_tap}")
+            return False
+        return True
+
+    R = tap_terms.auto_shift_request
+    lo, hi = tap_terms.AUTO_SHIFT_MIN_MS, tap_terms.AUTO_SHIFT_MAX_MS
+    other_tap = tap_terms.other_value(tap0, 300, 250)
+    steps = [
+        (R(tap_terms.AS_ON, lo), True, True, lo, tap0, "on at the minimum"),
+        (R(tap_terms.AS_KEEP, hi), True, True, hi, tap0, "maximum, switch kept"),
+        (R(tap_terms.AS_OFF), True, False, hi, tap0, "off, timeout kept"),
+        (tap_terms.set_request(other_tap), True, False, hi, other_tap,
+         "terms-only (v29 form) keeps auto shift"),
+        (R(tap_terms.AS_ON, 220), True, True, 220, other_tap, "on at 220"),
+        (R(3), False, True, 220, other_tap, "op 3 NACKed"),
+        (R(tap_terms.AS_KEEP, lo - 10), False, True, 220, other_tap, "below the range"),
+        (R(tap_terms.AS_KEEP, hi + 10), False, True, 220, other_tap, "above the range"),
+        (R(tap_terms.AS_KEEP, 185), False, True, 220, other_tap, "off the 10 ms grid"),
+        (R(tap_terms.AS_OFF, lo - 10, tapping_ms=tap0), False, True, 220, other_tap,
+         "one bad field changes nothing"),
+    ]
+    ok = True
+    try:
+        for request, expect_ack, want_on, want_ms, want_tap, what in steps:
+            if not check(request, expect_ack, want_on, want_ms, want_tap, what):
+                ok = False
+                break
+    finally:
+        restored = tap_terms.parse_auto_shift(raw.send(R(
+            tap_terms.AS_ON if on0 else tap_terms.AS_OFF, ms0, tapping_ms=tap0)))
+        log(f"  restore {'on' if on0 else 'off'} {ms0} ms, tapping {tap0} -> {restored}")
+        if restored is None or restored[0] != ACK or not read_back(on0, ms0, tap0):
+            log("  FAIL: could not restore the original state")
+            ok = False
+    if ok:
+        log("  auto shift round-tripped; out-of-range values NACKed and changed nothing")
+    return ok
+
+
 def test_glyph_size_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
     """GLYPH_SIZE (cmd 34, protocol v13+) get/set round-trip + out-of-range NACK.
 
@@ -4090,6 +4167,8 @@ TESTS = [
     {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
     {"name": "tap terms round-trip + range NACKs (v29 cmd 44)", "fn": test_tap_terms_round_trip,
      "min_protocol": tap_terms.TAP_TERMS_MIN_PROTOCOL},
+    {"name": "auto shift round-trip + range NACKs (v30 cmd 44)", "fn": test_auto_shift_round_trip,
+     "min_protocol": tap_terms.AUTO_SHIFT_MIN_PROTOCOL},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},

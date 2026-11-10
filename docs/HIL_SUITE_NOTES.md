@@ -74,6 +74,14 @@ and relative links were adjusted to suit a standalone file.
     firmware validates both fields before applying either. Packer and parser:
     `station/tap_terms.py`. The rig cannot press keys, so this checks the setting,
     not the tap-hold behaviour. Restores the original terms.
+  - The **`auto shift round-trip + range NACKs (v30 cmd 44)`** test
+    (`test_auto_shift_round_trip`, `min_protocol: 30`) turns Auto Shift on and off,
+    sets both ends of the timeout (100..500 ms), sends a terms-only report in the v29
+    form and checks it keeps Auto Shift, then NACKs op 3, two out-of-range timeouts,
+    an off-grid timeout, and a report whose valid tapping term must not apply because
+    its timeout is bad. A board that ACKs the new bytes and ignores them (v29) fails
+    the read-back. Reboot persistence also changes both Auto Shift values from v30
+    on. The rig cannot press keys, so neither checks the shifting itself.
   - The **`layer names (v14)`** test (`test_layer_names`, `min_protocol: 14`) reads
     HID cmd 35 — the names the host layout editor puts on its layer tabs. ⚠️ **Its
     cross-check against `id_dynamic_keymap_get_layer_count` is the POINT of the test,
