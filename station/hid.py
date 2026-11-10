@@ -20,8 +20,35 @@ from .config import (
 # not hid.device().open_path().
 
 
+# ⚠️ ONE lock for every call into libhidapi that touches its process-wide state.
+# The hidraw backend keeps a single global error string (last_global_error_str):
+# hid_enumerate() and hid_open_path() each free and reallocate it, and the `hid`
+# package reads it through hid_error(NULL) after every failed open. Two threads
+# doing that at once is a double free or a use-after-free. On the rig two threads
+# do exactly that across every reboot: HIDConsole's reader re-enumerates and
+# reopens every _REOPEN_POLL_S while the test thread's RawHID.send() polls the
+# board back, and both fail while the device is away. It killed the runner with
+# SIGSEGV (exit 139) in the boot-loop test on 2026-11-10 (qmk run 42829271627,
+# attempt 2). Per-handle calls (read, write, close) only touch that handle's own
+# error string and stay unlocked, so a blocking read never holds this lock.
+_HIDAPI_GLOBAL_LOCK = threading.Lock()
+
+
+def _enumerate(vendor_id: int, product_id: int) -> list:
+    """hid.enumerate(), serialised with every other enumerate and open."""
+    with _HIDAPI_GLOBAL_LOCK:
+        return list(hid.enumerate(vendor_id, product_id))
+
+
+def open_device(path: bytes):
+    """hid.Device(path=...), serialised with every other enumerate and open.
+    Raises what hid.Device raises."""
+    with _HIDAPI_GLOBAL_LOCK:
+        return hid.Device(path=path)
+
+
 def _find_path(vendor_id: int, product_id: int, usage_page: int, usage: int) -> bytes | None:
-    for d in hid.enumerate(vendor_id, product_id):
+    for d in _enumerate(vendor_id, product_id):
         if d["usage_page"] == usage_page and d["usage"] == usage:
             return d["path"]
     return None
@@ -50,7 +77,7 @@ def enumerate_raw_interfaces(
     """
     return [
         d
-        for d in hid.enumerate(vendor_id, product_id)
+        for d in _enumerate(vendor_id, product_id)
         if d["usage_page"] == HID_RAW_USAGE_PAGE and d["usage"] == HID_RAW_USAGE
     ]
 
@@ -81,7 +108,7 @@ class HIDConsole:
         path = _find_path(self._vid, self._pid, HID_CONSOLE_USAGE_PAGE, HID_CONSOLE_USAGE)
         if path is None:
             raise RuntimeError("QMK HID console not found — is the keyboard plugged in?")
-        self._dev = hid.Device(path=path)
+        self._dev = open_device(path)
         self._running = True
         self._thread = threading.Thread(target=self._loop, args=(callback,), daemon=True)
         self._thread.start()
@@ -150,7 +177,7 @@ class HIDConsole:
             path = _find_path(self._vid, self._pid,
                               HID_CONSOLE_USAGE_PAGE, HID_CONSOLE_USAGE)
             if path is not None:
-                self._dev = hid.Device(path=path)
+                self._dev = open_device(path)
         except Exception:
             self._dev = None
 
@@ -324,7 +351,7 @@ class RawHID:
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
-        self._dev = hid.Device(path=path)
+        self._dev = open_device(path)
         self.handle_opens += 1
         return self._dev
 
@@ -392,7 +419,7 @@ class RawHID:
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
-        dev = hid.Device(path=path)
+        dev = open_device(path)
         try:
             dev.write(_frame(data))
             packets: list[bytes] = []
@@ -419,7 +446,7 @@ class RawHID:
         path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
-        dev = hid.Device(path=path)
+        dev = open_device(path)
         try:
             for data in reports:
                 dev.write(_frame(data))
@@ -448,7 +475,7 @@ class RawHID:
         if path is None:
             raise RuntimeError("QMK Raw HID interface not found")
         report = _frame(data)
-        dev = hid.Device(path=path)
+        dev = open_device(path)
         responses: list[bytes | None] = []
         latencies: list[float] = []
         transient = 0
@@ -469,7 +496,7 @@ class RawHID:
                         except Exception:
                             pass
                         try:
-                            dev = hid.Device(path=path)
+                            dev = open_device(path)
                         except Exception:
                             pass
                     if resp is not None:
