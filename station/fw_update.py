@@ -37,7 +37,7 @@ import hid
 
 from . import bulk_pipe
 
-from .hid import _find_path, _frame
+from .hid import _find_path, _frame, open_device
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID, HID_RAW_USAGE_PAGE, HID_RAW_USAGE
 
 HID_POLYKYBD          = 0x50   # ord('P')
@@ -86,7 +86,7 @@ class _FwLink:
             path = _find_path(self._vid, self._pid, HID_RAW_USAGE_PAGE, HID_RAW_USAGE)
             if path is not None:
                 try:
-                    self._dev = hid.Device(path=path)
+                    self._dev = open_device(path)
                     return True
                 except Exception as exc:
                     # During fw-update the device is legitimately absent for

@@ -458,6 +458,16 @@ and relative links were adjusted to suit a standalone file.
   reopen it during normal traffic). Lines printed
   while the device is away are lost and always will be — the firmware drops
   console output nobody is draining.
+  - ⚠️ **Enumerate and open go through ONE process-wide lock**
+    (`station/hid.py`: `_enumerate()`, `open_device()`). libhidapi's hidraw
+    backend keeps a single global error string: `hid_enumerate()` and
+    `hid_open_path()` free it on entry (through `hid_init()`) and a failed open
+    allocates a new one, which the `hid` package then reads. Across every reboot
+    the console reader's reopen and the test thread's `RawHID.send()` both do this
+    while the device is away, and an overlap killed the runner with SIGSEGV
+    (exit 139) in the boot-loop test (qmk run 42829271627, attempt 2, 2026-11-10).
+    Never call `hid.enumerate()` or `hid.Device()` directly;
+    `tests/hidapi_lock_test.py` fails on a call site that does.
   - ⚠️ **`stop()`'s join is TIMED, so it can return with the reader still alive —
     and closing the handle anyway is the exact use-after-free the
     join-before-close ordering exists to prevent** (SIGABRT, exit 134, which
