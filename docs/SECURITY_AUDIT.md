@@ -64,6 +64,7 @@ signing the firmware image alone was not enough.**
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
 | HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | ✅ fixed — host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428) (`12589656`), released in [v1.17.40](https://github.com/thpoll83/PolyKybdHost/releases/tag/v1.17.40) |
 | SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged against host `057559da` (1.17.34), none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
+| HOST-6 | Window-report endpoint authenticates the handshake, not each message; the agent keys add a sink for remote agents and a raise relay to the forwarder | host | 🟡 accepted + documented (off by default, two opt-ins) |
 | SCAN-3 | 2026-11-03 Sourcery (opengrep): the overlay generators run `scripts/generate_app_overlays.py` with `subprocess.run` (host#508) — an argv list, no shell, repository paths | host | ✅ checked, not vulnerable (audit note + `nosemgrep`) |
 
 ---
@@ -632,6 +633,55 @@ help for logs already on disk, and it would add a second, non-title rule to a
 function whose contract is titles. The maintainer accepted that on 2026-10-22 for
 the current tester audience — recorded here so the next scan or session finds a
 decision instead of an open question.
+
+### HOST-6 — the window-report endpoint authenticates the handshake, not the messages; the agent keys use it
+
+Recorded **2026-11-10** with the agent-keys prototype (PolyKybdHost#763, firmware
+qmk_firmware#424). The underlying fact was first written up for the older AI-key
+attempt in polykybd-ctnd#95, which was never merged (and its number, HOST-5, was
+taken since); this entry replaces it.
+
+**The fact.** The network window-report endpoint (`server/window_report_server.py`,
+off by default behind `window_report_network_enabled`, its own authkey) uses
+`multiprocessing.connection`. Its HMAC challenge/response proves only that both ends
+hold the authkey when the connection opens. After that the stream is plain
+length-prefixed data with no encryption and no per-message tag, so an attacker on the
+path can change a frame or forge a reply. This was already true for `window.report`,
+which carries window titles and browser URLs.
+
+**What the agent keys add** (both only with `agents_enabled` **and**
+`agents_remote_enabled` on; the second is a separate setting, off by default):
+
+1. **A second method, `agents.report`**, for agents on a forwarder's machine. It is
+   served only when the host injects the `on_agents_report` callback; the server still
+   holds no `PolyCore`. The sink bounds every field first
+   (`services/agents/remote.sanitize_report`: lengths, a closed list of states, an
+   integer pid) and only writes the agent registry. Worst case from a forged or
+   tampered report, or from anyone on the LAN who holds the authkey: agents that do not
+   exist appear on the number row, with up to 80 characters of text each. It reaches
+   no keyboard command, no file and no process on the keyboard computer.
+2. **A raise relay in the reply to `window.report`** (`agent_raise`, a counter plus
+   the agent's pid, folder, window id and title as that machine reported them). The
+   forwarder raises at most one window per new counter value
+   (`RemoteRaiseFollower`). Worst case from a forged reply: the forwarder brings one
+   of **its own existing windows** to the front. Unlike the design in ctnd#95, the
+   target IS on the wire here, so a forger can choose which existing window. It cannot
+   start a program, type, or read anything back.
+3. **A shorter heartbeat**: while a forwarder's machine has agents on the keys, the
+   reply asks it to report every second instead of every 15 s (`agents_fast`). More
+   reports on the same channel; no new kind of data.
+
+**Accepted.** The consequences are a wrong picture on the keys and one window raised
+on the forwarder's machine, behind a network endpoint that is off by default and a
+feature that needs two more settings. An attacker able to forge replies is already
+on the path of the window-title feed.
+
+**What would fix it** is the same as before: authenticated TLS on the endpoint, for
+all its methods. ⚠️ Do **not** add a MAC to the agent messages only: it would leave
+`window.report`, the larger and more sensitive payload, unprotected while suggesting
+the endpoint is secure. Guidance in the host's setup doc: a LAN feature; over
+anything else, use a VPN.
+
 
 ### SCAN-3 — overlay generator scripts run the overlay generator with `subprocess.run` (2026-11-03)
 
