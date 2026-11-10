@@ -68,6 +68,7 @@ from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
 from . import bulk_pipe
 from . import tap_terms
+from . import agent_keys
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -1516,6 +1517,164 @@ def test_tap_terms_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             ok = False
     if ok:
         log("  tap terms round-tripped; out-of-range values NACKed and changed nothing")
+    return ok
+
+
+def test_agent_keys_commands(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """AGENT KEYS (cmd 45, protocol v31+): QUERY, SET_KEYS, READ_EVENTS and the
+    NACKs of the closed ranges.
+
+    The rig cannot press a key, so AI mode itself, the key events and the cards on
+    the keycaps are not observable here. What this checks: QUERY finds the ten
+    number keys and ESC on the active default layer (both shipped default layers
+    have them), the event ring is empty with no presses, a valid SET_KEYS is
+    ACKed, and every out-of-range field (a state past 5, an unknown flag bit, a
+    slot of 600 or more, an unknown op) is NACKed. Nothing reads the states back,
+    so "a NACK changes nothing" is the firmware's validate-first order, not
+    measured here. The master must still answer GET_ID afterwards. Restores all
+    keys to empty.
+    """
+    ak = agent_keys
+    q = ak.parse_query(raw.send(ak.query_request()))
+    log(f"agent keys query -> {q}")
+    if q is None or q[0] != ACK:
+        log("  FAIL: no valid cmd 45 QUERY reply")
+        return False
+    _, mode, seq0, found, esc = q
+    log(f"  ai mode {mode}, newest event seq {seq0}, number keys found {found}, ESC found {esc}")
+    if mode != 0:
+        log("  FAIL: AI mode is on, but nothing pressed the AI key")
+        return False
+    if found != ak.NUM_KEYS or esc != 1:
+        log(f"  FAIL: expected all {ak.NUM_KEYS} number keys and ESC on the default layer")
+        return False
+
+    ev = ak.parse_events(raw.send(ak.read_events_request(0)))
+    log(f"  read events since 0 -> {ev}")
+    if ev is None or ev[0] != ACK or ev[1] != seq0:
+        log("  FAIL: READ_EVENTS did not answer with the QUERY's newest seq")
+        return False
+    if seq0 == 0 and ev[2]:
+        log("  FAIL: events reported, but the newest seq is 0")
+        return False
+    ev = ak.parse_events(raw.send(ak.read_events_request(seq0)))
+    if seq0 and (ev is None or ev[0] != ACK or ev[2]):
+        log(f"  FAIL: READ_EVENTS since the newest seq {seq0} returned {ev}")
+        return False
+
+    states = [1, 2, 3, 4, 5, 0, 1, 2, 3, 4]
+    slots = list(range(588, 598)) + [598, 599]
+    cases = [
+        (ak.set_keys_request(states, ak.FLAGS_VALID, slots), ACK, "valid states, flags and slots"),
+        (ak.set_keys_request(states, 0, [ak.NO_SLOT] * ak.NUM_CARDS), ACK, "no cards"),
+        (ak.set_keys_request([6] + states[1:], 0), NACK, "a state past 5"),
+        (ak.set_keys_request(states, 0x10), NACK, "an unknown flag bit"),
+        (ak.set_keys_request(states, 0, [ak.POOL_SLOTS] + slots[1:]), NACK, "slot 600"),
+        (ak.set_keys_request(states, 0, slots[:11] + [0xFFFE]), NACK, "slot 0xFFFE"),
+        (ak.op_request(3), NACK, "an unknown op"),
+    ]
+    ok = True
+    try:
+        for request, want, what in cases:
+            got = ak.status(raw.send(request), ak.CMD_AI)
+            log(f"  {what} -> {chr(got) if got else got!r} (want {chr(want)})")
+            if got != want:
+                log(f"  FAIL: expected {'ACK' if want == ACK else 'NACK'}")
+                ok = False
+                break
+    finally:
+        empty = ak.set_keys_request([0] * ak.NUM_KEYS, 0)
+        restored = ak.status(raw.send(empty), ak.CMD_AI)
+        log(f"  restore all keys empty -> {chr(restored) if restored else restored!r}")
+        if restored != ACK:
+            log("  FAIL: could not restore the empty keys")
+            ok = False
+    if ok and not _master_alive(raw, log):
+        log("  FAIL: master stopped answering GET_ID after the agent-key commands")
+        ok = False
+    if ok:
+        log("  agent keys: query found the keys, ring empty, ranges NACKed, master alive")
+    return ok
+
+
+# The pool slot the card tests write. The top slot: the MRU host fills from the
+# bottom, and the test writes zeros back.
+AGENT_CARD_TEST_SLOT = 599
+
+
+def _agent_card_segments(raw: RawHID, log, fill: int) -> bool:
+    for seg in range(agent_keys.SEGMENTS):
+        payload = bytes((fill + seg + i) & 0xFF for i in range(agent_keys.SEGMENT_BYTES)) if fill else b""
+        got = agent_keys.status(raw.send(agent_keys.card_request(AGENT_CARD_TEST_SLOT, seg, payload)),
+                                agent_keys.CMD_AI_CARD)
+        if got != ACK:
+            log(f"  FAIL: card slot {AGENT_CARD_TEST_SLOT} segment {seg} -> {got!r}, want ACK")
+            return False
+    return True
+
+
+def test_agent_card_upload(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """AGENT CARD (cmd 46, protocol v31+): the six 60-byte segments of one card go
+    straight into a pool slot and are relayed to the slave.
+
+    Nothing reads a pool slot back, so this is the reply plus a liveness guard:
+    every valid segment is ACKed, a segment past 5 and a slot of 600 or more are
+    NACKed, and the master still answers GET_ID after six split relays. Whether
+    the relay reached the slave is the console test below. Writes zeros back.
+    """
+    ak = agent_keys
+    ok = _agent_card_segments(raw, log, fill=0x5A)
+    log(f"  six segments into slot {AGENT_CARD_TEST_SLOT}: {'ACK' if ok else 'failed'}")
+    try:
+        for request, what in ((ak.card_request(AGENT_CARD_TEST_SLOT, 6, b""), "segment 6"),
+                              (ak.card_request(ak.POOL_SLOTS, 0, b""), "slot 600"),
+                              (ak.card_request(1023, 5, b""), "slot 1023")):
+            if not ok:
+                break
+            got = ak.status(raw.send(request), ak.CMD_AI_CARD)
+            log(f"  {what} -> {chr(got) if got else got!r} (want !)")
+            if got != NACK:
+                log("  FAIL: expected NACK")
+                ok = False
+    finally:
+        if not _agent_card_segments(raw, log, fill=0):
+            log("  FAIL: could not write the slot back to zeros")
+            ok = False
+    if ok and not _master_alive(raw, log):
+        log("  FAIL: master stopped answering GET_ID after the card upload")
+        ok = False
+    if ok:
+        log("  agent card: segments ACKed, bad slot/segment NACKed, master alive")
+    return ok
+
+
+AGENT_CARD_RELAY_FAIL = "did not reach the slave"
+AGENT_CARD_REFUSED = "ai: refused card segment"
+
+
+def test_agent_card_reaches_the_slave(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """AGENT CARD relay (cmd 46, v31+): no segment fails its split relay.
+
+    ai_hid_card() prints ``ai: card slot N segment S did not reach the slave``
+    when the relay to the slave fails, ungated. A refused segment prints
+    ``ai: refused card segment``, which this test provokes first, so the console
+    is shown to carry the ai: lines before their absence counts. ``needs_console``.
+    """
+    ak = agent_keys
+    mark = TAP.mark()
+    raw.send(ak.card_request(AGENT_CARD_TEST_SLOT, 6, b""))
+    if TAP.wait_for(AGENT_CARD_REFUSED, mark, timeout=3.0) is None:
+        log(f"  FAIL: no '{AGENT_CARD_REFUSED}' line for a refused segment: "
+            "the console does not show the ai: lines")
+        return False
+    mark = TAP.mark()
+    ok = _agent_card_segments(raw, log, fill=0x33) and _agent_card_segments(raw, log, fill=0)
+    line = TAP.wait_for(AGENT_CARD_RELAY_FAIL, mark, timeout=2.0)
+    if line is not None:
+        log(f"  FAIL: {line.strip()}")
+        return False
+    if ok:
+        log("  12 card segments relayed to the slave without a failure line")
     return ok
 
 
@@ -4169,6 +4328,13 @@ TESTS = [
      "min_protocol": tap_terms.TAP_TERMS_MIN_PROTOCOL},
     {"name": "auto shift round-trip + range NACKs (v30 cmd 44)", "fn": test_auto_shift_round_trip,
      "min_protocol": tap_terms.AUTO_SHIFT_MIN_PROTOCOL},
+    {"name": "agent keys query/set/events + range NACKs (v31 cmd 45)",
+     "fn": test_agent_keys_commands, "min_protocol": agent_keys.AGENT_KEYS_MIN_PROTOCOL},
+    {"name": "agent card upload + range NACKs (v31 cmd 46)",
+     "fn": test_agent_card_upload, "min_protocol": agent_keys.AGENT_KEYS_MIN_PROTOCOL},
+    {"name": "agent card segments reach the slave (v31 cmd 46, console)",
+     "fn": test_agent_card_reaches_the_slave, "min_protocol": agent_keys.AGENT_KEYS_MIN_PROTOCOL,
+     "needs_console": True},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},

@@ -82,6 +82,22 @@ and relative links were adjusted to suit a standalone file.
     its timeout is bad. A board that ACKs the new bytes and ignores them (v29) fails
     the read-back. Reboot persistence also changes both Auto Shift values from v30
     on. The rig cannot press keys, so neither checks the shifting itself.
+  - Three **agent key** tests (cmd 45 AI, cmd 46 AI_CARD, `min_protocol: 31`;
+    packer and parser `station/agent_keys.py`). The rig cannot press keys, so AI
+    mode, the key events and the cards on the keycaps are not observable; these
+    check the commands.
+    - `test_agent_keys_commands`: QUERY finds the 10 number keys and ESC on the
+      default layer, AI mode is off, READ_EVENTS returns the QUERY's newest seq and
+      an empty ring when it is 0, a valid SET_KEYS is ACKed, and a state past 5, an
+      unknown flag bit, slot 600, slot 0xFFFE and op 3 are NACKed. Nothing reads the
+      states back. Restores all keys to empty.
+    - `test_agent_card_upload`: six segments into pool slot 599 are ACKed, segment
+      6, slot 600 and slot 1023 are NACKed, and GET_ID answers after the six split
+      relays. Writes zeros back.
+    - `test_agent_card_reaches_the_slave` (`needs_console`): no
+      `ai: card slot … did not reach the slave` line for 12 segments. It first
+      provokes `ai: refused card segment`, so a console that does not show the `ai:`
+      lines fails instead of passing.
   - The **`layer names (v14)`** test (`test_layer_names`, `min_protocol: 14`) reads
     HID cmd 35 — the names the host layout editor puts on its layer tabs. ⚠️ **Its
     cross-check against `id_dynamic_keymap_get_layer_count` is the POINT of the test,
