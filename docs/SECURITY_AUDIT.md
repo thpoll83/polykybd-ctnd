@@ -64,7 +64,7 @@ signing the firmware image alone was not enough.**
 | SCAN-1 | 2026-08-29 external scan: 3 findings inert in this fork (upstream workflow, committed build dir, uncompiled doom `textscreen/`) | qmk / gfx | ✅ checked — see "don't re-litigate" |
 | HOST-5 | Daylight brightness: a `requests` exception put the user's coordinates in the host log at WARNING, so they reached every log bundle | host | ✅ fixed — host [#428](https://github.com/thpoll83/PolyKybdHost/pull/428) (`12589656`), released in [v1.17.40](https://github.com/thpoll83/PolyKybdHost/releases/tag/v1.17.40) |
 | SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged against host `057559da` (1.17.34), none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
-| HOST-6 | Window-report endpoint authenticates the handshake, not each message; the agent keys add a sink for remote agents and a raise relay to the forwarder | host | 🟡 accepted + documented (off by default, two opt-ins) |
+| HOST-6 | Window-report endpoint authenticates the handshake, not each message; the agent keys add a sink for remote agents and a raise relay to the forwarder | host | 🟡 accepted + documented (off by default; two opt-ins, a third for the raise) |
 | SCAN-3 | 2026-11-03 Sourcery (opengrep): the overlay generators run `scripts/generate_app_overlays.py` with `subprocess.run` (host#508) — an argv list, no shell, repository paths | host | ✅ checked, not vulnerable (audit note + `nosemgrep`) |
 
 ---
@@ -663,10 +663,14 @@ which carries window titles and browser URLs.
 2. **A raise relay in the reply to `window.report`** (`agent_raise`, a counter plus
    the agent's pid, folder, window id and title as that machine reported them). The
    forwarder raises at most one window per new counter value
-   (`RemoteRaiseFollower`). Worst case from a forged reply: the forwarder brings one
-   of **its own existing windows** to the front. Unlike the design in ctnd#95, the
-   target IS on the wire here, so a forger can choose which existing window. It cannot
-   start a program, type, or read anything back.
+   (`RemoteRaiseFollower`), and **only when `agents_raise_here` is on on the
+   forwarder's own computer** (off by default). Without it a press raises only the
+   remote-desktop viewer on the keyboard computer, a local action that no reply
+   controls (`services/agents/viewer.py`). Worst case from a forged reply with the
+   setting on: the forwarder brings one of **its own existing windows** to the front.
+   Unlike the design in ctnd#95, the target IS on the wire here, so a forger can
+   choose which existing window. It cannot start a program, type, or read anything
+   back.
 3. **A shorter heartbeat**: while a forwarder's machine has agents on the keys, the
    reply asks it to report every second instead of every 15 s (`agents_fast`). More
    reports on the same channel; no new kind of data.
