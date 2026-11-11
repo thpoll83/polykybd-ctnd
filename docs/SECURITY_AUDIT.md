@@ -675,6 +675,16 @@ which carries window titles and browser URLs.
    reply asks it to report every second instead of every 15 s (`agents_fast`). More
    reports on the same channel; no new kind of data.
 
+4. **Pairing prints the key** (host#763, CodeQL "clear-text logging of sensitive
+   information", alert 477, 2026-11-11, `polyctl.py` `forwarder pairing-code`). The
+   command prints the endpoint's authkey as a code of 8 groups, to stdout, so the user
+   can type it on the forwarder's computer. The tray app shows the same code in a
+   dialog. Printing it is the purpose of the command; it is written to no log file.
+   Not changed; the alert is to be dismissed as "won't fix". ⚠️ Nothing revokes a code
+   that leaked: `polyctl forwarder unpair` deletes only the forwarder's copy. To revoke
+   it, delete `polykybd-winreport.authkey` in the keyboard computer's config folder
+   and restart the app (it creates a new key), then pair every forwarder again.
+
 **Accepted.** The consequences are a wrong picture on the keys and one window raised
 on the forwarder's machine, behind a network endpoint that is off by default and a
 feature that needs two more settings. An attacker able to forge replies is already
