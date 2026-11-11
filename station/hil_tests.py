@@ -69,6 +69,7 @@ from .iso_lang_country import decode_packed
 from . import bulk_pipe
 from . import tap_terms
 from . import agent_keys
+from . import key_attention
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -1681,6 +1682,66 @@ def test_agent_card_reaches_the_slave(raw: RawHID, log: Callable[[str], None]) -
         return False
     if ok:
         log("  12 card segments relayed to the slave without a failure line")
+    return ok
+
+
+# The keys the KEY ATTENTION test points at, split72 matrix positions. (1, 1) is a
+# left-half letter key with a display. (3, 7) is the left half's inner key without
+# an OLED (split72.c key_has_display()), so a START on it must NACK.
+KEY_ATTN_TEST_KEY = (1, 1)
+KEY_ATTN_NO_DISPLAY_KEY = (3, 7)
+KEY_ATTN_MATRIX_COLS = 8          # split72 MATRIX_COLS
+
+
+def test_key_attention(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """KEY ATTENTION (cmd 47, protocol v32+): START and CANCEL, and the NACKs of
+    the closed ranges.
+
+    The rig has no camera, so the ripple on the keycaps is not observable here.
+    What this checks: a START on a key with a display is ACKed, the period is
+    ACKed at both ends of its closed range 23..100 and NACKed just outside it, an
+    unknown op is NACKed, a matrix position out of range (row 255, col 8) and a
+    key without a display are NACKed, and CANCEL is ACKed. Nothing reads the
+    request back, so "a NACK changes nothing" is the firmware's validate-first
+    order, not measured here. The master must still answer GET_ID afterwards.
+    Ends with CANCEL, so no endless ripple is left running.
+    """
+    ka = key_attention
+    row, col = KEY_ATTN_TEST_KEY
+    cases = [
+        (ka.start_request(row, col, 1, 30), ACK, f"START ({row},{col}) 1 ripple, period 30"),
+        (ka.start_request(row, col, 1, ka.PERIOD_MIN - 1), NACK, "period 22"),
+        (ka.start_request(row, col, 1, ka.PERIOD_MIN), ACK, "period 23"),
+        (ka.start_request(row, col, 1, ka.PERIOD_MAX), ACK, "period 100"),
+        (ka.start_request(row, col, 1, ka.PERIOD_MAX + 1), NACK, "period 101"),
+        (ka.op_request(2), NACK, "an unknown op (2)"),
+        (ka.start_request(255, col, 1, 30), NACK, "row 255"),
+        (ka.start_request(row, KEY_ATTN_MATRIX_COLS, 1, 30), NACK, "col 8"),
+        (ka.start_request(*KEY_ATTN_NO_DISPLAY_KEY, 1, 30), NACK,
+         f"key {KEY_ATTN_NO_DISPLAY_KEY} without a display"),
+        (ka.start_request(row, col, 0, 30), ACK, "START until cancelled"),
+        (ka.cancel_request(), ACK, "CANCEL"),
+    ]
+    ok = True
+    try:
+        for request, want, what in cases:
+            got = ka.status(raw.send(request))
+            log(f"  {what} -> {chr(got) if got else got!r} (want {chr(want)})")
+            if got != want:
+                log(f"  FAIL: expected {'ACK' if want == ACK else 'NACK'}")
+                ok = False
+                break
+    finally:
+        cancelled = ka.status(raw.send(ka.cancel_request()))
+        log(f"  final CANCEL -> {chr(cancelled) if cancelled else cancelled!r}")
+        if cancelled != ACK:
+            log("  FAIL: could not cancel the request")
+            ok = False
+    if ok and not _master_alive(raw, log):
+        log("  FAIL: master stopped answering GET_ID after the key-attention commands")
+        ok = False
+    if ok:
+        log("  key attention: START/CANCEL ACKed, closed ranges NACKed, master alive")
     return ok
 
 
@@ -4341,6 +4402,8 @@ TESTS = [
     {"name": "agent card segments reach the slave (v31 cmd 46, console)",
      "fn": test_agent_card_reaches_the_slave, "min_protocol": agent_keys.AGENT_KEYS_MIN_PROTOCOL,
      "needs_console": True},
+    {"name": "key attention start/cancel + range NACKs (v32 cmd 47)",
+     "fn": test_key_attention, "min_protocol": key_attention.KEY_ATTENTION_MIN_PROTOCOL},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
