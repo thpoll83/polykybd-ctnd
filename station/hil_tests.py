@@ -68,6 +68,7 @@ from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
 from . import bulk_pipe
 from . import tap_terms
+from . import combos
 from . import agent_keys
 from . import key_attention
 
@@ -1819,6 +1820,98 @@ def test_auto_shift_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
             ok = False
     if ok:
         log("  auto shift round-tripped; out-of-range values NACKed and changed nothing")
+    return ok
+
+
+def test_combos_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """RUNTIME COMBOS / TAP DANCE (cmd 48, protocol v33+): set and read back one
+    combo and one tap dance, the NACKs of the CLOSED records, and a commit that
+    reaches the other half.
+
+    The rig cannot press keys, so this checks the stored records, not the combo or
+    tap-dance behaviour. reboot_persistence (test_runner.py) covers the flash sector.
+    Uses the LAST slot of each kind and restores both records, then commits again,
+    so the board keeps its own entries.
+    """
+    info = combos.parse_info(raw.send(combos.info_request()))
+    log(f"combos info -> {info}")
+    if info is None or info[0] != ACK or not info[1]:
+        log("  FAIL: no valid cmd 48 info reply, or the build has no runtime combos")
+        return False
+    _, _, n_combo, n_td = info
+    if (n_combo, n_td) != (combos.SLOTS, combos.SLOTS):
+        log(f"  FAIL: expected {combos.SLOTS} + {combos.SLOTS} slots, got {n_combo} + {n_td}")
+        return False
+    ci, ti = n_combo - 1, n_td - 1
+
+    def read(kind, index):
+        got = combos.parse_record(raw.send(combos.get_request(kind, index)))
+        if got is None or got[0] != ACK or got[1:3] != (kind, index):
+            return None
+        return got[3]
+
+    combo0, td0 = read(combos.KIND_COMBO, ci), read(combos.KIND_TAP_DANCE, ti)
+    if combo0 is None or td0 is None:
+        log("  FAIL: could not read the original records")
+        return False
+    log(f"  original combo[{ci}] {combo0}, tap dance[{ti}] {td0}")
+
+    def check(kind, index, words, expect_ack, want, what):
+        got = combos.parse_record(raw.send(combos.set_request(kind, index, words)))
+        log(f"  set {what} -> {got}")
+        if got is None or got[0] != (ACK if expect_ack else NACK):
+            log(f"  FAIL: expected {'ACK' if expect_ack else 'NACK'}")
+            return False
+        back = read(kind, index)
+        if back != want:
+            log(f"  FAIL: read-back {back} != {want}")
+            return False
+        return True
+
+    C, T = combos.KIND_COMBO, combos.KIND_TAP_DANCE
+    jk_esc = [0x0D, 0x0E, 0, 0, 0x29]               # J + K -> Esc
+    td = [0x29, 0x5221, 0x39, 0x5262, 250]           # Esc / MO(1) / Caps / TG(2), 250 ms
+    steps = [
+        (C, ci, jk_esc, True, jk_esc, "combo J+K -> Esc"),
+        (C, ci, [0x0D, 0, 0, 0, 0x29], False, jk_esc, "one-key combo NACKed"),
+        (C, ci, [0x0D, 0, 0x0E, 0, 0x29], False, jk_esc, "combo with a gap NACKed"),
+        (C, ci, [0x0D, 0x0E, 0, 0, 0], False, jk_esc, "combo without result NACKed"),
+        (T, ti, td, True, td, "tap dance, all four actions"),
+        (T, ti, [0x29, 0x2204, 0, 0, 0], False, td, "mod-tap action NACKed"),
+        (T, ti, [0x29, 0, 0, 0, 205], False, td, "off-grid term NACKed"),
+        (C, n_combo, jk_esc, False, None, "slot past the end NACKed"),
+    ]
+    ok = True
+    try:
+        for kind, index, words, expect_ack, want, what in steps:
+            if want is None:
+                got = combos.parse_record(raw.send(combos.set_request(kind, index, words)))
+                log(f"  set {what} -> {got}")
+                if got is None or got[0] != NACK:
+                    log("  FAIL: expected NACK")
+                    ok = False
+                    break
+                continue
+            if not check(kind, index, words, expect_ack, want, what):
+                ok = False
+                break
+        if ok:
+            got = combos.parse_commit(raw.send(combos.commit_request()))
+            log(f"  commit -> {got}")
+            if got is None or got[0] != ACK or not got[1]:
+                log("  FAIL: the commit was not ACKed or did not reach the other half")
+                ok = False
+    finally:
+        r1 = combos.parse_record(raw.send(combos.set_request(C, ci, combo0)))
+        r2 = combos.parse_record(raw.send(combos.set_request(T, ti, td0)))
+        rc = combos.parse_commit(raw.send(combos.commit_request()))
+        log(f"  restore -> {r1}, {r2}, commit {rc}")
+        if (r1 is None or r1[0] != ACK or r2 is None or r2[0] != ACK or rc is None or rc[0] != ACK
+                or read(C, ci) != combo0 or read(T, ti) != td0):
+            log("  FAIL: could not restore the original records")
+            ok = False
+    if ok:
+        log("  combos and tap dances round-tripped; bad records NACKed and changed nothing")
     return ok
 
 
@@ -4395,6 +4488,8 @@ TESTS = [
      "min_protocol": tap_terms.TAP_TERMS_MIN_PROTOCOL},
     {"name": "auto shift round-trip + range NACKs (v30 cmd 44)", "fn": test_auto_shift_round_trip,
      "min_protocol": tap_terms.AUTO_SHIFT_MIN_PROTOCOL},
+    {"name": "combos / tap dance round-trip + NACKs + commit (v33 cmd 48)", "fn": test_combos_round_trip,
+     "min_protocol": combos.COMBOS_MIN_PROTOCOL},
     {"name": "agent keys query/set/events + range NACKs (v31 cmd 45)",
      "fn": test_agent_keys_commands, "min_protocol": agent_keys.AGENT_KEYS_MIN_PROTOCOL},
     {"name": "agent card upload + range NACKs (v31 cmd 46)",
