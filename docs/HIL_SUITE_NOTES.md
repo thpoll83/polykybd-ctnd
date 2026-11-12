@@ -89,9 +89,11 @@ and relative links were adjusted to suit a standalone file.
     key twice, a combo without a
     result, a mod-tap tap-dance action, an off-grid term and a slot past the end (each
     must leave the record unchanged), then commits and requires the commit reply to say
-    the other half took the copy. It restores both records and commits again. Reboot
-    persistence also sets the last combo slot from v33 on: the combo store is its own
-    flash sector, written by the commit, so it does not depend on cmd 26. The rig cannot
+    the other half stored the copy. That bit means the other half's flash CRC matches
+    the master's, not only that the records arrived. It restores both records and
+    commits again. Reboot persistence also sets the last combo slot from v33 on: the
+    combo store has its own flash sectors, written by the commit, so it does not
+    depend on cmd 26. The rig cannot
     press keys, so neither checks that a combo or a tap dance fires.
   - Three **agent key** tests (cmd 45 AI, cmd 46 AI_CARD, `min_protocol: 31`;
     packer and parser `station/agent_keys.py`). The rig cannot press keys, so AI
