@@ -38,7 +38,10 @@ def make_device(root, name, vid="2021", pid="2007", interfaces=()):
         _write(os.path.join(itf, "bInterfaceClass"), cls)
         _write(os.path.join(itf, "bInterfaceSubClass"), sub)
         for ep in eps:
-            os.makedirs(os.path.join(itf, f"ep_{ep:02x}"))
+            kind = "Bulk"
+            if isinstance(ep, tuple):
+                ep, kind = ep
+            _write(os.path.join(itf, f"ep_{ep:02x}", "type"), kind)
     return dev
 
 
@@ -73,6 +76,17 @@ class UsbMidiTest(unittest.TestCase):
         problems = usb_midi.check_send_only(usb_midi.audio_interfaces(dev))
         self.assertEqual(len(problems), 1)
         self.assertIn("MIDI_SEND_ONLY", problems[0])
+
+    def test_an_endpoint_on_audio_control_fails(self):
+        dev = make_device(self.root, "1-1.2", interfaces=[HID, ("01", "01", [0x01]), ("01", "03", [0x83])])
+        self.assertEqual(usb_midi.check_send_only(usb_midi.audio_interfaces(dev)),
+                         ["AudioControl endpoints 0x01 (expected none)"])
+
+    def test_a_non_bulk_midi_endpoint_fails(self):
+        dev = make_device(self.root, "1-1.2",
+                          interfaces=[HID, ("01", "01", []), ("01", "03", [(0x83, "Interrupt")])])
+        self.assertEqual(usb_midi.check_send_only(usb_midi.audio_interfaces(dev)),
+                         ["MIDIStreaming endpoint 0x83 is Interrupt (expected Bulk)"])
 
     def test_missing_function_fails(self):
         dev = make_device(self.root, "1-1.2", interfaces=[HID])

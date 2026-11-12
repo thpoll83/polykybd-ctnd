@@ -627,8 +627,8 @@ runner user cannot write means a rig provisioned before the dialout/udev step of
   interfaces from sysfs (`station/usb_midi.py`) and sends no HID traffic. It
   requires one AudioControl interface (class 0x01, subclass 0x01) and one
   MIDIStreaming interface (subclass 0x03) with exactly one endpoint, and that
-  endpoint must be IN. No MIDI function means the build lost `MIDI_ENABLE`. Every
-  rig image is the DOOM_PACK flavour, which has MIDI; only the DOOM monolith
+  endpoint must be bulk IN. The AudioControl interface must have no endpoints.
+  No MIDI function means the build lost `MIDI_ENABLE`. Every rig image is the DOOM_PACK flavour, which has MIDI; only the DOOM monolith
   leaves it out, and the rig never flashes that. An OUT endpoint means the build
   lost `MIDI_SEND_ONLY`, a PolyKybd patch to QMK core that saves ~400 B of RAM.
   It runs after `fresh-boot marker clears`, because its `min_fw` gate sends a

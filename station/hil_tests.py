@@ -544,7 +544,7 @@ def test_usb_midi_send_only(raw: RawHID, log: Callable[[str], None]) -> bool:
     """The master presents one send-only USB MIDI function (firmware 1.13.0+).
 
     An AudioControl interface with no endpoints and a MIDIStreaming interface
-    with one IN endpoint (``station/usb_midi.py``). A missing function means the
+    with one bulk IN endpoint (``station/usb_midi.py``). A missing function means the
     build lost ``MIDI_ENABLE`` (every rig image is the DOOM_PACK flavour, which
     has MIDI; only the DOOM monolith leaves it out). An OUT endpoint means it
     lost ``MIDI_SEND_ONLY``. Reads sysfs only, no HID traffic.
@@ -556,7 +556,8 @@ def test_usb_midi_send_only(raw: RawHID, log: Callable[[str], None]) -> bool:
         return False
     interfaces = usb_midi.audio_interfaces(devices[0])
     for itf in interfaces:
-        eps = ", ".join(f"{e:#04x}" for e in itf["endpoints"]) or "none"
+        eps = ", ".join(f"{e:#04x} {itf['types'].get(e, '')}".strip()
+                        for e in itf["endpoints"]) or "none"
         log(f"  audio iface {itf['name']}: subclass {itf['subclass']}, endpoints {eps}")
     problems = usb_midi.check_send_only(interfaces)
     for p in problems:

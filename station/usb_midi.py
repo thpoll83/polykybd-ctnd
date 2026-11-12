@@ -44,10 +44,11 @@ def keyboard_devices(sys_usb: str = SYS_USB, vid: str = VID, pid: str = PID) -> 
 
 def audio_interfaces(dev: str) -> list:
     """The device's audio-class interfaces as dicts:
-    ``{"name", "subclass", "endpoints": [address, ...]}``.
+    ``{"name", "subclass", "endpoints": [address, ...], "types": {address: type}}``.
 
     Interface directories are ``<dev-name>:<config>.<ifnum>``; an endpoint is an
-    ``ep_XX`` directory (XX = address in hex, bit 7 set = IN)."""
+    ``ep_XX`` directory (XX = address in hex, bit 7 set = IN) whose ``type`` file
+    holds the transfer type as Linux names it ("Bulk", "Interrupt", ...)."""
     base = os.path.basename(dev)
     out = []
     for itf in sorted(glob.glob(os.path.join(dev, base + ":*"))):
@@ -57,8 +58,15 @@ def audio_interfaces(dev: str) -> list:
             subclass = _read(os.path.join(itf, "bInterfaceSubClass"))
         except OSError:
             continue
-        eps = sorted(int(os.path.basename(e)[3:], 16) for e in glob.glob(os.path.join(itf, "ep_*")))
-        out.append({"name": os.path.basename(itf), "subclass": subclass, "endpoints": eps})
+        types = {}
+        for ep in glob.glob(os.path.join(itf, "ep_*")):
+            try:
+                kind = _read(os.path.join(ep, "type"))
+            except OSError:
+                kind = ""
+            types[int(os.path.basename(ep)[3:], 16)] = kind
+        out.append({"name": os.path.basename(itf), "subclass": subclass,
+                    "endpoints": sorted(types), "types": types})
     return out
 
 
@@ -69,6 +77,9 @@ def check_send_only(interfaces: list) -> list:
     problems = []
     if len(control) != 1:
         problems.append(f"{len(control)} AudioControl interfaces (expected 1)")
+    elif control[0]["endpoints"]:
+        listed = ", ".join(f"{e:#04x}" for e in control[0]["endpoints"])
+        problems.append(f"AudioControl endpoints {listed} (expected none)")
     if len(streaming) != 1:
         problems.append(f"{len(streaming)} MIDIStreaming interfaces (expected 1)")
         return problems
@@ -77,4 +88,7 @@ def check_send_only(interfaces: list) -> list:
         listed = ", ".join(f"{e:#04x}" for e in eps) or "none"
         problems.append(f"MIDIStreaming endpoints {listed} (expected one IN endpoint; "
                         "an OUT endpoint means MIDI_SEND_ONLY is missing)")
+    elif streaming[0].get("types", {}).get(eps[0]) != "Bulk":
+        kind = streaming[0].get("types", {}).get(eps[0]) or "unknown"
+        problems.append(f"MIDIStreaming endpoint {eps[0]:#04x} is {kind} (expected Bulk)")
     return problems
