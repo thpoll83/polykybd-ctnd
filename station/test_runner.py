@@ -5,6 +5,7 @@ import time
 from typing import Callable
 
 from . import tap_terms
+from . import combos
 from .console_log import TAP, console_sink
 from .flash import FlashController
 from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
@@ -935,10 +936,25 @@ class TestRunner:
                 return {"name": "reboot persistence (EEPROM survives a power cycle)",
                         "status": "fail", "error": "auto shift unreadable"}
             as_target = (not as0[0], tap_terms.other_value(as0[1], 300, 250))
+        # v33: the runtime combos are in their own flash sector, written by the commit
+        # itself (not by cmd 26). The last combo slot gets a record it does not hold.
+        combo0 = None
+        combo_target = None
+        combo_written = False
+        if proto is not None and proto >= combos.COMBOS_MIN_PROTOCOL:
+            combo0 = self._combo_slot()
+            if combo0 is None:
+                self.log("[test] FAIL: reboot persistence: could not read the last combo slot "
+                         "before the reboot")
+                return {"name": "reboot persistence (EEPROM survives a power cycle)",
+                        "status": "fail", "error": "combo slot unreadable"}
+            combo_target = ([0x0D, 0x0E, 0, 0, 0x29] if combo0 != [0x0D, 0x0E, 0, 0, 0x29]
+                            else [0x0F, 0x33, 0, 0, 0x2A])
         self.log(f"[runner] reboot persistence: idle style {original} -> {target}"
                  + ("" if place0 is None else f", placement {place0} -> {place_target}")
                  + ("" if terms0 is None else f", tap terms {terms0} -> {terms_target}")
                  + ("" if as0 is None else f", auto shift {as0} -> {as_target}")
+                 + ("" if combo0 is None else f", combo {combo0} -> {combo_target}")
                  + ", flushing to EEPROM, then power-cycling the master")
 
         try:
@@ -950,6 +966,10 @@ class TestRunner:
                 raise RuntimeError(f"the keyboard refused tap terms {terms_target}")
             if as_target is not None and not self._set_auto_shift(*as_target):
                 raise RuntimeError(f"the keyboard refused auto shift {as_target}")
+            if combo_target is not None:
+                combo_written = True   # restore even if the set was refused half-way
+                if not self._set_combo_slot(combo_target):
+                    raise RuntimeError(f"the keyboard refused combo {combo_target} or its commit")
             if not self._save_eeprom():
                 raise RuntimeError("cmd 26 (save_all_dirty) was not ACKed")
 
@@ -988,10 +1008,17 @@ class TestRunner:
                     raise RuntimeError(
                         f"auto shift read back as {as_after}, expected {as_target} "
                         "— poly_eeconf_t.auto_shift did not survive the power cycle")
+            if combo_target is not None:
+                combo_after = self._combo_slot()
+                if combo_after != combo_target:
+                    raise RuntimeError(
+                        f"combo read back as {combo_after}, expected {combo_target} "
+                        "— the combo flash sector did not survive the power cycle")
             self.log(f"[test] PASS: reboot persistence — idle style {target}"
                      + ("" if place_target is None else f" and placement {place_target}")
                      + ("" if terms_target is None else f" and tap terms {terms_target}")
                      + ("" if as_target is None else f" and auto shift {as_target}")
+                     + ("" if combo_target is None else f" and combo {combo_target}")
                      + " survived the power cycle")
             return {"name": "reboot persistence (EEPROM survives a power cycle)",
                     "status": "pass"}
@@ -1015,6 +1042,14 @@ class TestRunner:
             if terms0 is not None and self._tap_terms() != terms0:
                 restored = self._set_tap_terms(*terms0) and self._save_eeprom()
                 self.log(f"[runner] restore tap terms {terms0}: "
+                         + ("ok" if restored else "FAILED — the rig keeps the test "
+                            "value until someone sets it back"))
+            # Whenever this run wrote the slot, not only when RAM differs: a board
+            # that drops the records at reset can show the original in RAM while
+            # the test record is still in flash.
+            if combo_written:
+                restored = self._set_combo_slot(combo0)
+                self.log(f"[runner] restore combo {combo0}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
                             "value until someone sets it back"))
             if as0 is not None and self._auto_shift() != as0:
@@ -1278,6 +1313,33 @@ class TestRunner:
         op = tap_terms.AS_ON if on else tap_terms.AS_OFF
         got = tap_terms.parse_auto_shift(self._raw.send(tap_terms.auto_shift_request(op, ms)))
         return bool(got and got[0] == ACK)
+
+    def _combo_slot(self):
+        """The last combo slot's five words from cmd 48 (v33+), or None."""
+        try:
+            got = combos.parse_record(self._raw.send(
+                combos.get_request(combos.KIND_COMBO, combos.SLOTS - 1)))
+        except Exception as exc:
+            self.log(f"[runner] combo read error: {exc}")
+            return None
+        # The reply echoes kind and index: a reply for another slot is not this one.
+        if got is None or got[0] != ACK or got[1:3] != (combos.KIND_COMBO, combos.SLOTS - 1):
+            return None
+        return got[3]
+
+    def _set_combo_slot(self, words) -> bool:
+        """Set the last combo slot and commit it to flash; True only when both halves
+        took the copy."""
+        try:
+            got = combos.parse_record(self._raw.send(
+                combos.set_request(combos.KIND_COMBO, combos.SLOTS - 1, words)))
+            if not (got and got[0] == ACK and got[1:3] == (combos.KIND_COMBO, combos.SLOTS - 1)):
+                return False
+            done = combos.parse_commit(self._raw.send(combos.commit_request()))
+        except Exception as exc:
+            self.log(f"[runner] combo write error: {exc}")
+            return False
+        return bool(done and done[0] == ACK and done[1])
 
     def _save_eeprom(self) -> bool:
         """cmd 26 — flush every dirty user-state block to EEPROM now.

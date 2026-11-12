@@ -82,6 +82,19 @@ and relative links were adjusted to suit a standalone file.
     its timeout is bad. A board that ACKs the new bytes and ignores them (v29) fails
     the read-back. Reboot persistence also changes both Auto Shift values from v30
     on. The rig cannot press keys, so neither checks the shifting itself.
+  - The **`combos / tap dance round-trip + NACKs + commit (v33 cmd 48)`** test
+    (`test_combos_round_trip`, `min_protocol: 33`) uses the last combo and the last
+    tap-dance slot: it sets J+K -> Esc and a four-action tap dance with a 250 ms term,
+    reads both back, NACKs a one-key combo, a combo with a gap, a combo with the same
+    key twice, a combo without a
+    result, a mod-tap tap-dance action, an off-grid term and a slot past the end (each
+    must leave the record unchanged), then commits and requires the commit reply to say
+    the other half stored the copy. That bit means the other half's flash CRC matches
+    the master's, not only that the records arrived. It restores both records and
+    commits again. Reboot persistence also sets the last combo slot from v33 on: the
+    combo store has its own flash sectors, written by the commit, so it does not
+    depend on cmd 26. The rig cannot
+    press keys, so neither checks that a combo or a tap dance fires.
   - Three **agent key** tests (cmd 45 AI, cmd 46 AI_CARD, `min_protocol: 31`;
     packer and parser `station/agent_keys.py`). The rig cannot press keys, so AI
     mode, the key events and the cards on the keycaps are not observable; these

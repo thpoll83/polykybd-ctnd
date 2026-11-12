@@ -25,16 +25,22 @@ if "RPi" not in sys.modules:  # pragma: no cover - environment shim
     sys.modules["RPi"], sys.modules["RPi.GPIO"] = _rpi, _gpio
 
 import station.test_runner as tr  # noqa: E402
-from station import tap_terms  # noqa: E402
+from station import combos, tap_terms  # noqa: E402
 
 
 class _Board:
     def __init__(self, protocol=26, keeps_placement=True, keeps_tap_terms=True,
-                 keeps_auto_shift=True):
+                 keeps_auto_shift=True, keeps_combos=True, combo_reaches_other_half=True,
+                 combo_echo_index=None):
         self.protocol = protocol
         self.keeps_placement = keeps_placement
         self.keeps_tap_terms = keeps_tap_terms
         self.keeps_auto_shift = keeps_auto_shift
+        self.keeps_combos = keeps_combos
+        self.combo_reaches_other_half = combo_reaches_other_half
+        self.combo_echo_index = combo_echo_index   # None: echo the requested index
+        self.combo_ram = [0] * 5       # the last combo slot
+        self.combo_flash = [0] * 5     # written by the commit, not by cmd 26
         self.ram = {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150,
                     "as_on": False, "as_ms": 180}
         self.eeprom = dict(self.ram)
@@ -78,6 +84,16 @@ class _Board:
                 flags |= tap_terms.FLAG_AUTO_SHIFT | (tap_terms.FLAG_AUTO_SHIFT_ON if self.ram["as_on"] else 0)
                 tail = [self.ram["as_ms"] & 0xFF, self.ram["as_ms"] >> 8]
             return (ok + bytes([t & 0xFF, t >> 8, f & 0xFF, f >> 8, flags] + tail)).ljust(64, b"\0")
+        if cmd == combos.CMD_COMBOS and self.protocol >= 33:
+            d = bytes(data).ljust(64, b"\0")
+            if arg == combos.OP_COMMIT:
+                self.combo_flash = list(self.combo_ram)
+                return (ok + bytes([1 if self.combo_reaches_other_half else 0])).ljust(64, b"\0")
+            if arg == combos.OP_SET:
+                self.combo_ram = [d[5 + 2 * i] | (d[6 + 2 * i] << 8) for i in range(5)]
+            index = d[4] if self.combo_echo_index is None else self.combo_echo_index
+            body = bytes([d[3], index]) + b"".join(bytes([w & 0xFF, w >> 8]) for w in self.combo_ram)
+            return (ok + body).ljust(64, b"\0")
         raise AssertionError(f"unexpected cmd {cmd}")
 
     def reset(self, _side, _log):
@@ -86,6 +102,7 @@ class _Board:
             self.ram["place"] = 0
         if not self.keeps_tap_terms:
             self.ram["tap"], self.ram["flow"] = 200, 150
+        self.combo_ram = list(self.combo_flash) if self.keeps_combos else [0] * 5
         if not self.keeps_auto_shift:
             self.ram["as_on"], self.ram["as_ms"] = False, 180
 
@@ -160,6 +177,35 @@ class RebootPersistenceTest(unittest.TestCase):
         board = _Board(protocol=29)
         self.assertEqual(self._run(board)["status"], "pass")
         self.assertFalse(any(p[1] == tap_terms.CMD_TAP_TERMS and len(p) > 7 for p in board.sent))
+
+    def test_v33_carries_a_committed_combo_and_restores_it(self):
+        board = _Board(protocol=33)
+        result = self._run(board)
+        self.assertEqual(result["status"], "pass", result)
+        self.assertIn(combos.set_request(0, 15, [0x0D, 0x0E, 0, 0, 0x29]), board.sent)
+        self.assertEqual(board.combo_flash, [0] * 5)      # restored and committed
+
+    def test_a_board_that_loses_the_combo_fails(self):
+        board = _Board(protocol=33, keeps_combos=False)
+        result = self._run(board)
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("combo", result["error"])
+        # RAM reads the original after the reset; the test record must not stay in flash.
+        self.assertEqual(board.combo_flash, [0] * 5)
+
+    def test_a_commit_that_misses_the_other_half_fails(self):
+        result = self._run(_Board(protocol=33, combo_reaches_other_half=False))
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("combo", result["error"])
+
+    def test_a_reply_for_another_slot_is_not_the_last_slot(self):
+        result = self._run(_Board(protocol=33, combo_echo_index=3))
+        self.assertEqual(result["status"], "fail")
+
+    def test_v32_never_sends_cmd_48(self):
+        board = _Board(protocol=32)
+        self.assertEqual(self._run(board)["status"], "pass")
+        self.assertFalse(any(p[1] == combos.CMD_COMBOS for p in board.sent))
 
 
 if __name__ == "__main__":
