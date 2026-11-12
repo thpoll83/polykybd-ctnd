@@ -11,13 +11,22 @@ and PROTOCOL_HISTORY.md, v32:
   CANCEL  ends the request; a ripple already running finishes.
   Reply "P\\x2F." (ACK) or "P\\x2F!" (NACK), no data. A refused op prints
   "attn: refused op N" to the console. RAM only.
+
+v33 adds op 2 GUIDE (base/attn_guide.c): data[3] ripples in total (0 = until done),
+data[4] period (the same closed range), data[5] target layer, data[6] steps 1..4,
+then {row, col, layer} per step from data[7]. Layers are below
+DYNAMIC_KEYMAP_LAYER_COUNT (13); two steps on one layer, a step on the target layer
+and a key without a display NACK.
 """
 
 CMD_KEY_ATTENTION = 47
 KEY_ATTENTION_MIN_PROTOCOL = 32
+KEY_GUIDE_MIN_PROTOCOL = 33
 
 POLY_CHANNEL = ord("P")
-OP_START, OP_CANCEL = 0, 1
+OP_START, OP_CANCEL, OP_GUIDE = 0, 1, 2
+GUIDE_MAX_STEPS = 4          # ATTN_GUIDE_MAX_STEPS
+LAYER_COUNT = 13             # DYNAMIC_KEYMAP_LAYER_COUNT (split72)
 
 PERIOD_MIN = 23              # KEY_ATTN_PERIOD_MIN, 100 ms units (one ripple runs 2.2 s)
 PERIOD_MAX = 100             # KEY_ATTN_PERIOD_MAX
@@ -30,6 +39,14 @@ def start_request(row: int, col: int, count: int, period: int) -> bytes:
     out-of-range one."""
     return bytes([POLY_CHANNEL, CMD_KEY_ATTENTION, OP_START,
                   row & 0xFF, col & 0xFF, count & 0xFF, period & 0xFF])
+
+
+def guide_request(steps, target: int, count: int, period: int) -> bytes:
+    """`steps` is a list of (row, col, layer). Values are packed as given (masked to
+    a byte); the step count is len(steps), so a test can send 0 or 5."""
+    flat = [v & 0xFF for s in steps for v in s]
+    return bytes([POLY_CHANNEL, CMD_KEY_ATTENTION, OP_GUIDE, count & 0xFF, period & 0xFF,
+                  target & 0xFF, len(steps) & 0xFF] + flat)
 
 
 def cancel_request() -> bytes:

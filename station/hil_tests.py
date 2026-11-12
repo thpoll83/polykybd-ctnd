@@ -1742,7 +1742,7 @@ def test_key_attention(raw: RawHID, log: Callable[[str], None]) -> bool:
         (ka.start_request(row, col, 1, ka.PERIOD_MIN), ACK, "period 23"),
         (ka.start_request(row, col, 1, ka.PERIOD_MAX), ACK, "period 100"),
         (ka.start_request(row, col, 1, ka.PERIOD_MAX + 1), NACK, "period 101"),
-        (ka.op_request(2), NACK, "an unknown op (2)"),
+        (ka.op_request(3), NACK, "an unknown op (3)"),
         (ka.start_request(255, col, 1, 30), NACK, "row 255"),
         (ka.start_request(row, KEY_ATTN_MATRIX_COLS, 1, 30), NACK, "col 8"),
         (ka.start_request(*KEY_ATTN_NO_DISPLAY_KEY, 1, 30), NACK,
@@ -1750,6 +1750,22 @@ def test_key_attention(raw: RawHID, log: Callable[[str], None]) -> bool:
         (ka.start_request(row, col, 0, 30), ACK, "START until cancelled"),
         (ka.cancel_request(), ACK, "CANCEL"),
     ]
+    ok = _run_attention_cases(raw, log, cases, "key-attention")
+    if ok:
+        log("  key attention: START/CANCEL ACKed, closed ranges NACKed, master alive")
+    return ok
+
+
+# The MIDI guide's path on the default split72 keymap: Fn on base layer 4, then the
+# key above the right Shift on the Fn layer 5, to the MIDI layer 8.
+KEY_GUIDE_STEPS = [(2, 0, 4), (7, 7, 5)]
+KEY_GUIDE_TARGET = 8
+
+
+def _run_attention_cases(raw, log, cases, what_ran):
+    """Send each (request, want, label); stop at the first mismatch; always end with
+    CANCEL and check the master still answers GET_ID."""
+    ka = key_attention
     ok = True
     try:
         for request, want, what in cases:
@@ -1766,10 +1782,44 @@ def test_key_attention(raw: RawHID, log: Callable[[str], None]) -> bool:
             log("  FAIL: could not cancel the request")
             ok = False
     if ok and not _master_alive(raw, log):
-        log("  FAIL: master stopped answering GET_ID after the key-attention commands")
+        log(f"  FAIL: master stopped answering GET_ID after the {what_ran} commands")
         ok = False
+    return ok
+
+
+def test_key_guide(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """KEY GUIDE (cmd 47 op 2, protocol v33+): the ripple along a path of layer keys.
+
+    The rig cannot press keys or see the keycaps, so the layer-following is the
+    unit-tested part (make test:polykybd_attn_guide). What this checks: the MIDI
+    guide's own request is ACKed, one step and four steps are ACKed, and the
+    firmware NACKs a period outside 23..100, zero or five steps, a target layer of
+    13, two steps on one layer, a step on the target layer, and a key without a
+    display. CANCEL ends it; the master must still answer GET_ID afterwards.
+    """
+    ka = key_attention
+    steps, target = KEY_GUIDE_STEPS, KEY_GUIDE_TARGET
+    four = [(1, 1, 0), (1, 2, 1), (1, 3, 2), (1, 4, 3)]
+    cases = [
+        (ka.guide_request(steps, target, 1, 30), ACK, "GUIDE Fn then MIDI, 1 ripple"),
+        (ka.guide_request(steps[:1], target, 0, 30), ACK, "GUIDE one step, until done"),
+        (ka.guide_request(four, target, 1, 30), ACK, "GUIDE four steps"),
+        (ka.guide_request(steps, target, 1, ka.PERIOD_MIN - 1), NACK, "period 22"),
+        (ka.guide_request(steps, target, 1, ka.PERIOD_MAX + 1), NACK, "period 101"),
+        (ka.guide_request([], target, 1, 30), NACK, "no step"),
+        (ka.guide_request(four + [(1, 5, 6)], target, 1, 30), NACK, "five steps"),
+        (ka.guide_request(steps, ka.LAYER_COUNT, 1, 30), NACK, "target layer 13"),
+        (ka.guide_request([(2, 0, 4), (7, 7, 4)], target, 1, 30), NACK,
+         "two steps on one layer"),
+        (ka.guide_request([(2, 0, 4), (7, 7, target)], target, 1, 30), NACK,
+         "a step on the target layer"),
+        (ka.guide_request([(2, 0, 4), (*KEY_ATTN_NO_DISPLAY_KEY, 5)], target, 1, 30), NACK,
+         f"step key {KEY_ATTN_NO_DISPLAY_KEY} without a display"),
+        (ka.cancel_request(), ACK, "CANCEL"),
+    ]
+    ok = _run_attention_cases(raw, log, cases, "key-guide")
     if ok:
-        log("  key attention: START/CANCEL ACKed, closed ranges NACKed, master alive")
+        log("  key guide: valid paths ACKed, bad fields NACKed, master alive")
     return ok
 
 
@@ -4435,6 +4485,8 @@ TESTS = [
      "needs_console": True},
     {"name": "key attention start/cancel + range NACKs (v32 cmd 47)",
      "fn": test_key_attention, "min_protocol": key_attention.KEY_ATTENTION_MIN_PROTOCOL},
+    {"name": "key guide path + field NACKs (v33 cmd 47 op 2)",
+     "fn": test_key_guide, "min_protocol": key_attention.KEY_GUIDE_MIN_PROTOCOL},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
