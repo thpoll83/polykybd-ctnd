@@ -1876,6 +1876,7 @@ def test_combos_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         (C, ci, [0x0D, 0, 0, 0, 0x29], False, jk_esc, "one-key combo NACKed"),
         (C, ci, [0x0D, 0, 0x0E, 0, 0x29], False, jk_esc, "combo with a gap NACKed"),
         (C, ci, [0x0D, 0x0E, 0, 0, 0], False, jk_esc, "combo without result NACKed"),
+        (C, ci, [0x0D, 0x0D, 0, 0, 0x29], False, jk_esc, "combo with the same key twice NACKed"),
         (T, ti, td, True, td, "tap dance, all four actions"),
         (T, ti, [0x29, 0x2204, 0, 0, 0], False, td, "mod-tap action NACKed"),
         (T, ti, [0x29, 0, 0, 0, 205], False, td, "off-grid term NACKed"),

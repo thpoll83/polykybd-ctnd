@@ -85,7 +85,8 @@ and relative links were adjusted to suit a standalone file.
   - The **`combos / tap dance round-trip + NACKs + commit (v33 cmd 48)`** test
     (`test_combos_round_trip`, `min_protocol: 33`) uses the last combo and the last
     tap-dance slot: it sets J+K -> Esc and a four-action tap dance with a 250 ms term,
-    reads both back, NACKs a one-key combo, a combo with a gap, a combo without a
+    reads both back, NACKs a one-key combo, a combo with a gap, a combo with the same
+    key twice, a combo without a
     result, a mod-tap tap-dance action, an off-grid term and a slot past the end (each
     must leave the record unchanged), then commits and requires the commit reply to say
     the other half took the copy. It restores both records and commits again. Reboot

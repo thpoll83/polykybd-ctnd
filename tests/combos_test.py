@@ -21,7 +21,7 @@ def _combo_ok(w):
     n = 0
     while n < 4 and keys[n]:
         n += 1
-    return n >= 2 and not any(keys[n:]) and result != 0
+    return n >= 2 and not any(keys[n:]) and result != 0 and len(set(keys[:n])) == n
 
 
 def _td_kc_ok(kc):
