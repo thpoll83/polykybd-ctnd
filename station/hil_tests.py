@@ -1788,7 +1788,7 @@ def _run_attention_cases(raw, log, cases, what_ran):
 
 
 def test_key_guide(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """KEY GUIDE (cmd 47 op 2, protocol v33+): the ripple along a path of layer keys.
+    """KEY GUIDE (cmd 47 op 2, protocol v34+): the ripple along a path of layer keys.
 
     The rig cannot press keys or see the keycaps, so the layer-following is the
     unit-tested part (make test:polykybd_attn_guide). What this checks: the MIDI
@@ -4485,7 +4485,7 @@ TESTS = [
      "needs_console": True},
     {"name": "key attention start/cancel + range NACKs (v32 cmd 47)",
      "fn": test_key_attention, "min_protocol": key_attention.KEY_ATTENTION_MIN_PROTOCOL},
-    {"name": "key guide path + field NACKs (v33 cmd 47 op 2)",
+    {"name": "key guide path + field NACKs (v34 cmd 47 op 2)",
      "fn": test_key_guide, "min_protocol": key_attention.KEY_GUIDE_MIN_PROTOCOL},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},

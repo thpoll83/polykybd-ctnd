@@ -12,7 +12,7 @@ and PROTOCOL_HISTORY.md, v32:
   Reply "P\\x2F." (ACK) or "P\\x2F!" (NACK), no data. A refused op prints
   "attn: refused op N" to the console. RAM only.
 
-v33 adds op 2 GUIDE (base/attn_guide.c): data[3] ripples in total (0 = until done),
+v34 adds op 2 GUIDE (base/attn_guide.c): data[3] ripples in total (0 = until done),
 data[4] period (the same closed range), data[5] target layer, data[6] steps 1..4,
 then {row, col, layer} per step from data[7]. Layers are below
 DYNAMIC_KEYMAP_LAYER_COUNT (13); two steps on one layer, a step on the target layer
@@ -21,7 +21,7 @@ and a key without a display NACK.
 
 CMD_KEY_ATTENTION = 47
 KEY_ATTENTION_MIN_PROTOCOL = 32
-KEY_GUIDE_MIN_PROTOCOL = 33
+KEY_GUIDE_MIN_PROTOCOL = 34
 
 POLY_CHANNEL = ord("P")
 OP_START, OP_CANCEL, OP_GUIDE = 0, 1, 2

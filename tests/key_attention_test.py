@@ -1,4 +1,4 @@
-"""Cmd 47 KEY ATTENTION (v32) and its GUIDE op (v33): the packers, and the HIL tests
+"""Cmd 47 KEY ATTENTION (v32) and its GUIDE op (v34): the packers, and the HIL tests
 against a fake board that validates like key_attention_hid and attn_guide_parse.
 No hardware."""
 import sys
@@ -188,7 +188,7 @@ class HilGuideTest(unittest.TestCase):
     def test_registered_and_gated(self):
         entries = [t for t in hil_tests.TESTS if t["fn"] is hil_tests.test_key_guide]
         self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["min_protocol"], 33)
+        self.assertEqual(entries[0]["min_protocol"], 34)
         self.assertNotIn("tier", entries[0])
 
 
