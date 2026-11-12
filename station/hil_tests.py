@@ -70,6 +70,7 @@ from . import bulk_pipe
 from . import tap_terms
 from . import agent_keys
 from . import key_attention
+from . import usb_midi
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
@@ -233,10 +234,12 @@ FULL_BRIGHT          = 50    # max OLED contrast; > this is rejected (NACK)
 BR_FLAG_VOLATILE     = 1 << 0
 BR_FLAG_AUTO_ON      = 1 << 1
 BR_FLAG_AUTO_OFF     = 1 << 2
-MAX_LAYERS           = 12    # DYNAMIC_KEYMAP_LAYER_COUNT (split72/config.h). Was
-                             # 14 here long after the firmware dropped to 12 — a
-                             # loose sanity bound, so nothing failed. Same drift
+MAX_LAYERS           = 13    # DYNAMIC_KEYMAP_LAYER_COUNT (split72/config.h): 13
+                             # since 1.13.0 added the MIDI layer (qmk#427). A loose
+                             # sanity bound, so a stale value fails nothing; it was
+                             # 14 long after the firmware dropped to 12. Same drift
                              # class as the host's layer_names.yaml.
+USB_MIDI_MIN_FW      = "1.13.0"  # first firmware with the send-only USB MIDI function
 DISPLAY_OVERLAYS_BIT = 0x01  # overlay_flag DISPLAY_OVERLAYS (base/com.h)
 KC_A                 = 0x04  # QMK keycode for 'A'; A..Z = 0x04..0x1D
 KC_P                 = 0x13  # 'P': on the RIGHT half of split72, so its upload is bridged
@@ -535,6 +538,31 @@ def test_single_master_enumerates(raw: RawHID, log: Callable[[str], None]) -> bo
     elif count > 1:
         log("  FAIL: multiple masters — POLYKYBD_HIL force-master override not effective")
     return count == 1
+
+
+def test_usb_midi_send_only(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """The master presents one send-only USB MIDI function (firmware 1.13.0+).
+
+    An AudioControl interface with no endpoints and a MIDIStreaming interface
+    with one bulk IN endpoint (``station/usb_midi.py``). A missing function means the
+    build lost ``MIDI_ENABLE`` (every rig image is the DOOM_PACK flavour, which
+    has MIDI; only the DOOM monolith leaves it out). An OUT endpoint means it
+    lost ``MIDI_SEND_ONLY``. Reads sysfs only, no HID traffic.
+    """
+    devices = usb_midi.keyboard_devices()
+    log(f"  keyboard USB devices: {', '.join(os.path.basename(d) for d in devices) or 'none'}")
+    if len(devices) != 1:
+        log(f"  FAIL: {len(devices)} devices with {usb_midi.VID}:{usb_midi.PID} (expected 1)")
+        return False
+    interfaces = usb_midi.audio_interfaces(devices[0])
+    for itf in interfaces:
+        eps = ", ".join(f"{e:#04x} {itf['types'].get(e, '')}".strip()
+                        for e in itf["endpoints"]) or "none"
+        log(f"  audio iface {itf['name']}: subclass {itf['subclass']}, endpoints {eps}")
+    problems = usb_midi.check_send_only(interfaces)
+    for p in problems:
+        log(f"  FAIL: {p}")
+    return not problems
 
 
 # --- identity / fresh-boot ----------------------------------------------------
@@ -4369,6 +4397,9 @@ def test_bulk_pipe_resource_slot(raw: RawHID, log: Callable[[str], None]) -> boo
 TESTS = [
     {"name": "single master enumerates",        "fn": test_single_master_enumerates},
     {"name": "fresh-boot marker clears",        "fn": test_fresh_boot_marker},
+    # Sysfs only; after the fresh-boot test because the min_fw gate sends GET_ID.
+    {"name": "USB MIDI is send-only",           "fn": test_usb_midi_send_only,
+     "min_fw": USB_MIDI_MIN_FW},
     {"name": "raw HID GET_ID",                  "fn": test_get_id},
     {"name": "font-pack version block (v6)",     "fn": test_fontpack_version_block, "min_protocol": 6},
     {"name": "get current language",            "fn": test_get_lang},

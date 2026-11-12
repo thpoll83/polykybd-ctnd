@@ -621,6 +621,19 @@ runner user cannot write means a rig provisioned before the dialout/udev step of
   The size crosses one 64 KB erase block into a sector tail. Same gate as the
   FW_CHUNK probe.
 
+## USB MIDI (send-only)
+
+- **`USB MIDI is send-only`** (`min_fw` 1.13.0, qmk#427) reads the keyboard's USB
+  interfaces from sysfs (`station/usb_midi.py`) and sends no HID traffic. It
+  requires one AudioControl interface (class 0x01, subclass 0x01) and one
+  MIDIStreaming interface (subclass 0x03) with exactly one endpoint, and that
+  endpoint must be bulk IN. The AudioControl interface must have no endpoints.
+  No MIDI function means the build lost `MIDI_ENABLE`. Every rig image is the DOOM_PACK flavour, which has MIDI; only the DOOM monolith
+  leaves it out, and the rig never flashes that. An OUT endpoint means the build
+  lost `MIDI_SEND_ONLY`, a PolyKybd patch to QMK core that saves ~400 B of RAM.
+  It runs after `fresh-boot marker clears`, because its `min_fw` gate sends a
+  GET_ID.
+
 ## Writing test cases
 
 Tests are plain dicts with `name` and `fn` keys. `fn` receives `(raw_hid: RawHID, log: Callable)` and returns a bool:
