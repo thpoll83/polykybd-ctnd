@@ -1892,6 +1892,10 @@ def test_combos_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
                     log("  FAIL: expected NACK")
                     ok = False
                     break
+                if read(C, ci) != jk_esc:
+                    log("  FAIL: the NACKed out-of-range combo changed the last combo slot")
+                    ok = False
+                    break
                 continue
             if not check(kind, index, words, expect_ack, want, what):
                 ok = False
@@ -1908,8 +1912,8 @@ def test_combos_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
         rc = combos.parse_commit(raw.send(combos.commit_request()))
         log(f"  restore -> {r1}, {r2}, commit {rc}")
         if (r1 is None or r1[0] != ACK or r2 is None or r2[0] != ACK or rc is None or rc[0] != ACK
-                or read(C, ci) != combo0 or read(T, ti) != td0):
-            log("  FAIL: could not restore the original records")
+                or not rc[1] or read(C, ci) != combo0 or read(T, ti) != td0):
+            log("  FAIL: could not restore the original records on both halves")
             ok = False
     if ok:
         log("  combos and tap dances round-tripped; bad records NACKed and changed nothing")

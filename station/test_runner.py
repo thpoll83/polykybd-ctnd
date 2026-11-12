@@ -940,6 +940,7 @@ class TestRunner:
         # itself (not by cmd 26). The last combo slot gets a record it does not hold.
         combo0 = None
         combo_target = None
+        combo_written = False
         if proto is not None and proto >= combos.COMBOS_MIN_PROTOCOL:
             combo0 = self._combo_slot()
             if combo0 is None:
@@ -965,8 +966,10 @@ class TestRunner:
                 raise RuntimeError(f"the keyboard refused tap terms {terms_target}")
             if as_target is not None and not self._set_auto_shift(*as_target):
                 raise RuntimeError(f"the keyboard refused auto shift {as_target}")
-            if combo_target is not None and not self._set_combo_slot(combo_target):
-                raise RuntimeError(f"the keyboard refused combo {combo_target} or its commit")
+            if combo_target is not None:
+                combo_written = True   # restore even if the set was refused half-way
+                if not self._set_combo_slot(combo_target):
+                    raise RuntimeError(f"the keyboard refused combo {combo_target} or its commit")
             if not self._save_eeprom():
                 raise RuntimeError("cmd 26 (save_all_dirty) was not ACKed")
 
@@ -1041,7 +1044,10 @@ class TestRunner:
                 self.log(f"[runner] restore tap terms {terms0}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
                             "value until someone sets it back"))
-            if combo0 is not None and self._combo_slot() != combo0:
+            # Whenever this run wrote the slot, not only when RAM differs: a board
+            # that drops the records at reset can show the original in RAM while
+            # the test record is still in flash.
+            if combo_written:
                 restored = self._set_combo_slot(combo0)
                 self.log(f"[runner] restore combo {combo0}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
@@ -1316,22 +1322,24 @@ class TestRunner:
         except Exception as exc:
             self.log(f"[runner] combo read error: {exc}")
             return None
-        if got is None or got[0] != ACK:
+        # The reply echoes kind and index: a reply for another slot is not this one.
+        if got is None or got[0] != ACK or got[1:3] != (combos.KIND_COMBO, combos.SLOTS - 1):
             return None
         return got[3]
 
     def _set_combo_slot(self, words) -> bool:
-        """Set the last combo slot and commit it to flash (both halves)."""
+        """Set the last combo slot and commit it to flash; True only when both halves
+        took the copy."""
         try:
             got = combos.parse_record(self._raw.send(
                 combos.set_request(combos.KIND_COMBO, combos.SLOTS - 1, words)))
-            if not (got and got[0] == ACK):
+            if not (got and got[0] == ACK and got[1:3] == (combos.KIND_COMBO, combos.SLOTS - 1)):
                 return False
             done = combos.parse_commit(self._raw.send(combos.commit_request()))
         except Exception as exc:
             self.log(f"[runner] combo write error: {exc}")
             return False
-        return bool(done and done[0] == ACK)
+        return bool(done and done[0] == ACK and done[1])
 
     def _save_eeprom(self) -> bool:
         """cmd 26 — flush every dirty user-state block to EEPROM now.

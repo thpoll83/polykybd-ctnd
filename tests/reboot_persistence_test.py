@@ -30,12 +30,15 @@ from station import combos, tap_terms  # noqa: E402
 
 class _Board:
     def __init__(self, protocol=26, keeps_placement=True, keeps_tap_terms=True,
-                 keeps_auto_shift=True, keeps_combos=True):
+                 keeps_auto_shift=True, keeps_combos=True, combo_reaches_other_half=True,
+                 combo_echo_index=None):
         self.protocol = protocol
         self.keeps_placement = keeps_placement
         self.keeps_tap_terms = keeps_tap_terms
         self.keeps_auto_shift = keeps_auto_shift
         self.keeps_combos = keeps_combos
+        self.combo_reaches_other_half = combo_reaches_other_half
+        self.combo_echo_index = combo_echo_index   # None: echo the requested index
         self.combo_ram = [0] * 5       # the last combo slot
         self.combo_flash = [0] * 5     # written by the commit, not by cmd 26
         self.ram = {"idle": 0, "place": 0, "script": 7, "tap": 200, "flow": 150,
@@ -85,10 +88,11 @@ class _Board:
             d = bytes(data).ljust(64, b"\0")
             if arg == combos.OP_COMMIT:
                 self.combo_flash = list(self.combo_ram)
-                return (ok + bytes([1])).ljust(64, b"\0")
+                return (ok + bytes([1 if self.combo_reaches_other_half else 0])).ljust(64, b"\0")
             if arg == combos.OP_SET:
                 self.combo_ram = [d[5 + 2 * i] | (d[6 + 2 * i] << 8) for i in range(5)]
-            body = bytes([d[3], d[4]]) + b"".join(bytes([w & 0xFF, w >> 8]) for w in self.combo_ram)
+            index = d[4] if self.combo_echo_index is None else self.combo_echo_index
+            body = bytes([d[3], index]) + b"".join(bytes([w & 0xFF, w >> 8]) for w in self.combo_ram)
             return (ok + body).ljust(64, b"\0")
         raise AssertionError(f"unexpected cmd {cmd}")
 
@@ -182,9 +186,21 @@ class RebootPersistenceTest(unittest.TestCase):
         self.assertEqual(board.combo_flash, [0] * 5)      # restored and committed
 
     def test_a_board_that_loses_the_combo_fails(self):
-        result = self._run(_Board(protocol=33, keeps_combos=False))
+        board = _Board(protocol=33, keeps_combos=False)
+        result = self._run(board)
         self.assertEqual(result["status"], "fail")
         self.assertIn("combo", result["error"])
+        # RAM reads the original after the reset; the test record must not stay in flash.
+        self.assertEqual(board.combo_flash, [0] * 5)
+
+    def test_a_commit_that_misses_the_other_half_fails(self):
+        result = self._run(_Board(protocol=33, combo_reaches_other_half=False))
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("combo", result["error"])
+
+    def test_a_reply_for_another_slot_is_not_the_last_slot(self):
+        result = self._run(_Board(protocol=33, combo_echo_index=3))
+        self.assertEqual(result["status"], "fail")
 
     def test_v32_never_sends_cmd_48(self):
         board = _Board(protocol=32)
