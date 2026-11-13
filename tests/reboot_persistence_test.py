@@ -109,8 +109,9 @@ class _Board:
 
 class RebootPersistenceTest(unittest.TestCase):
 
-    def _run(self, board):
+    def _run(self, board, two_masters=False):
         runner = tr.TestRunner(log=lambda _m: None)
+        runner._two_masters_after_apply = two_masters
         runner._raw = board
         runner._caps = {"protocol": board.protocol}
         runner._flash = types.SimpleNamespace(reset=board.reset)
@@ -197,6 +198,13 @@ class RebootPersistenceTest(unittest.TestCase):
         result = self._run(_Board(protocol=33, combo_reaches_other_half=False))
         self.assertEqual(result["status"], "fail")
         self.assertIn("combo", result["error"])
+
+    def test_after_an_apply_with_two_masters_this_half_is_enough(self):
+        # The apply turned the slave into a second master: no commit can reach it.
+        board = _Board(protocol=33, combo_reaches_other_half=False)
+        result = self._run(board, two_masters=True)
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(board.combo_flash, [0] * 5)      # restored and committed
 
     def test_a_reply_for_another_slot_is_not_the_last_slot(self):
         result = self._run(_Board(protocol=33, combo_echo_index=3))

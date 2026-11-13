@@ -105,6 +105,9 @@ class TestRunner:
         self._console = HIDConsole()
         self._raw = RawHID()
         self._caps = None  # device caps (fw/protocol), read lazily for the gate
+        # Set by firmware_apply_roundtrip: the apply converted the slave into a second
+        # master, so no split link exists for the rest of this run.
+        self._two_masters_after_apply = False
 
     @property
     def raw(self) -> RawHID:
@@ -153,6 +156,7 @@ class TestRunner:
         ``hil_tests.TIER_EXTENDED``.
         """
         results = []
+        self._two_masters_after_apply = False   # set again by this run's apply, if any
         begin_session()      # the crash scan reads the console from HERE
         try:
             self.flash_halves(left_uf2, right_uf2)
@@ -660,6 +664,7 @@ class TestRunner:
             # log falsifies is worse than none.
             explained = False
             masters = self._masters_after_apply()
+            self._two_masters_after_apply = masters > 1
             if masters > 1:
                 self.log(f"[runner] note: {masters} Raw HID interfaces after the "
                          "apply — the slave installed the master's image (the rig "
@@ -681,6 +686,7 @@ class TestRunner:
                 # gate that runs on every merge, which is the failure this
                 # whole commit exists to prevent.
                 if link != LINK_OK and self._masters_after_apply() > 1:
+                    self._two_masters_after_apply = True
                     # ⚠️ Only claim a measurement when one actually ran. With no
                     # console there was nothing to measure, so saying the slave
                     # rebooted "during the measurement" describes something that
@@ -832,6 +838,9 @@ class TestRunner:
 
             link = measure_split_link(self._raw, self.log)
             if link == LINK_OK:
+                # The slave runs again and the link carries traffic, so a combo
+                # commit must reach the other half again.
+                self._two_masters_after_apply = False
                 self.log(f"[test] PASS: {name} — the applied master image brought "
                          "the split link back up with a fresh slave")
                 return {"name": name, "status": "pass"}
@@ -941,7 +950,13 @@ class TestRunner:
         combo0 = None
         combo_target = None
         combo_written = False
+        # After an apply both halves are masters (see firmware_apply_roundtrip), so no
+        # commit can reach the other half; only this half's flash is checked then.
+        need_other_half = not self._two_masters_after_apply
         if proto is not None and proto >= combos.COMBOS_MIN_PROTOCOL:
+            if not need_other_half:
+                self.log("[runner] note: two masters after the apply, so the combo "
+                         "commit is checked on this half only")
             combo0 = self._combo_slot()
             if combo0 is None:
                 self.log("[test] FAIL: reboot persistence: could not read the last combo slot "
@@ -968,7 +983,7 @@ class TestRunner:
                 raise RuntimeError(f"the keyboard refused auto shift {as_target}")
             if combo_target is not None:
                 combo_written = True   # restore even if the set was refused half-way
-                if not self._set_combo_slot(combo_target):
+                if not self._set_combo_slot(combo_target, need_other_half):
                     raise RuntimeError(f"the keyboard refused combo {combo_target} or its commit")
             if not self._save_eeprom():
                 raise RuntimeError("cmd 26 (save_all_dirty) was not ACKed")
@@ -1048,7 +1063,7 @@ class TestRunner:
             # that drops the records at reset can show the original in RAM while
             # the test record is still in flash.
             if combo_written:
-                restored = self._set_combo_slot(combo0)
+                restored = self._set_combo_slot(combo0, need_other_half)
                 self.log(f"[runner] restore combo {combo0}: "
                          + ("ok" if restored else "FAILED — the rig keeps the test "
                             "value until someone sets it back"))
@@ -1327,9 +1342,9 @@ class TestRunner:
             return None
         return got[3]
 
-    def _set_combo_slot(self, words) -> bool:
-        """Set the last combo slot and commit it to flash; True only when both halves
-        took the copy."""
+    def _set_combo_slot(self, words, need_other_half: bool = True) -> bool:
+        """Set the last combo slot and commit it to flash. True when this half stored
+        it and, if need_other_half, the other half took the copy too."""
         try:
             got = combos.parse_record(self._raw.send(
                 combos.set_request(combos.KIND_COMBO, combos.SLOTS - 1, words)))
@@ -1339,7 +1354,7 @@ class TestRunner:
         except Exception as exc:
             self.log(f"[runner] combo write error: {exc}")
             return False
-        return bool(done and done[0] == ACK and done[1])
+        return bool(done and done[0] == ACK and (done[1] or not need_other_half))
 
     def _save_eeprom(self) -> bool:
         """cmd 26 — flush every dirty user-state block to EEPROM now.
