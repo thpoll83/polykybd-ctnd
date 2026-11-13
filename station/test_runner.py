@@ -686,6 +686,7 @@ class TestRunner:
                 # gate that runs on every merge, which is the failure this
                 # whole commit exists to prevent.
                 if link != LINK_OK and self._masters_after_apply() > 1:
+                    self._two_masters_after_apply = True
                     # ⚠️ Only claim a measurement when one actually ran. With no
                     # console there was nothing to measure, so saying the slave
                     # rebooted "during the measurement" describes something that
@@ -837,6 +838,9 @@ class TestRunner:
 
             link = measure_split_link(self._raw, self.log)
             if link == LINK_OK:
+                # The slave runs again and the link carries traffic, so a combo
+                # commit must reach the other half again.
+                self._two_masters_after_apply = False
                 self.log(f"[test] PASS: {name} — the applied master image brought "
                          "the split link back up with a fresh slave")
                 return {"name": name, "status": "pass"}

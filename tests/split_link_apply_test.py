@@ -466,6 +466,8 @@ class ApplyRoundTripWiringTest(_ApplyFixture):
         self.assertFalse(seen["measured"],
                          "measured a link whose slave is running a master image")
         self.assertEqual(result["status"], "pass")
+        # reboot_persistence reads this: no combo commit can reach the other half.
+        self.assertTrue(runner._two_masters_after_apply)
 
     def test_one_master_and_a_dead_link_still_FAILS(self):
         # The distinction is what keeps the check worth having: this is the
@@ -493,6 +495,8 @@ class ApplyRoundTripWiringTest(_ApplyFixture):
         # the outcome — a late reboot is never graded as a fault — not which of
         # the two paths reaches it.
         self.assertEqual(result["status"], "pass")
+        self.assertTrue(runner._two_masters_after_apply,
+                        "a late second master must also relax the combo check")
 
     def test_a_genuinely_dead_slave_still_fails_after_the_recheck(self):
         # One master throughout: nothing rebooted into a master image, the link
@@ -546,6 +550,8 @@ class ApplyRoundTripWiringTest(_ApplyFixture):
             result = self._apply(runner, tmp)
         self.assertTrue(seen["measured"], "the settle loop should have timed out")
         self.assertEqual(result["status"], "pass")
+        self.assertTrue(runner._two_masters_after_apply,
+                        "the recount found two masters, so the combo check must relax")
 
     def test_the_two_master_run_does_not_also_blame_the_console(self):
         """One UNVERIFIED outcome, one reason — and not a false one.
@@ -617,7 +623,10 @@ class PostApplySlaveReflashTest(_ApplyFixture):
 
     def test_the_slave_is_reflashed_and_the_link_measured(self):
         runner, seen, _fc = self._runner()
+        runner._two_masters_after_apply = True    # as the apply left it
         result = self._post(runner)
+        self.assertFalse(runner._two_masters_after_apply,
+                         "a healthy link must make combo commits reach both halves")
         self.assertEqual(seen["flash"].calls, [("right", "right.uf2")],
                          "the SLAVE half is the one that must be re-flashed")
         self.assertTrue(seen["measured"])
