@@ -1253,7 +1253,16 @@ class TestRunner:
             raise RuntimeError(f"round {n}: Eden never engaged (console: {line!r}), so "
                                "the suspend would not race a core1 job")
         time.sleep(SUSPEND_EDEN_RUN_S)
-        took = suspender.suspend()
+        try:
+            took = suspender.suspend()
+        except HeldAwake:
+            # The suspend is inconclusive, but a core1 stall the console already
+            # recorded is a firmware fault on its own: it fails, never skips.
+            stall = suspend_round_verdict("not-rebooted",
+                                          TAP.find_all(STALL_PATTERN, mark))
+            if stall:
+                raise RuntimeError(f"round {n}: {stall}") from None
+            raise
         self.log(f"[runner]   round {n}: Eden running, port suspended after "
                  f"{took:.1f} s; holding {SUSPEND_HOLD_S:.0f} s")
         time.sleep(SUSPEND_HOLD_S)

@@ -397,6 +397,13 @@ class SuspendWakeEdenTest(unittest.TestCase):
         self.assertGreaterEqual(seen["resumed"], 1)
         self.assertEqual((kb.ram, kb.eeprom), (0, 0))
 
+    def test_a_recorded_core1_stall_FAILS_even_when_the_device_stays_awake(self):
+        self.stall_lines = ["WARNING core1 stalled: no answer for 500 ms at suspend"]
+        result, seen = self._run(FakeKeyboard(style=0), held_awake=True)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("core1 stall", result["error"])
+        self.assertGreaterEqual(seen["resumed"], 1)
+
     def test_every_round_gives_the_suspend_flush_something_to_write(self):
         for os_value, os_auto in ((3, True), (1, False), (2, False)):
             with self.subTest(os=os_value, auto=os_auto):
