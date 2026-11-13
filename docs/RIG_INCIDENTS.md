@@ -66,12 +66,23 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
 - **Class:** unexplained; possibly the rig's USB link or cable. Attempt a2 passed.
 - **Cost:** one re-run of a PR.
 
-### USB-suspend grant not installed on the Pi
-- **Symptom:** every run up to 2026-11-13 logs `SKIP: … rig not provisioned for it:
-  /usr/local/sbin/polykybd-usb-suspend is not installed`.
-- **Class:** rig setup. The check SKIPs (ctnd#116), so nothing fails, but the USB-suspend
-  path is not tested on any run.
-- **Fix:** on the Pi, `sudo bash ./scripts/setup.sh --units-only`.
+### 2026-11-13: USB-suspend check cannot suspend the keyboard
+- **Run:** 43402659211 (extended dispatch on `PolyKybd` 779d7bad), the first run after
+  `setup.sh --units-only` installed the grant. Until then every run had skipped the check
+  (`rig not provisioned for it`) since it was added on 2026-10-13, so it never passed.
+- **Symptom:** `[test] FAIL: USB suspend with Eden on core1 (flush + wake): 1-1.4 still reads runtime_status=active 10 s after control=auto`
+- **Class:** rig code. `polykybd-usb-suspend` (`scripts/usb-suspend-ctl.sh`) can unbind
+  only `usbhid`. The keyboard now also has a CDC interface (bulk pipe, `cdc_acm`) and,
+  since firmware 1.13.0, USB MIDI (`snd-usb-audio`). A driver that holds an interface keeps
+  the device awake. Which one does it here is not confirmed yet.
+- **Interim:** the check logs the driver of every interface, and reports SKIP (not FAIL)
+  when the device stays awake while a driver other than `usbhid` is bound, naming it. A
+  device held awake with only `usbhid` bound still fails.
+- **Fix:** extend the wrapper and the check to unbind every interface driver and bind it
+  again on wake. The wrapper is installed by `setup.sh`, so it needs one more
+  `sudo bash ./scripts/setup.sh --units-only` on the Pi.
+- **Cost:** while it failed, the firmware-apply job skipped the apply on every merge, so
+  the next firmware release would have been refused at the gate.
 
 ## Closed
 
@@ -130,7 +141,7 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
 - **Class:** rig setup.
 - **Cause and fix:** ctnd#114 added the check and its root wrapper, but `setup.sh` runs only
   by hand on the Pi, so the grant was never installed. ctnd#116 made the check SKIP while
-  the grant is absent. The grant is still missing (see Open).
+  the grant is absent. The grant was installed on 2026-11-13 (see Open for what followed).
 - **Cost:** firmware 1.9.2 was published with no files.
 
 ### 2026-07: rig ran stale station code for about 5 days

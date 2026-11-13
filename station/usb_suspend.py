@@ -129,6 +129,29 @@ def bound_interfaces(device: str, driver: str = USBHID, root: str = SYSFS_USB) -
     return out
 
 
+def interface_drivers(device: str, root: str = SYSFS_USB) -> dict:
+    """Every interface of the device and the driver bound to it (None if none)."""
+    devices = os.path.join(root, "devices")
+    out = {}
+    for name in sorted(os.listdir(devices)):
+        if not name.startswith(device + ":"):
+            continue
+        link = os.path.join(devices, name, "driver")
+        out[name] = os.path.basename(os.readlink(link)) if os.path.islink(link) else None
+    return out
+
+
+class HeldAwake(RuntimeError):
+    """The device did not suspend while interfaces were bound to drivers other than
+    ``usbhid``. The wrapper can unbind only ``usbhid``, so the rig cannot tell
+    whether one of those drivers or the firmware kept it awake. ``others`` maps
+    each such interface to its driver."""
+
+    def __init__(self, message: str, others: dict):
+        super().__init__(message)
+        self.others = others
+
+
 def runtime_status(device: str, root: str = SYSFS_USB) -> str:
     """``active``, ``suspended``, ``suspending``, ``resuming`` or ``error``."""
     return _read(os.path.join(root, "devices", device, "power", "runtime_status"))
@@ -174,8 +197,15 @@ class UsbSuspend:
             if status == "suspended":
                 return self._clock() - start
             if self._clock() - start >= timeout_s:
-                raise RuntimeError(f"{self.device} still reads runtime_status="
-                                   f"{status} {timeout_s:.0f} s after control=auto")
+                msg = (f"{self.device} still reads runtime_status={status} "
+                       f"{timeout_s:.0f} s after control=auto")
+                others = {i: d for i, d in interface_drivers(self.device, self._root).items()
+                          if d is not None and d != USBHID}
+                if others:
+                    held = ", ".join(f"{i}={d}" for i, d in others.items())
+                    raise HeldAwake(f"{msg}, with interfaces still bound to other "
+                                    f"drivers ({held})", others)
+                raise RuntimeError(msg)
             self._sleep(0.1)
 
     def resume(self) -> None:
