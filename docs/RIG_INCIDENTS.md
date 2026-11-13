@@ -6,8 +6,11 @@ rig's setup, and of failures that are still unexplained. Newest first. The suite
 
 Add an entry whenever a HIL run is red or never ran and the firmware under test was not
 the cause, and whenever a failure stays unexplained. Before you classify a new failure,
-grep this file for its symptom line: a match means it is a repeat, so add the run to that
-entry instead of starting a new one.
+grep this file for the fixed text of its symptom line, without the values that change from
+run to run (byte counts, CRCs, status bytes, run ids). A match is only a candidate repeat:
+one line can have several causes (the bulk pipe soak, for example, prints the same
+`count/CRC/bad-frame mismatch` for all three). Add the run to the existing entry only when
+the cause is the same; otherwise start a new entry and name the one it resembles.
 
 Each entry has:
 
