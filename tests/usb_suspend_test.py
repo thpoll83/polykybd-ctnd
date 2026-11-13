@@ -38,18 +38,30 @@ from station.usb_suspend import (HeldAwake, UsbSuspend, bound_interfaces,  # noq
 
 
 class FakeSysfs:
-    """A /sys/bus/usb tree with one keyboard (three HID interfaces) and a hub."""
+    """A /sys/bus/usb tree with one keyboard and a hub.
+
+    The keyboard has three HID interfaces; ``full=True`` adds the real keyboard's
+    other two pairs: USB MIDI (1.3 control + 1.4 streaming, snd-usb-audio) and the
+    bulk pipe (1.5 control + 1.6 data, cdc_acm). As in the kernel, unbinding a
+    pair's first interface releases its partner, and binding it claims it back.
+    ``old_wrapper=True`` refuses any driver but usbhid, like the wrapper installed
+    before cdc_acm and snd-usb-audio support."""
 
     DEV = "1-1.3"
+    PAIRS = {"1.3": "1.4", "1.5": "1.6"}
 
     def __init__(self, root: str, control: str = "on", delay: str = "2000",
-                 holds_awake: bool = False, other_driver: str = None):
+                 holds_awake: bool = False, full: bool = False,
+                 old_wrapper: bool = False, unbind_releases_partner: bool = True):
         self.root = root
-        self.holds_awake = holds_awake   # something besides usbhid keeps it awake
+        self.holds_awake = holds_awake   # something besides a driver keeps it awake
+        self.old_wrapper = old_wrapper
+        self.unbind_releases_partner = unbind_releases_partner
         self.writes = []
         devices = os.path.join(root, "devices")
         self.drivers = os.path.join(root, "drivers", "usbhid")
-        os.makedirs(self.drivers)
+        for drv in ("usbhid", "cdc_acm", "snd-usb-audio"):
+            os.makedirs(os.path.join(root, "drivers", drv))
         for name, vid, pid in (("usb1", "1d6b", "0002"), ("1-1", "2109", "3431"),
                                (self.DEV, "2021", "2007")):
             d = os.path.join(devices, name)
@@ -60,19 +72,15 @@ class FakeSysfs:
         self._put(os.path.join(power, "control"), control + "\n")
         self._put(os.path.join(power, "autosuspend_delay_ms"), delay + "\n")
         self._put(os.path.join(power, "runtime_status"), "active\n")
-        for i in range(3):
-            intf = os.path.join(devices, f"{self.DEV}:1.{i}")
+        layout = {"1.0": "usbhid", "1.1": "usbhid", "1.2": "usbhid"}
+        if full:
+            layout.update({"1.3": "snd-usb-audio", "1.4": "snd-usb-audio",
+                           "1.5": "cdc_acm", "1.6": "cdc_acm"})
+        self.layout = layout
+        for i, drv in layout.items():
+            intf = os.path.join(devices, f"{self.DEV}:{i}")
             os.makedirs(intf)
-            os.symlink(self.drivers, os.path.join(intf, "driver"))
-        if other_driver:
-            # A fourth interface held by another driver (cdc_acm, snd-usb-audio),
-            # which the wrapper cannot unbind: it keeps the device awake.
-            other = os.path.join(root, "drivers", other_driver)
-            os.makedirs(other)
-            intf = os.path.join(devices, f"{self.DEV}:1.3")
-            os.makedirs(intf)
-            os.symlink(other, os.path.join(intf, "driver"))
-            self.holds_awake = True
+            os.symlink(os.path.join(root, "drivers", drv), os.path.join(intf, "driver"))
 
     @staticmethod
     def _put(path, text):
@@ -89,6 +97,10 @@ class FakeSysfs:
     def delay(self):
         return self._get("devices", self.DEV, "power", "autosuspend_delay_ms")
 
+    def bound(self):
+        """Every interface that has a driver, with the driver's name."""
+        return {i: d for i, d in interface_drivers(self.DEV, root=self.root).items() if d}
+
     def ctl(self, op, target, value=None):
         """The sudo_ctl stand-in: apply the wrapper operation the way the kernel
         would. ``fail_unbind`` makes the unbind of that interface fail."""
@@ -97,21 +109,31 @@ class FakeSysfs:
             raise RuntimeError(f"unbind {target} failed")
         devices = os.path.join(self.root, "devices")
         if op in ("unbind", "bind"):
-            link = os.path.join(devices, target, "driver")
-            if op == "unbind":
-                os.unlink(link)
-            else:
-                if os.path.islink(link):
-                    raise RuntimeError(f"bind {target}: EBUSY")
-                os.symlink(self.drivers, link)
+            drv = value or "usbhid"
+            if self.old_wrapper and drv != "usbhid":
+                raise RuntimeError(f"polykybd-usb-suspend {op} {target} {drv} failed: "
+                                   "usage")
+            intf = target.split(":")[1]
+            group = [intf]
+            if intf in self.PAIRS and (op == "bind" or self.unbind_releases_partner):
+                group.append(self.PAIRS[intf])
+            for member in group:
+                link = os.path.join(devices, f"{self.DEV}:{member}", "driver")
+                if op == "unbind":
+                    if not os.path.islink(link):
+                        raise RuntimeError(f"unbind {self.DEV}:{member}: ENODEV")
+                    os.unlink(link)
+                else:
+                    if os.path.islink(link):
+                        raise RuntimeError(f"bind {self.DEV}:{member}: EBUSY")
+                    os.symlink(os.path.join(self.root, "drivers", drv), link)
         else:
             attr = {"control": "control", "delay": "autosuspend_delay_ms"}[op]
             self._put(os.path.join(devices, target, "power", attr), value + "\n")
         self._update_status()
 
     def _update_status(self):
-        bound = bound_interfaces(self.DEV, root=self.root)
-        asleep = self.control() == "auto" and not bound and not self.holds_awake
+        asleep = self.control() == "auto" and not self.bound() and not self.holds_awake
         self._put(os.path.join(self.root, "devices", self.DEV, "power",
                                "runtime_status"),
                   ("suspended" if asleep else "active") + "\n")
@@ -203,22 +225,56 @@ class UsbSuspendTest(unittest.TestCase):
             s.suspend(timeout_s=2.0)
         self.assertNotIsInstance(cm.exception, HeldAwake)
 
-    def test_another_driver_on_an_interface_is_named_in_HeldAwake(self):
-        fs = FakeSysfs(self.root, other_driver="cdc_acm")
+    def test_the_full_keyboard_suspends_and_every_driver_comes_back(self):
+        # HID, the MIDI pair and the CDC pair: all unbound, then all bound again
+        # by the driver they had, with each pair's partner handled by the kernel.
+        fs = FakeSysfs(self.root, full=True)
+        before = fs.bound()
+        sleep, clock = self._clock()
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
+        s.suspend(timeout_s=2.0)
+        self.assertEqual(fs.bound(), {})
+        s.resume()
+        self.assertEqual(fs.bound(), before)
+        self.assertIn(("unbind", f"{fs.DEV}:1.3", "snd-usb-audio"), fs.writes)
+        self.assertIn(("bind", f"{fs.DEV}:1.5", "cdc_acm"), fs.writes)
+        # The partners were released and claimed by their pair, never written.
+        for op in ("unbind", "bind"):
+            for partner in ("1.4", "1.6"):
+                self.assertFalse([w for w in fs.writes
+                                  if w[0] == op and w[1] == f"{fs.DEV}:{partner}"])
+
+    def test_a_partner_claimed_by_its_pair_is_not_bound_twice(self):
+        # Where unbinding leaves the partner to be unbound on its own, binding the
+        # pair's first interface still claims it: a second bind would be EBUSY.
+        fs = FakeSysfs(self.root, full=True, unbind_releases_partner=False)
+        before = fs.bound()
+        sleep, clock = self._clock()
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
+        s.suspend(timeout_s=2.0)
+        s.resume()
+        self.assertEqual(fs.bound(), before)
+        self.assertFalse([w for w in fs.writes if w[0] == "bind"
+                          and w[1] in (f"{fs.DEV}:1.4", f"{fs.DEV}:1.6")])
+
+    def test_an_old_wrapper_leaves_the_others_bound_and_raises_HeldAwake(self):
+        fs = FakeSysfs(self.root, full=True, old_wrapper=True)
         sleep, clock = self._clock()
         s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
         with self.assertRaises(HeldAwake) as cm:
             s.suspend(timeout_s=2.0)
-        self.assertEqual(cm.exception.others, {f"{fs.DEV}:1.3": "cdc_acm"})
+        self.assertEqual(set(cm.exception.others.values()), {"cdc_acm", "snd-usb-audio"})
         self.assertIn("cdc_acm", str(cm.exception))
         s.resume()
         self.assertEqual(len(bound_interfaces(fs.DEV, root=self.root)), 3)
 
     def test_interface_drivers_lists_every_interface(self):
-        fs = FakeSysfs(self.root, other_driver="snd-usb-audio")
+        fs = FakeSysfs(self.root, full=True)
         self.assertEqual(interface_drivers(fs.DEV, root=self.root),
                          {f"{fs.DEV}:1.0": "usbhid", f"{fs.DEV}:1.1": "usbhid",
-                          f"{fs.DEV}:1.2": "usbhid", f"{fs.DEV}:1.3": "snd-usb-audio"})
+                          f"{fs.DEV}:1.2": "usbhid", f"{fs.DEV}:1.3": "snd-usb-audio",
+                          f"{fs.DEV}:1.4": "snd-usb-audio", f"{fs.DEV}:1.5": "cdc_acm",
+                          f"{fs.DEV}:1.6": "cdc_acm"})
 
     def test_a_failed_bind_on_wake_is_retried_by_the_next_resume(self):
         fs = FakeSysfs(self.root, control="on", delay="2000")
@@ -707,9 +763,11 @@ class UsbSuspendCtlTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.fs = FakeSysfs(self._tmp.name)
-        os.makedirs(os.path.join(self._tmp.name, "drivers", "usbhid"), exist_ok=True)
-        for f in ("bind", "unbind"):
-            FakeSysfs._put(os.path.join(self._tmp.name, "drivers", "usbhid", f), "")
+        # usb-storage exists too, so only the wrapper's driver list can refuse it.
+        for drv in ("usbhid", "cdc_acm", "snd-usb-audio", "usb-storage"):
+            os.makedirs(os.path.join(self._tmp.name, "drivers", drv), exist_ok=True)
+            for f in ("bind", "unbind"):
+                FakeSysfs._put(os.path.join(self._tmp.name, "drivers", drv, f), "")
         # A second HID device that is not the keyboard.
         d = os.path.join(self._tmp.name, "devices", "1-1.4")
         os.makedirs(os.path.join(d, "power"))
@@ -739,6 +797,16 @@ class UsbSuspendCtlTest(unittest.TestCase):
         for args, path, want in (
                 (("unbind", f"{dev}:1.0"), ("drivers", "usbhid", "unbind"), f"{dev}:1.0"),
                 (("bind", f"{dev}:1.2"), ("drivers", "usbhid", "bind"), f"{dev}:1.2"),
+                (("unbind", f"{dev}:1.0", "usbhid"), ("drivers", "usbhid", "unbind"),
+                 f"{dev}:1.0"),
+                (("unbind", f"{dev}:1.1", "cdc_acm"), ("drivers", "cdc_acm", "unbind"),
+                 f"{dev}:1.1"),
+                (("bind", f"{dev}:1.1", "cdc_acm"), ("drivers", "cdc_acm", "bind"),
+                 f"{dev}:1.1"),
+                (("unbind", f"{dev}:1.2", "snd-usb-audio"),
+                 ("drivers", "snd-usb-audio", "unbind"), f"{dev}:1.2"),
+                (("bind", f"{dev}:1.2", "snd-usb-audio"),
+                 ("drivers", "snd-usb-audio", "bind"), f"{dev}:1.2"),
                 (("control", dev, "auto"), ("devices", dev, "power", "control"), "auto"),
                 (("delay", dev, "0"), ("devices", dev, "power", "autosuspend_delay_ms"), "0")):
             with self.subTest(args=args):
@@ -753,7 +821,12 @@ class UsbSuspendCtlTest(unittest.TestCase):
                 ("unbind",),
                 ("unbind", "1-1.4:1.0"),                 # another vendor's device
                 ("control", "1-1.4", "auto"),
-                ("unbind", f"{dev}:1.0", "extra"),
+                ("unbind", f"{dev}:1.0", "extra"),       # not a driver of the PolyKybd
+                ("unbind", f"{dev}:1.0", "usb-storage"),
+                ("unbind", f"{dev}:1.0", "../usbhid"),
+                ("unbind", f"{dev}:1.0", "usbhid/../../x"),
+                ("unbind", f"{dev}:1.0", "cdc_acm", "extra"),
+                ("unbind", "1-1.4:1.0", "cdc_acm"),      # another vendor's device
                 ("unbind", "../../../etc/passwd"),
                 ("control", f"{dev}/../1-1.4", "auto"),
                 ("control", dev, "suspend"),
@@ -765,6 +838,7 @@ class UsbSuspendCtlTest(unittest.TestCase):
                 r = self.run_ctl(*args)
                 self.assertNotEqual(r.returncode, 0, f"accepted {args}")
         self.assertEqual(self.read("devices", "1-1.4", "power", "control"), "on\n")
+        self.assertEqual(self.read("drivers", "usb-storage", "unbind"), "")
 
 
 if __name__ == "__main__":

@@ -7,9 +7,11 @@ host that sleeps leaves VBUS on and stops the bus, and that bus suspend is what
 runs the firmware's ``suspend_power_down_kb()``, its EEPROM flush and the core1
 suspend hold. The kernel's runtime PM produces the same bus state:
 
-1. unbind ``usbhid`` from every interface of the keyboard. A bound ``usbhid``
-   whose input device is open (X, the kiosk) holds a PM reference and the device
-   never autosuspends; an interface with no driver holds none.
+1. unbind the driver from every interface of the keyboard (``UNBINDABLE``:
+   ``usbhid``, ``cdc_acm`` for the bulk pipe, ``snd-usb-audio`` for USB MIDI). A
+   bound driver whose device is open (X or the kiosk on an input device, a reader
+   on ``/dev/ttyACM0``, a MIDI client) holds a PM reference and the device never
+   autosuspends; an interface with no driver holds none.
 2. ``power/autosuspend_delay_ms`` = 0 and ``power/control`` = ``auto``. The USB
    core then suspends the port, and ``power/runtime_status`` reads
    ``suspended``. That file is the proof the suspend happened.
@@ -30,12 +32,16 @@ from typing import Callable
 
 SYSFS_USB = "/sys/bus/usb"
 USBHID = "usbhid"
+# The drivers the keyboard's interfaces use, which polykybd-usb-suspend may unbind:
+# usbhid (the HID interfaces), cdc_acm (the bulk pipe) and snd-usb-audio (USB MIDI).
+# A bound driver can hold the device awake, so all of them are unbound.
+UNBINDABLE = (USBHID, "cdc_acm", "snd-usb-audio")
 USB_SUSPEND_CTL = "/usr/local/sbin/polykybd-usb-suspend"
 GRANT_PROBE_TIMEOUT_S = 10.0   # grant_missing(): sudo -n answers in well under 1 s
 
 
 def sudo_ctl(*args: str) -> None:
-    """Run one wrapper operation as root: ``unbind``/``bind`` <intf>,
+    """Run one wrapper operation as root: ``unbind``/``bind`` <intf> [driver],
     ``control`` <dev> on|auto, or ``delay`` <dev> <ms>.
 
     ``-n``: a missing grant fails at once instead of waiting on a password
@@ -142,10 +148,11 @@ def interface_drivers(device: str, root: str = SYSFS_USB) -> dict:
 
 
 class HeldAwake(RuntimeError):
-    """The device did not suspend while interfaces were bound to drivers other than
-    ``usbhid``. The wrapper can unbind only ``usbhid``, so the rig cannot tell
-    whether one of those drivers or the firmware kept it awake. ``others`` maps
-    each such interface to its driver."""
+    """The device did not suspend while some interfaces were still bound, because
+    the wrapper refused to unbind their driver (an installed copy older than
+    cdc_acm and snd-usb-audio support, or a driver not in ``UNBINDABLE``). The rig
+    then cannot tell whether that driver or the firmware kept it awake. ``others``
+    maps each such interface to its driver."""
 
     def __init__(self, message: str, others: dict):
         super().__init__(message)
@@ -186,9 +193,24 @@ class UsbSuspend:
         # Record each interface only once its unbind succeeded: resume() rebinds
         # exactly these, and a bind of one still bound fails with EBUSY.
         self._unbound = []
-        for intf in bound_interfaces(self.device, root=self._root):
-            self._ctl("unbind", intf)
-            self._unbound.append(intf)
+        for intf, drv in interface_drivers(self.device, self._root).items():
+            if drv not in UNBINDABLE:
+                continue
+            # Unbinding the control interface of a CDC or audio pair releases its
+            # partner too, so read the driver again before each unbind.
+            if self._driver_of(intf) != drv:
+                continue
+            if drv == USBHID:
+                self._ctl("unbind", intf)
+            else:
+                try:
+                    self._ctl("unbind", intf, drv)
+                except RuntimeError:
+                    # A wrapper installed before cdc_acm and snd-usb-audio were
+                    # added refuses them. The driver stays bound, the device stays
+                    # awake, and suspend() raises HeldAwake (a SKIP, not a FAIL).
+                    continue
+            self._unbound.append((intf, drv))
         self._ctl("delay", self.device, "0")
         self._ctl("control", self.device, "auto")
         start = self._clock()
@@ -208,8 +230,12 @@ class UsbSuspend:
                 raise RuntimeError(msg)
             self._sleep(0.1)
 
+    def _driver_of(self, intf: str):
+        link = os.path.join(self._root, "devices", intf, "driver")
+        return os.path.basename(os.readlink(link)) if os.path.islink(link) else None
+
     def resume(self) -> None:
-        """Wake the port, rebind ``usbhid``, then restore the PM settings.
+        """Wake the port, bind the drivers again, then restore the PM settings.
 
         The settings go back last: restoring ``control=auto`` while no driver is
         bound would let the port autosuspend again before the bind. Each piece of
@@ -218,7 +244,14 @@ class UsbSuspend:
         if self._saved is not None:
             self._ctl("control", self.device, "on")
         while self._unbound:
-            self._ctl("bind", self._unbound[0])
+            intf, drv = self._unbound[0]
+            # Binding the control interface of a CDC or audio pair claims its
+            # partner, so a partner that is bound again needs no bind of its own.
+            if self._driver_of(intf) is None:
+                if drv == USBHID:
+                    self._ctl("bind", intf)
+                else:
+                    self._ctl("bind", intf, drv)
             self._unbound.pop(0)
         if self._saved is not None:
             control, delay = self._saved

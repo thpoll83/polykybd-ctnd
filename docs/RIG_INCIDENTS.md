@@ -78,9 +78,12 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
 - **Interim:** the check logs the driver of every interface, and reports SKIP (not FAIL)
   when the device stays awake while a driver other than `usbhid` is bound, naming it. A
   device held awake with only `usbhid` bound still fails.
-- **Fix:** extend the wrapper and the check to unbind every interface driver and bind it
-  again on wake. The wrapper is installed by `setup.sh`, so it needs one more
-  `sudo bash ./scripts/setup.sh --units-only` on the Pi.
+- **Drivers found** (run 43419583870, after the interim change): `1.0`–`1.3` usbhid,
+  `1.4`/`1.5` snd-usb-audio, `1.6`/`1.7` cdc_acm. The check reported SKIP; the run was green.
+- **Fix:** the wrapper and the check unbind every interface driver (usbhid, cdc_acm,
+  snd-usb-audio) and bind it again on wake. The wrapper is installed by `setup.sh`, so it
+  needs one more `sudo bash ./scripts/setup.sh --units-only` on the Pi. Until then the
+  installed wrapper refuses the new drivers and the check keeps reporting SKIP.
 - **Cost:** while it failed, the firmware-apply job skipped the apply on every merge, so
   the next firmware release would have been refused at the gate.
 

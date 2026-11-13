@@ -110,9 +110,10 @@ install_service_sudoers() {
   sudo chmod 0440 /etc/sudoers.d/polykybd-update
 
   # HIL suspend/wake check (ctnd#114): the four sysfs writes go through the
-  # polykybd-usb-suspend wrapper, which refuses anything but unbind/bind,
-  # control on|auto and delay on the 2021:2007 device. Same installed-copy rule
-  # as runner-ctl above. Without this the check SKIPs (grant_missing()).
+  # polykybd-usb-suspend wrapper, which refuses anything but unbind/bind (usbhid,
+  # cdc_acm or snd-usb-audio), control on|auto and delay on the 2021:2007 device.
+  # Same installed-copy rule as runner-ctl above. Without this the check SKIPs
+  # (grant_missing()).
   sudo install -o root -g root -m 0755 scripts/usb-suspend-ctl.sh "$USB_SUSPEND_BIN"
   printf '%s ALL=(root) NOPASSWD: %s\n' "$CTND_USER" "$USB_SUSPEND_BIN" \
     | sudo tee /etc/sudoers.d/polykybd-usb-suspend > /dev/null
