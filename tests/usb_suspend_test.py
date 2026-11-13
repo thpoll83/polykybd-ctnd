@@ -33,7 +33,8 @@ if "RPi" not in sys.modules:  # pragma: no cover - environment shim
     sys.modules["RPi"], sys.modules["RPi.GPIO"] = _rpi, _gpio
 
 from station import usb_suspend                        # noqa: E402
-from station.usb_suspend import UsbSuspend, bound_interfaces, find_device  # noqa: E402
+from station.usb_suspend import (HeldAwake, UsbSuspend, bound_interfaces,  # noqa: E402
+                                 find_device, interface_drivers)
 
 
 class FakeSysfs:
@@ -42,7 +43,7 @@ class FakeSysfs:
     DEV = "1-1.3"
 
     def __init__(self, root: str, control: str = "on", delay: str = "2000",
-                 holds_awake: bool = False):
+                 holds_awake: bool = False, other_driver: str = None):
         self.root = root
         self.holds_awake = holds_awake   # something besides usbhid keeps it awake
         self.writes = []
@@ -63,6 +64,15 @@ class FakeSysfs:
             intf = os.path.join(devices, f"{self.DEV}:1.{i}")
             os.makedirs(intf)
             os.symlink(self.drivers, os.path.join(intf, "driver"))
+        if other_driver:
+            # A fourth interface held by another driver (cdc_acm, snd-usb-audio),
+            # which the wrapper cannot unbind: it keeps the device awake.
+            other = os.path.join(root, "drivers", other_driver)
+            os.makedirs(other)
+            intf = os.path.join(devices, f"{self.DEV}:1.3")
+            os.makedirs(intf)
+            os.symlink(other, os.path.join(intf, "driver"))
+            self.holds_awake = True
 
     @staticmethod
     def _put(path, text):
@@ -185,6 +195,31 @@ class UsbSuspendTest(unittest.TestCase):
         self.assertEqual(len(bound_interfaces(fs.DEV, root=self.root)), 3)
         self.assertEqual(fs.control(), "on")
 
+    def test_a_device_held_by_usbhid_alone_is_not_HeldAwake(self):
+        fs = FakeSysfs(self.root, holds_awake=True)
+        sleep, clock = self._clock()
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
+        with self.assertRaises(RuntimeError) as cm:
+            s.suspend(timeout_s=2.0)
+        self.assertNotIsInstance(cm.exception, HeldAwake)
+
+    def test_another_driver_on_an_interface_is_named_in_HeldAwake(self):
+        fs = FakeSysfs(self.root, other_driver="cdc_acm")
+        sleep, clock = self._clock()
+        s = UsbSuspend(fs.DEV, root=self.root, ctl=fs.ctl, sleep=sleep, clock=clock)
+        with self.assertRaises(HeldAwake) as cm:
+            s.suspend(timeout_s=2.0)
+        self.assertEqual(cm.exception.others, {f"{fs.DEV}:1.3": "cdc_acm"})
+        self.assertIn("cdc_acm", str(cm.exception))
+        s.resume()
+        self.assertEqual(len(bound_interfaces(fs.DEV, root=self.root)), 3)
+
+    def test_interface_drivers_lists_every_interface(self):
+        fs = FakeSysfs(self.root, other_driver="snd-usb-audio")
+        self.assertEqual(interface_drivers(fs.DEV, root=self.root),
+                         {f"{fs.DEV}:1.0": "usbhid", f"{fs.DEV}:1.1": "usbhid",
+                          f"{fs.DEV}:1.2": "usbhid", f"{fs.DEV}:1.3": "snd-usb-audio"})
+
     def test_a_failed_bind_on_wake_is_retried_by_the_next_resume(self):
         fs = FakeSysfs(self.root, control="on", delay="2000")
         sleep, clock = self._clock()
@@ -279,9 +314,11 @@ class SuspendWakeEdenTest(unittest.TestCase):
     def setUp(self):
         self._saved = {n: getattr(tr, n) for n in
                        ("time", "TAP", "find_device", "UsbSuspend",
-                        "_crash_record_body", "_wait_for_reboot", "grant_missing")}
+                        "_crash_record_body", "_wait_for_reboot", "grant_missing",
+                        "interface_drivers")}
         self.addCleanup(lambda: [setattr(tr, n, v) for n, v in self._saved.items()])
         tr.grant_missing = lambda: None   # a provisioned rig
+        tr.interface_drivers = lambda *_a: {"1-1.3:1.0": "usbhid"}
         tr.time = types.SimpleNamespace(sleep=lambda _s: None, monotonic=lambda: 0.0)
         self.idle_line = "Transition to idle [style=eden] - eden screensaver"
         self.stall_lines = []
@@ -315,7 +352,7 @@ class SuspendWakeEdenTest(unittest.TestCase):
             return list(self.stall_lines)
         return []
 
-    def _run(self, kb, fw="1.9.1", log=None):
+    def _run(self, kb, fw="1.9.1", log=None, held_awake=False):
         seen = {"suspends": 0, "resumed": 0}
 
         class FakeSuspend:
@@ -324,6 +361,9 @@ class SuspendWakeEdenTest(unittest.TestCase):
 
             def suspend(self):
                 seen["suspends"] += 1
+                if held_awake:
+                    raise tr.HeldAwake("1-1.3 still reads runtime_status=active",
+                                       {"1-1.3:1.3": "cdc_acm"})
                 kb.suspend_flush()
                 return 0.2
 
@@ -345,6 +385,16 @@ class SuspendWakeEdenTest(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual(seen["suspends"], tr.SUSPEND_ROUNDS)
         self.assertEqual(kb.idle_starts, tr.SUSPEND_ROUNDS)
+        self.assertEqual((kb.ram, kb.eeprom), (0, 0))
+
+    def test_a_device_held_by_another_driver_skips_and_restores(self):
+        # The wrapper unbinds only usbhid, so the rig cannot tell whether cdc_acm
+        # or the firmware kept the device awake: SKIP, never a firmware FAIL.
+        kb = FakeKeyboard(style=0)
+        result, seen = self._run(kb, held_awake=True)
+        self.assertEqual(result["status"], "skip", result)
+        self.assertIn("cdc_acm", result["reason"])
+        self.assertGreaterEqual(seen["resumed"], 1)
         self.assertEqual((kb.ram, kb.eeprom), (0, 0))
 
     def test_every_round_gives_the_suspend_flush_something_to_write(self):

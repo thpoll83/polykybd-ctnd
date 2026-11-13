@@ -18,7 +18,8 @@ from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_s
                         _crash_record_body, _wait_for_reboot, describe_crash_record,
                         suspend_round_verdict, SUSPEND_RETURN_S)
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID
-from .usb_suspend import UsbSuspend, find_device, grant_missing
+from .usb_suspend import (HeldAwake, UsbSuspend, find_device, grant_missing,
+                          interface_drivers)
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
 # keyboards/polykybd/hid_com.c (case 24 / 0x18). A command report is
@@ -1132,6 +1133,9 @@ class TestRunner:
                 raise RuntimeError(f"no USB device {QMK_VENDOR_ID:04x}:"
                                    f"{QMK_PRODUCT_ID:04x} under /sys/bus/usb/devices")
             suspender = UsbSuspend(device)
+            drivers = interface_drivers(device)
+            self.log("[runner] suspend/wake: interfaces " + (", ".join(
+                f"{i}={d or '-'}" for i, d in drivers.items()) or "none"))
             # EEPROM must hold something other than Eden, or the read-back below
             # proves nothing. Park it every time: the RAM style read above says
             # nothing about EEPROM, which can hold Eden from an earlier session
@@ -1190,6 +1194,17 @@ class TestRunner:
             self.log(f"[test] PASS: {name}: {SUSPEND_ROUNDS} round(s) clean, and the "
                      "suspend flush persisted the idle style")
             return {"name": name, "status": "pass"}
+        except HeldAwake as exc:
+            # The rig's limit, not a firmware verdict: polykybd-usb-suspend can
+            # unbind only usbhid, and since the bulk pipe (cdc_acm) and USB MIDI
+            # (snd-usb-audio) other drivers hold interfaces of this device. Until the
+            # wrapper can unbind them too, the check cannot tell who kept it awake.
+            held = ", ".join(f"{i}={d}" for i, d in exc.others.items())
+            reason = (f"the rig cannot suspend the keyboard: it stayed awake with "
+                      f"interfaces bound to {held}, and polykybd-usb-suspend unbinds "
+                      "only usbhid (RIG_INCIDENTS.md)")
+            self.log(f"[test] SKIP: {name} ({reason})")
+            return {"name": name, "status": "skip", "reason": reason}
         except Exception as exc:
             self.log(f"[test] FAIL: {name}: {exc}")
             return {"name": name, "status": "fail", "error": str(exc)}
