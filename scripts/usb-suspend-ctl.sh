@@ -4,14 +4,18 @@
 # polykybd-usb-suspend — the four sysfs writes the HIL suspend/wake check needs.
 #
 # station/usb_suspend.py suspends the master's USB port through runtime PM:
-# unbind usbhid from its interfaces, set power/autosuspend_delay_ms and
+# unbind the drivers from its interfaces, set power/autosuspend_delay_ms and
 # power/control, and undo it all on wake. Those are root-only sysfs writes.
 #
 # SECURITY: granting `sudo tee` for them would be a root write to ANY file. This
 # script is granted instead, and it writes only:
 #
-#   unbind <intf>          /sys/bus/usb/drivers/usbhid/unbind
-#   bind <intf>            /sys/bus/usb/drivers/usbhid/bind
+#   unbind <intf> [drv]    /sys/bus/usb/drivers/<drv>/unbind
+#   bind <intf> [drv]      /sys/bus/usb/drivers/<drv>/bind
+#
+# <drv> is one of the three drivers the keyboard's interfaces use: usbhid (the
+# default, the HID interfaces), cdc_acm (the bulk pipe) and snd-usb-audio (USB
+# MIDI). Any other name is refused.
 #   control <dev> on|auto  /sys/bus/usb/devices/<dev>/power/control
 #   delay <dev> <ms>       /sys/bus/usb/devices/<dev>/power/autosuspend_delay_ms
 #
@@ -26,7 +30,7 @@
 
 set -euo pipefail
 
-readonly USAGE="usage: polykybd-usb-suspend {unbind|bind} <dev:cfg.intf> | control <dev> {on|auto} | delay <dev> <ms>"
+readonly USAGE="usage: polykybd-usb-suspend {unbind|bind} <dev:cfg.intf> [usbhid|cdc_acm|snd-usb-audio] | control <dev> {on|auto} | delay <dev> <ms>"
 readonly VID=2021
 readonly PID=2007
 
@@ -52,11 +56,16 @@ check_dev() {
 
 case "$1" in
     unbind|bind)
-        [[ $# -eq 2 ]] || { echo "$USAGE" >&2; exit 2; }
+        [[ $# -eq 2 || $# -eq 3 ]] || { echo "$USAGE" >&2; exit 2; }
         [[ "$2" =~ ^([0-9]+-[0-9]+(\.[0-9]+)*):[0-9]+\.[0-9]+$ ]] \
             || fail "not a USB interface name: $2"
         check_dev "${BASH_REMATCH[1]}"
-        printf '%s' "$2" > "$SYSFS/drivers/usbhid/$1"
+        drv="${3:-usbhid}"
+        case "$drv" in
+            usbhid|cdc_acm|snd-usb-audio) ;;
+            *) fail "not a driver of the PolyKybd: $drv" ;;
+        esac
+        printf '%s' "$2" > "$SYSFS/drivers/$drv/$1"
         ;;
     control)
         [[ $# -eq 3 ]] || { echo "$USAGE" >&2; exit 2; }

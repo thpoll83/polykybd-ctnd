@@ -493,6 +493,15 @@ wrapper is the boundary. `grant_missing()` probes the grant by running the wrapp
 root with no arguments. The wrapper's first check (`$# -ge 2`) exits 2 on that before
 any write.
 
+Widened (2026-11-13): `unbind|bind <intf> [driver]` also takes `cdc_acm` (the bulk pipe)
+and `snd-usb-audio` (USB MIDI), the two other drivers of the keyboard's interfaces;
+`usbhid` stays the default. The driver name is checked against that fixed list before it
+is used in the sysfs path, so no other driver and no path segment can be named, and the
+interface must still belong to a 2021:2007 device. Worst case is unchanged: the station
+user can unbind the keyboard's own interfaces. `tests/usb_suspend_test.py` pins the new
+refusals (an unknown driver, a path in the driver name, a fourth argument, another
+vendor's device). The installed copy changes only after `setup.sh --units-only`.
+
 ### The flasher's picotool targeting adds arguments, not privilege (2026-10-29)
 
 ctnd#130 made `station/flash.py` pass `--bus <n> --address <n>` to `sudo picotool load`

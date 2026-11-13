@@ -1195,14 +1195,15 @@ class TestRunner:
                      "suspend flush persisted the idle style")
             return {"name": name, "status": "pass"}
         except HeldAwake as exc:
-            # The rig's limit, not a firmware verdict: polykybd-usb-suspend can
-            # unbind only usbhid, and since the bulk pipe (cdc_acm) and USB MIDI
-            # (snd-usb-audio) other drivers hold interfaces of this device. Until the
-            # wrapper can unbind them too, the check cannot tell who kept it awake.
+            # The rig's limit, not a firmware verdict: the installed
+            # polykybd-usb-suspend refused to unbind these drivers (a copy older
+            # than cdc_acm and snd-usb-audio support), so the check cannot tell
+            # who kept the device awake.
             held = ", ".join(f"{i}={d}" for i, d in exc.others.items())
             reason = (f"the rig cannot suspend the keyboard: it stayed awake with "
-                      f"interfaces bound to {held}, and polykybd-usb-suspend unbinds "
-                      "only usbhid (RIG_INCIDENTS.md)")
+                      f"interfaces bound to {held}, which the installed "
+                      "polykybd-usb-suspend refused to unbind. On the Pi: sudo bash "
+                      "./scripts/setup.sh --units-only (RIG_INCIDENTS.md)")
             self.log(f"[test] SKIP: {name} ({reason})")
             return {"name": name, "status": "skip", "reason": reason}
         except Exception as exc:
