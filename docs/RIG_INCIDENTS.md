@@ -4,44 +4,76 @@ A dated log of every HIL failure whose cause was the rig, the rig's test code or
 rig's setup, and of failures that are still unexplained. Newest first. The suite notes
 (`HIL_SUITE_NOTES.md`) say how each check works; this file says what went wrong and when.
 
-Add a row whenever a HIL run is red or never ran and the firmware under test was not the
-cause, and whenever a failure stays unexplained. An unexplained row is the useful one:
-the second time the same symptom appears, the row shows it is a pattern.
+Add an entry whenever a HIL run is red or never ran and the firmware under test was not
+the cause, and whenever a failure stays unexplained. Before you classify a new failure,
+grep this file for its symptom line: a match means it is a repeat, so add the run to that
+entry instead of starting a new one.
 
 Each entry has:
 
-- **Date** (UTC) and the **run** (`qmk_firmware` Actions run id, and the attempt if a re-run).
+- **Date** (UTC) and the **run** (`qmk_firmware` Actions run id, plus the attempt if it
+  was a re-run, written `a2`).
 - **Symptom**: the log line to grep for, copied exactly.
 - **Class**: `rig hardware`, `rig network`, `rig setup` (a unit, grant or package missing on
-  the Pi), `stale rig code`, `rig test` (the ctnd test was wrong), or `unexplained`.
+  the Pi), `stale rig code`, `rig code` (a bug in the station), `rig test` (the ctnd test
+  was wrong), or `unexplained`.
 - **Cause and fix**: what it was, and the PR or action that fixed it.
-- **Cost**: what it blocked (a release with no files, a PR held red, days of a recurring flake).
+- **Cost**: what it blocked (a release with no files, a PR held red, a red merge commit).
 
-The triage steps are in the `diagnose-hil-failure` skill (in `qmk_firmware`).
+The triage steps are in the `diagnose-hil-failure` skill (in `qmk_firmware`). The entries
+from 2026-10-15 to 2026-11-13 come from a sweep of all 222 `qmk-test.yml` runs in that
+window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained cause.
 
 ## Open
 
-### 2026-11-13: FW_UP_COMMIT got no reply after a complete staging
-- **Run:** 43317964268, attempt 2 ("Firmware apply round-trip (split72)", the qmk#435
-  merge commit, firmware 1.13.3 image). Attempt 1 of the same run passed this step.
-- **Symptom:** `FAIL: FW_UP_COMMIT — no reply`, after `all 599688 bytes delivered` and
-  `signature sent`. Both signature halves waited their 2 s timeout, so the master did not
-  answer HID for more than 10 s.
-- **Class:** unexplained. The console is stopped during the firmware-update section, so
-  the log has nothing from the keyboard for that window.
-- **Notes:** firmware 1.13.3 added a combo check that runs every 60 s on the master and is
-  not paused during a firmware update. One check is a single split message, so it is not
-  a likely cause; nothing in the log links them.
-- **Next:** the `tier: fwapply` dispatch on the same image (run 43394412385, tag
-  `PolyKybd-fw-v1.13.4`) passed COMMIT and the apply. If it recurs, run a debug probe that
-  keeps the console open across COMMIT.
-- **Cost:** firmware 1.13.4 was published with no files for about 45 minutes, until that
-  run passed and the release run was re-run.
+### FW_UP_COMMIT gets no reply after a complete staging (4 times)
+- **Runs:**
+  - 2026-11-13: 43317964268 a2 (qmk#435 merge, firmware 1.13.3 image)
+  - 2026-11-07: 42373381756 a1 (qmk#415 merge, 1.10.2)
+  - 2026-11-06: 42305960229 a1 (qmk#414 merge, 1.10.1)
+  - 2026-10-22: 39786033722 a1 (qmk#402 merge, 1.9.10). This log also has one
+    `pipe: NACK … (resync 1)`.
+- **Symptom:** `FAIL: FW_UP_COMMIT — no reply`, then `staging the signed image did not
+  reach a clean COMMIT`. Each time it comes right after `all N bytes delivered … verifying
+  CRC…` and `signature sent`, with the image staged over the bulk pipe. The signature
+  replies also time out, so the master does not answer HID for more than 10 s.
+- **Class:** unexplained. It happened in 4 of about 40 apply jobs. The console is stopped
+  during the firmware-update section, so the log has nothing from the keyboard for that
+  window. Three of the four predate the runtime combos (1.13.3), so they are not the cause.
+- **Each time the next apply run on the same firmware passed:** 10-23, the 11-07 08:37
+  dispatch, 11-09, and 43394412385 on 11-13.
+- **Next step:** a debug probe that keeps the console open across COMMIT, to see what the
+  master does in those 10 s.
+- **Cost:** a red merge commit each time. 11-06 held the 1.10.2 release gate together with
+  the PRC entry below. 11-13 left firmware 1.13.4 published with no files for about 45 min.
+
+### 2026-11-10: master reset by its RUN pin during the language sweep
+- **Run:** 42829271627 a1 (47d00071), Firmware apply round-trip.
+- **Symptom:** `FAIL: swept 92/161 languages: esSV rebooted (the master crashed drawing this layout)`.
+  The boot banner after it reads `reset: cause=run-pin reason=0x02 ram=kept record=no`.
+- **Class:** unexplained, probably rig hardware. A RUN-pin reset is a hardware reset: no
+  watchdog and no crash record (`crash_reset_cause_name()` in `base/crash_record.c`). The
+  RUN line is driven by a 2N2222 switch (`RIG_HARDWARE.md`). Attempt a3 passed.
+- **Cost:** with the segfault entry below, release 1.11.5 was refused on its first attempt.
+
+### 2026-11-09: one corrupt frame in the bulk pipe soak
+- **Run:** 42629563697 a1, HIL job, on an unrelated PR branch.
+- **Symptom:** `keyboard: 1990656 B, 487 good, 1 bad, 3977 resync, crc 0x8fb18363 (expected 0x1840fb9d)`
+  and `FAIL: count/CRC/bad-frame mismatch`.
+- **Class:** unexplained; possibly the rig's USB link or cable. Attempt a2 passed.
+- **Cost:** one re-run of a PR.
+
+### USB-suspend grant not installed on the Pi
+- **Symptom:** every run up to 2026-11-13 logs `SKIP: … rig not provisioned for it:
+  /usr/local/sbin/polykybd-usb-suspend is not installed`.
+- **Class:** rig setup. The check SKIPs (ctnd#116), so nothing fails, but the USB-suspend
+  path is not tested on any run.
+- **Fix:** on the Pi, `sudo bash ./scripts/setup.sh --units-only`.
 
 ## Closed
 
-### 2026-11-13: combo commit "refused" after a firmware apply
-- **Runs:** 43226924017 (qmk#428) and 43317964268 attempt 1 (qmk#435).
+### 2026-11-12 and 2026-11-13: combo commit "refused" after a firmware apply
+- **Runs:** 43226924017 a1 (qmk#428 merge) and 43317964268 a1 (qmk#435 merge).
 - **Symptom:** `[test] FAIL: reboot persistence: the keyboard refused combo [13, 14, 0, 0, 41] or its commit`
 - **Class:** rig test.
 - **Cause and fix:** after an apply the slave installs the master's image and comes back as
@@ -49,13 +81,53 @@ The triage steps are in the `diagnose-hil-failure` skill (in `qmk_firmware`).
   required the other-half bit. ctnd#148 checks this half only in that state.
 - **Cost:** the release gate refused firmware 1.13.4, published with no files.
 
+### 2026-10-19 and 2026-11-10: test runner segfault (libhidapi race)
+- **Runs:** 42829271627 a2 (apply job, in the boot loop) and 39251849392 a1 (HIL job,
+  boot loop round 4, a PR branch).
+- **Symptom:** `Segmentation fault  venv/bin/python -u -m station.test_runner …` and
+  `##[error]Process completed with exit code 139.`
+- **Class:** rig code. Two threads used libhidapi enumerate and open at once. Fixed by
+  ctnd#141 (2026-11-10), which puts both behind one lock.
+- **Cost:** with the RUN-pin entry above, release 1.11.5 was refused on its first attempt
+  (release run 42831824568 a1). It was published at 14:12 and got its files at about 14:32.
+
+### 2026-10-22 to 2026-11-06: PRC console test counted late warnings (6 runs)
+- **Runs:** 39769699882 a1, 41067640263 a1, 41134054292 (qmk#407 merge), 41816035682,
+  41824897499 a1, 42305960229 a2 (apply job).
+- **Symptom:** `FAIL: a valid PRC report produced a warning: Warning: malformed PRC record at byte 0; rest of the report dropped.`
+- **Class:** rig test. A warning from the previous, deliberately malformed report reached
+  the console late and was counted against the valid one. Documented in ctnd#133; fixed by
+  ctnd#136 (2026-11-07), which waits for a quiet console before counting. No repeat since.
+- **Cost:** the qmk#407 merge commit was red. With the FW_UP_COMMIT entry it held the 1.10.2
+  release gate until dispatch 42355874358 passed (2026-11-07 08:31).
+
+### 2026-10-29: picotool refused to flash with both halves in BOOTSEL
+- **Runs:** 40837074491 a1, a2 and a3 (qmk#363).
+- **Symptoms:** a1: `Command '['sudo', 'picotool', 'reboot']' returned non-zero exit status 248.`
+  a2 and a3: `fatal: picotool exited 248: ERROR: Command requires a single RP-series device to be targeted.`
+- **Class:** rig code (`station/flash.py`). Fixed by ctnd#130 (target the half that just
+  entered BOOTSEL) and ctnd#131 (refuse to flash without a readable BOOTSEL baseline).
+  Attempt a4 passed.
+- **Cost:** three attempts; the PR was held about 30 min.
+
+### 2026-10-21: raw HID replies lost or late, one handle per call
+- **Runs and symptoms:**
+  - 39586675919 (6a1dcf43, a `PolyKybd` push): `decoded 78 codes but count byte says 99`
+    and `[test] FAIL: enumerate language list (packed, v2)`.
+  - 39572236621 a1: `[test] FAIL: boot loop (v22 cmd 43) [recovered 7 read timeout(s)]`,
+    then `Protocol error` and `No such device`.
+  - 39608481800: `FAIL: status 0xee != expected 0x2e ('.')` and `round 2: the reboot request was refused`.
+- **Class:** rig code. `RawHID.send()` opened a new handle for every request. Fixed by
+  ctnd#124 (2026-10-21), which keeps one handle open.
+- **Cost:** a red commit on `PolyKybd`, and debug probe 39616286438 to investigate it.
+
 ### 2026-10-13 to 2026-10-14: USB-suspend check without its sudo grant
 - **Symptom:** the USB-suspend check failed on every extended run; the firmware-apply job
   then skipped the apply (`skipping the firmware apply round-trip — the suite already has a failure`).
 - **Class:** rig setup.
 - **Cause and fix:** ctnd#114 added the check and its root wrapper, but `setup.sh` runs only
   by hand on the Pi, so the grant was never installed. ctnd#116 made the check SKIP while
-  the grant is absent. Installing it: `sudo bash ./scripts/setup.sh --units-only` on the Pi.
+  the grant is absent. The grant is still missing (see Open).
 - **Cost:** firmware 1.9.2 was published with no files.
 
 ### 2026-07: rig ran stale station code for about 5 days
@@ -82,13 +154,14 @@ The triage steps are in the `diagnose-hil-failure` skill (in `qmk_firmware`).
 
 ## Recurring classes with no dated entry yet
 
-Add a dated row the next time one of these happens.
+None of these happened from 2026-10-15 to 2026-11-13. Add a dated entry the next time one does.
 
 - **Rig network:** the job ends at `Prepare all required actions` with
   `Failed to download action 'https://codeload.github.com/...'`. The runner was online;
   only `codeload.github.com` was unreachable.
 - **Rig offline:** `HIL test (split72)` stays `queued` with no log. Nothing fails, so
-  nobody is alerted.
+  nobody is alerted. (On 2026-11-11 three runs stayed `queued` with no job created at all,
+  for example 43098826223. That was on the GitHub side, not an offline rig.)
 - **No enumeration:** `raw HID interfaces present: 0` and every test fails. One re-run; if
   it repeats, power-cycle or reseat a half.
 - **Missing unit on an older rig:** a unit added after the rig was set up is never
