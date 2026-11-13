@@ -32,8 +32,11 @@ The triage steps are in the `diagnose-hil-failure` skill (in `qmk_firmware`).
 - **Notes:** firmware 1.13.3 added a combo check that runs every 60 s on the master and is
   not paused during a firmware update. One check is a single split message, so it is not
   a likely cause; nothing in the log links them.
-- **Next step:** if it recurs, run a debug probe that keeps the console open across COMMIT.
-- **Cost:** firmware 1.13.4 stayed published with no files.
+- **Next:** the `tier: fwapply` dispatch on the same image (run 43394412385, tag
+  `PolyKybd-fw-v1.13.4`) passed COMMIT and the apply. If it recurs, run a debug probe that
+  keeps the console open across COMMIT.
+- **Cost:** firmware 1.13.4 was published with no files for about 45 minutes, until that
+  run passed and the release run was re-run.
 
 ## Closed
 
