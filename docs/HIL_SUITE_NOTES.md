@@ -93,7 +93,11 @@ and relative links were adjusted to suit a standalone file.
     the master's, not only that the records arrived. It restores both records and
     commits again. Reboot persistence also sets the last combo slot from v33 on: the
     combo store has its own flash sectors, written by the commit, so it does not
-    depend on cmd 26. The rig cannot
+    depend on cmd 26. ⚠️ After a firmware apply both halves are masters (the slave
+    installs the master's image), so no commit can reach the other half. In that run
+    reboot persistence checks the combo on the master's flash only; every other run
+    requires the other-half bit. Requiring it there failed the apply job on every
+    v33+ commit and kept the release gate shut for firmware 1.13.4. The rig cannot
     press keys, so neither checks that a combo or a tap dance fires.
   - Three **agent key** tests (cmd 45 AI, cmd 46 AI_CARD, `min_protocol: 31`;
     packer and parser `station/agent_keys.py`). The rig cannot press keys, so AI
