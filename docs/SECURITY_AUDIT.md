@@ -738,8 +738,10 @@ Microsoft's Visual Studio products, to develop and test your applications.
 - Packaging a VS Code extension with Microsoft's own tool is the use the terms allow.
 
 The maintainer accepted the findings on 2026-11-14 (keep the lock file and `@vscode/vsce`).
-The Sourcery check on host#839 stays red for these ten; that is expected. A later lock
-file update that bumps `@vscode/vsce-sign` gets the same answer.
+The Sourcery check on host#839 stays red for these ten; that is expected. The acceptance
+covers `@vscode/vsce-sign` 2.1.1 only. A lock file update that changes its version must
+re-read that version's `LICENSE.txt` (`npm pack @vscode/vsce-sign@<version>`) and record
+the result here; only the same terms and the same dev-only, not-shipped use keep this answer.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
