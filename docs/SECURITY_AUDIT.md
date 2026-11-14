@@ -66,6 +66,7 @@ signing the firmware image alone was not enough.**
 | SCAN-2 | 2026-10-21 CodeQL backlog: all 206 open Python alerts triaged against host `057559da` (1.17.34), none needing a code change. HOST-5 was found beside them and CodeQL did NOT raise it | host | ✅ checked — see "don't re-litigate" |
 | HOST-6 | Window-report endpoint authenticates the handshake, not each message; the agent keys add a sink for remote agents and a raise relay to the forwarder | host | 🟡 accepted + documented (off by default; two opt-ins, a third for the raise) |
 | SCAN-3 | 2026-11-03 Sourcery (opengrep): the overlay generators run `scripts/generate_app_overlays.py` with `subprocess.run` (host#508) — an argv list, no shell, repository paths | host | ✅ checked, not vulnerable (audit note + `nosemgrep`) |
+| SCAN-4 | 2026-11-14 Sourcery (trivy): 10 "unknown license" findings on `@vscode/vsce-sign` and its platform packages in the VS Code extension's `package-lock.json` (host#839) — dev-only packaging tool, not in the `.vsix` | host | 🟡 accepted by the maintainer 2026-11-14 |
 
 ---
 
@@ -718,6 +719,27 @@ developer tool that is not shipped or run by the app, so no outside input reache
 The call carries a written audit and a `# nosemgrep` marker for both rule ids, the
 repo's pattern for this rule (`_bootstrap.py`, `build_info.py`). `gen_vim_bindings.py`
 (host#493) has the same call and gets the same answer if it is flagged.
+
+### SCAN-4 — unknown license on the VS Code packaging tool's signer (2026-11-14)
+
+Sourcery (trivy, license check) marked 10 blocking issues on host#839 in
+`vscode-extension/package-lock.json`: `@vscode/vsce-sign` 2.1.1 and its nine optional
+per-platform packages (`-win32-x64`, `-darwin-arm64`, `-linux-x64`, ...). Their
+`license` field is `SEE LICENSE IN LICENSE.txt`, which trivy cannot classify. The file
+is the *Microsoft Software License Terms* for vsce-sign: use is allowed only with
+Microsoft's Visual Studio products, to develop and test your applications.
+
+- All ten are `dev: true` in the lock file. They come in through `@vscode/vsce`
+  (a devDependency), which `vscode-extension/build.sh` runs to package the `.vsix`.
+- None of them is shipped: the extension has no runtime dependencies, and
+  `.vscodeignore` excludes `node_modules/**`, so the `.vsix` holds only the compiled
+  `out/` files and `package.json`. The repository commits only the lock file entries,
+  not the packages.
+- Packaging a VS Code extension with Microsoft's own tool is the use the terms allow.
+
+The maintainer accepted the findings on 2026-11-14 (keep the lock file and `@vscode/vsce`).
+The Sourcery check on host#839 stays red for these ten; that is expected. A later lock
+file update that bumps `@vscode/vsce-sign` gets the same answer.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
