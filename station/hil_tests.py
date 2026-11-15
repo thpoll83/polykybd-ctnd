@@ -71,6 +71,7 @@ from . import tap_terms
 from . import combos
 from . import agent_keys
 from . import key_attention
+from . import host_tutorial
 from . import usb_midi
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/hid_com.c
@@ -1822,6 +1823,154 @@ def test_key_guide(raw: RawHID, log: Callable[[str], None]) -> bool:
     if ok:
         log("  key guide: valid paths ACKed, bad fields NACKed, master alive")
     return ok
+
+
+def _host_tut_cases(raw, log, cases):
+    """Send each (request, want, label) of cmd 49; stop at the first mismatch."""
+    ht = host_tutorial
+    for request, want, what in cases:
+        got = ht.status(raw.send(request))
+        log(f"  {what} -> {chr(got) if got else got!r} (want {chr(want)})")
+        if got != want:
+            log(f"  FAIL: expected {'ACK' if want == ACK else 'NACK'}")
+            return False
+    return True
+
+
+def _host_tut_poll(raw, log):
+    poll = host_tutorial.parse_poll(raw.send(host_tutorial.poll_request()))
+    log(f"  POLL -> {poll}")
+    return poll
+
+
+def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """HOST TUTORIAL (cmd 49, protocol v35+): every op's ACK and NACK, INFO, the POLL
+    flags, and one condition matched by the real master.
+
+    The rig has no camera and cannot press keys (cmd 14 needs debug_enable), so the
+    status text, the darkened keys, the reveal and a KEY condition are not observable.
+    What this checks: INFO reports 7 ops, 4 conditions, a 10 s watchdog and 59 text
+    bytes; TEXT is ACKed for ASCII and NACKed for a byte outside 0x20..0x7E and for a
+    length past the report; SPOTLIGHT is ACKed on and off and NACKed for an unknown
+    flag; REVEAL is NACKed for a key without a display and for row 255; ARM is NACKed
+    for 5 conditions, layer 13 and kind 0. A LAYER condition on the board's own
+    default layer (cmd 22) must read as matched on the next POLL: the master's layer
+    state, not a host echo. END clears everything, and POLL then reads flags 0. The
+    relay of TEXT and SPOTLIGHT to the slave is not observable here. Ends with END;
+    the master must still answer GET_ID.
+    """
+    ht = host_tutorial
+    row, col = KEY_ATTN_TEST_KEY
+    ok = True
+    try:
+        info = ht.parse_info(raw.send(ht.info_request()))
+        log(f"  INFO -> {info}")
+        if info != {"ops": 0x7F, "max_conds": ht.MAX_CONDS, "watchdog_s": ht.WATCHDOG_S,
+                    "text_bytes": ht.TEXT_BYTES}:
+            log("  FAIL: INFO does not match base/host_tutorial_plan.h")
+            return False
+        layer_resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_DEFAULT_LAYER]))
+        if not _resp_ok(layer_resp, CMD_GET_DEFAULT_LAYER, log) or len(layer_resp) < 4:
+            log("  FAIL: no default layer to arm a condition on")
+            return False
+        base = layer_resp[3]
+        cases = [
+            (ht.text_request(b"Hold Fn", b"then tap"), ACK, "TEXT two lines"),
+            (ht.text_request(b"i" * ht.TEXT_BYTES, b""), ACK, "TEXT 59 bytes, the most"),
+            (ht.text_request(b"Gr\xc3\xb6", b""), NACK, "TEXT with a UTF-8 byte"),
+            (ht.text_request_raw(62), NACK, "TEXT length past the report"),
+            (ht.text_request(b"Rig test", b""), ACK, "TEXT one line"),
+            (ht.spotlight_request([(row, col)]), ACK, f"SPOTLIGHT only ({row},{col})"),
+            (ht.spotlight_request([], flags=0x02), NACK, "SPOTLIGHT unknown flag"),
+            (ht.reveal_request(*KEY_ATTN_NO_DISPLAY_KEY), NACK,
+             f"REVEAL from {KEY_ATTN_NO_DISPLAY_KEY} without a display"),
+            (ht.reveal_request(255, col), NACK, "REVEAL row 255"),
+            (ht.arm_request([(ht.COND_KEY, 0, 0)] * 5), NACK, "ARM five conditions"),
+            (ht.arm_request([(ht.COND_LAYER, ht.LAYER_COUNT, 0)]), NACK, "ARM layer 13"),
+            (ht.arm_request([(0, 0, 0)]), NACK, "ARM kind 0"),
+            (ht.arm_request([(ht.COND_LAYER, base, 0), (ht.COND_KEY, row, col)]), ACK,
+             f"ARM layer {base} on, key ({row},{col}) pressed"),
+            (ht.op_request(7), NACK, "an unknown op (7)"),
+        ]
+        ok = _host_tut_cases(raw, log, cases)
+        if ok:
+            poll = _host_tut_poll(raw, log)
+            want = ht.POLL_TEXT | ht.POLL_SPOT | ht.POLL_ARMED
+            if poll is None or poll["flags"] != want or poll["armed"] != 2:
+                log(f"  FAIL: expected flags {want:#x} and 2 armed conditions")
+                ok = False
+            elif poll["matched"] != 0x01:
+                log("  FAIL: the default-layer condition (bit 0) should be matched and "
+                    "the key condition (bit 1) not")
+                ok = False
+        if ok:
+            ok = _host_tut_cases(raw, log, [
+                (ht.spotlight_request([], on=False), ACK, "SPOTLIGHT off")])
+        if ok:
+            poll = _host_tut_poll(raw, log)
+            if poll is None or poll["flags"] & ht.POLL_SPOT:
+                log("  FAIL: SPOTLIGHT off left the spotlight on")
+                ok = False
+        if ok:
+            # END must clear an ACTIVE spotlight, so turn it on again first.
+            ok = _host_tut_cases(raw, log, [
+                (ht.spotlight_request([(row, col)]), ACK, "SPOTLIGHT on again"),
+                (ht.end_request(), ACK, "END")])
+        if ok:
+            poll = _host_tut_poll(raw, log)
+            if poll is None or poll["flags"] != 0 or poll["armed"] != 0:
+                log("  FAIL: END left state behind")
+                ok = False
+    finally:
+        ended = host_tutorial.status(raw.send(host_tutorial.end_request()))
+        log(f"  final END -> {chr(ended) if ended else ended!r}")
+        if ended != ACK:
+            log("  FAIL: could not end the session")
+            ok = False
+    if ok and not _master_alive(raw, log):
+        log("  FAIL: master stopped answering GET_ID after the host-tutorial commands")
+        ok = False
+    if ok:
+        log("  host tutorial: ops ACKed/NACKed as specified, layer condition matched, "
+            "END cleared, master alive")
+    return ok
+
+
+def test_host_tutorial_watchdog(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """HOST TUTORIAL watchdog (cmd 49, v35+): with no cmd 49 report for 10 s the master
+    ends the session by itself, so a host that crashed does not leave the board dark.
+
+    Sets TEXT and a SPOTLIGHT, sends only GET_ID for 11 s (GET_ID is not cmd 49 and must
+    not feed the watchdog), then POLLs: flags must read 0. Extended tier: it waits 11 s.
+    """
+    ht = host_tutorial
+    row, col = KEY_ATTN_TEST_KEY
+    try:
+        if not _host_tut_cases(raw, log, [
+                (ht.text_request(b"Watchdog", b"test"), ACK, "TEXT"),
+                (ht.spotlight_request([(row, col)]), ACK, "SPOTLIGHT")]):
+            return False
+        # The session must really be open, or a firmware that ACKs and keeps nothing
+        # would pass. This POLL is cmd 49 too, so the silence starts after it.
+        poll = _host_tut_poll(raw, log)
+        want = ht.POLL_TEXT | ht.POLL_SPOT
+        if poll is None or poll["flags"] & want != want:
+            log("  FAIL: TEXT and SPOTLIGHT were ACKed but POLL does not report them")
+            return False
+        deadline = time.monotonic() + ht.WATCHDOG_S + 1
+        while time.monotonic() < deadline:
+            if not _master_alive(raw, log):
+                log("  FAIL: master stopped answering GET_ID while waiting")
+                return False
+            time.sleep(2)
+        poll = _host_tut_poll(raw, log)
+        if poll is None or poll["flags"] != 0:
+            log("  FAIL: the session was still open after the watchdog time")
+            return False
+        log(f"  host tutorial watchdog: session ended after {ht.WATCHDOG_S} s without cmd 49")
+        return True
+    finally:
+        raw.send(ht.end_request())
 
 
 def test_auto_shift_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -4587,6 +4736,11 @@ TESTS = [
      "fn": test_key_attention, "min_protocol": key_attention.KEY_ATTENTION_MIN_PROTOCOL},
     {"name": "key guide path + field NACKs (v34 cmd 47 op 2)",
      "fn": test_key_guide, "min_protocol": key_attention.KEY_GUIDE_MIN_PROTOCOL},
+    {"name": "host tutorial ops, NACKs, layer condition, END (v35 cmd 49)",
+     "fn": test_host_tutorial, "min_protocol": host_tutorial.HOST_TUTORIAL_MIN_PROTOCOL},
+    {"name": "host tutorial 10 s watchdog ends the session (v35 cmd 49)",
+     "fn": test_host_tutorial_watchdog,
+     "min_protocol": host_tutorial.HOST_TUTORIAL_MIN_PROTOCOL, "tier": TIER_EXTENDED},
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
