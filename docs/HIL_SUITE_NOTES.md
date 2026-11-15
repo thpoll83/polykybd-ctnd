@@ -121,6 +121,21 @@ and relative links were adjusted to suit a standalone file.
     period is ACKed at 23 and 100 and NACKed at 22 and 101, op 2, row 255, col 8 and
     the key without a display (3, 7) are NACKed, and a START until cancelled and
     CANCEL are ACKed. GET_ID must answer afterwards. Ends with CANCEL in a `finally`.
+  - The two **host tutorial** tests (cmd 49, `min_protocol: 35`; packer
+    `station/host_tutorial.py`). The rig cannot see the status display or the keycaps
+    and cannot press keys, so the text, the spotlight, the reveal and a KEY condition
+    are not observable. `test_host_tutorial` checks INFO (7 ops, 4 conditions, 10 s,
+    59 text bytes), the ACK and NACK of every op (a UTF-8 byte, a length past the
+    report, an unknown spotlight flag, a reveal from the key without a display (3, 7)
+    and from row 255, five conditions, layer 13, kind 0, op 7), and that a LAYER
+    condition on the board's own default layer (cmd 22) reads as matched on the next
+    POLL while the KEY condition does not: that bit comes from the master's layer
+    state. END must leave POLL flags 0. Ends with END in a `finally`. The DOOM
+    monolith has no cmd 49; its rig image would fail this test, but the rig flashes the
+    pack firmware.
+    - `test_host_tutorial_watchdog` (extended tier: it waits 11 s): TEXT and a
+      SPOTLIGHT, then only GET_ID for 11 s, then POLL must read flags 0, because the
+      master ends a session after 10 s without a cmd 49 report.
   - The **`layer names (v14)`** test (`test_layer_names`, `min_protocol: 14`) reads
     HID cmd 35 — the names the host layout editor puts on its layer tabs. ⚠️ **Its
     cross-check against `id_dynamic_keymap_get_layer_count` is the POINT of the test,

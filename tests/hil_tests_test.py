@@ -738,6 +738,8 @@ class SuiteTierGateTest(unittest.TestCase):
             "every language draws without a crash (cmd 9 sweep)",
             # 20 reboots by default, each a few seconds plus the slave-record wait.
             "boot loop (v22 cmd 43)",
+            # Waits 11 s for the firmware's 10 s watchdog to end the session.
+            "host tutorial 10 s watchdog ends the session (v35 cmd 49)",
         })
 
     def test_the_cheap_new_checks_stay_in_the_default_suite(self):
