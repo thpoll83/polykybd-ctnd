@@ -130,11 +130,13 @@ and relative links were adjusted to suit a standalone file.
     and from row 255, five conditions, layer 13, kind 0, op 7), and that a LAYER
     condition on the board's own default layer (cmd 22) reads as matched on the next
     POLL while the KEY condition does not: that bit comes from the master's layer
-    state. END must leave POLL flags 0. Ends with END in a `finally`. The DOOM
+    state. SPOTLIGHT off must clear the spotlight flag; with the spotlight on again, END
+    must leave POLL flags 0. Ends with END in a `finally`. The DOOM
     monolith has no cmd 49; its rig image would fail this test, but the rig flashes the
     pack firmware.
     - `test_host_tutorial_watchdog` (extended tier: it waits 11 s): TEXT and a
-      SPOTLIGHT, then only GET_ID for 11 s, then POLL must read flags 0, because the
+      SPOTLIGHT, a POLL that must report both (else nothing proves the session was open),
+      then only GET_ID for 11 s, then POLL must read flags 0, because the
       master ends a session after 10 s without a cmd 49 report.
   - The **`layer names (v14)`** test (`test_layer_names`, `min_protocol: 14`) reads
     HID cmd 35 — the names the host layout editor puts on its layer tabs. ⚠️ **Its

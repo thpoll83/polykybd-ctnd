@@ -31,11 +31,14 @@ class FakeBoard:
 
     def __init__(self, check_ascii=True, check_flags=True, check_display=True,
                  max_conds=ht.MAX_CONDS, layer_match=True, end_clears=True, watchdog=True,
+                 end_keeps_spot=False, keeps_nothing=False,
                  info=(0x7F, ht.MAX_CONDS, ht.WATCHDOG_S, ht.TEXT_BYTES)):
         self.check_ascii, self.check_flags = check_ascii, check_flags
         self.check_display, self.max_conds = check_display, max_conds
         self.layer_match, self.end_clears, self.watchdog = layer_match, end_clears, watchdog
         self.info = info
+        self.end_keeps_spot = end_keeps_spot   # END clears all but an active spotlight
+        self.keeps_nothing = keeps_nothing     # TEXT and SPOTLIGHT ACK and store nothing
         self.text, self.spot, self.conds, self.matched = None, None, [], 0
         self.sent = []
 
@@ -44,7 +47,8 @@ class FakeBoard:
 
     def _end(self):
         if self.end_clears:
-            self.text, self.spot, self.conds, self.matched = None, None, [], 0
+            spot = self.spot if self.end_keeps_spot else None
+            self.text, self.spot, self.conds, self.matched = None, spot, [], 0
 
     def expire(self):
         """The watchdog time passed with no cmd 49."""
@@ -67,7 +71,7 @@ class FakeBoard:
         if op == ht.OP_SPOTLIGHT:
             flags = data[3]
             ok = not (self.check_flags and flags & ~1)
-            if ok:
+            if ok and not self.keeps_nothing:
                 self.spot = data[4:14] if flags & 1 else None
             return self._reply(ht.CMD_HOST_TUTORIAL, ok)
         if op == ht.OP_REVEAL:
@@ -103,7 +107,8 @@ class FakeBoard:
                 return False
             lines.append(line)
             pos += n
-        self.text = lines if any(lines) else None
+        if not self.keeps_nothing:
+            self.text = lines if any(lines) else None
         return True
 
     def _arm(self, data):
@@ -175,6 +180,7 @@ class HilTest(unittest.TestCase):
             "accepts five conditions": FakeBoard(max_conds=5),
             "never matches the layer": FakeBoard(layer_match=False),
             "END keeps state": FakeBoard(end_clears=False),
+            "END keeps an active spotlight": FakeBoard(end_keeps_spot=True),
             "INFO reports another watchdog": FakeBoard(info=(0x7F, 4, 5, 59)),
         }
         for why, board in broken.items():
@@ -206,6 +212,10 @@ class WatchdogTest(unittest.TestCase):
 
     def test_fails_without_a_watchdog(self):
         self.assertFalse(self.run_test(FakeBoard(watchdog=False))[0])
+
+    def test_fails_when_text_and_spotlight_store_nothing(self):
+        # Otherwise the final POLL reads 0 without any watchdog at work.
+        self.assertFalse(self.run_test(FakeBoard(keeps_nothing=True))[0])
 
 
 class RegistrationTest(unittest.TestCase):

@@ -1905,7 +1905,16 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
                 ok = False
         if ok:
             ok = _host_tut_cases(raw, log, [
-                (ht.spotlight_request([], on=False), ACK, "SPOTLIGHT off"),
+                (ht.spotlight_request([], on=False), ACK, "SPOTLIGHT off")])
+        if ok:
+            poll = _host_tut_poll(raw, log)
+            if poll is None or poll["flags"] & ht.POLL_SPOT:
+                log("  FAIL: SPOTLIGHT off left the spotlight on")
+                ok = False
+        if ok:
+            # END must clear an ACTIVE spotlight, so turn it on again first.
+            ok = _host_tut_cases(raw, log, [
+                (ht.spotlight_request([(row, col)]), ACK, "SPOTLIGHT on again"),
                 (ht.end_request(), ACK, "END")])
         if ok:
             poll = _host_tut_poll(raw, log)
@@ -1940,6 +1949,13 @@ def test_host_tutorial_watchdog(raw: RawHID, log: Callable[[str], None]) -> bool
         if not _host_tut_cases(raw, log, [
                 (ht.text_request(b"Watchdog", b"test"), ACK, "TEXT"),
                 (ht.spotlight_request([(row, col)]), ACK, "SPOTLIGHT")]):
+            return False
+        # The session must really be open, or a firmware that ACKs and keeps nothing
+        # would pass. This POLL is cmd 49 too, so the silence starts after it.
+        poll = _host_tut_poll(raw, log)
+        want = ht.POLL_TEXT | ht.POLL_SPOT
+        if poll is None or poll["flags"] & want != want:
+            log("  FAIL: TEXT and SPOTLIGHT were ACKed but POLL does not report them")
             return False
         deadline = time.monotonic() + ht.WATCHDOG_S + 1
         while time.monotonic() < deadline:
