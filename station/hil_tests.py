@@ -1058,10 +1058,22 @@ def test_overlays_back_after_suspend(raw: RawHID, log: Callable[[str], None]) ->
         log(f"  overlays turned off while suspended stayed off ({OVERLAYS_BACK_SETTLE_S:.0f}s)")
         passed = _master_alive(raw, log)
     finally:
-        off = raw.send(bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_OFF, DISPLAY_OVERLAYS_BIT]))
-        wake = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
-        ok = (_resp_ok(off, CMD_OVERLAY_FLAGS_OFF, lambda *_a: None, expect_status=ACK)
-              and _resp_ok(wake, CMD_IDLE_STATE, lambda *_a: None, expect_status=ACK))
+        # Each cleanup command is sent on its own: send() can raise (a read that
+        # fails after the write), and the wake must still be tried after that.
+        ok = True
+        for label, request, cmd in (
+                ("overlays off", bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_OFF, DISPLAY_OVERLAYS_BIT]),
+                 CMD_OVERLAY_FLAGS_OFF),
+                ("panels awake", bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]), CMD_IDLE_STATE)):
+            try:
+                resp = raw.send(request)
+            except Exception as exc:  # noqa: BLE001 - cleanup must go on to the next command
+                log(f"  cleanup {label} (cmd {cmd}) raised {exc!r}")
+                ok = False
+                continue
+            if not _resp_ok(resp, cmd, lambda *_a: None, expect_status=ACK):
+                log(f"  cleanup {label} (cmd {cmd}) -> {resp!r}")
+                ok = False
         log("  cleanup (overlays off, panels awake): " + ("ok" if ok else "FAILED"))
     return passed and ok
 

@@ -474,6 +474,32 @@ class IconFillCleanupTest(unittest.TestCase):
                                                           lambda *_a: None))
 
 
+class OverlaysBackCleanupTest(unittest.TestCase):
+    """The suspend test's cleanup still sends the wake when the overlays-off
+    command raises (CodeRabbit on ctnd#155)."""
+
+    class _Raw:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, data, *a, **k):
+            self.sent.append(bytes(data))
+            cmd = data[1]
+            if cmd == hil_tests.CMD_OVERLAY_FLAGS_OFF:
+                raise OSError("read failed after the write")
+            # NACK the first step, so the test goes straight to its cleanup.
+            status = "!" if cmd == hil_tests.CMD_OVERLAY_FLAGS_ON else "."
+            return bytes([0x50, cmd, ord(status)]).ljust(64, b"\x00")
+
+    def test_the_wake_is_sent_after_a_raising_overlays_off(self):
+        raw = self._Raw()
+        self.assertFalse(hil_tests.test_overlays_back_after_suspend(raw, lambda *_a: None))
+        self.assertEqual([d[1] for d in raw.sent],
+                         [hil_tests.CMD_OVERLAY_FLAGS_ON, hil_tests.CMD_OVERLAY_FLAGS_OFF,
+                          hil_tests.CMD_IDLE_STATE])
+        self.assertEqual(raw.sent[-1][2], 0, "cmd 15 with 0 stops idle")
+
+
 class MappingFlagsTest(unittest.TestCase):
     """The v21 rig test against a model of each decoder: a v21 firmware masks the
     width byte with 0x1F, a v20 one reads it whole."""
