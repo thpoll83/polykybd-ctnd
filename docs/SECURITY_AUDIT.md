@@ -12,7 +12,8 @@ them. That scan also reached a **fifth** repo the ID scheme did not cover
 (`Adafruit-GFX-Library`); tracked under `SCAN-1` rather than a new prefix, since the
 finding was in an accidentally-committed build directory rather than in our code.
 
-**2026-10-25**: HOST-3 extended with the daily archive's read token (no change needed;
+**2026-11-16**: HOST-7 raised by CodeQL on host#916 and fixed in the same PR before
+merge (exponential regex in the TF2/Apex bind-file reader). **2026-10-25**: HOST-3 extended with the daily archive's read token (no change needed;
 recorded). **2026-08-06**: HOST-3 added alongside
 the telemetry feature — a single new surface reviewed on its own, not a fresh sweep of the
 tracker, so the review scope below still stands. Last full review **2026-08-05 (evening)** —
@@ -67,6 +68,7 @@ signing the firmware image alone was not enough.**
 | HOST-6 | Window-report endpoint authenticates the handshake, not each message; the agent keys add a sink for remote agents and a raise relay to the forwarder | host | 🟡 accepted + documented (off by default; two opt-ins, a third for the raise) |
 | SCAN-3 | 2026-11-03 Sourcery (opengrep): the overlay generators run `scripts/generate_app_overlays.py` with `subprocess.run` (host#508) — an argv list, no shell, repository paths | host | ✅ checked, not vulnerable (audit note + `nosemgrep`) |
 | SCAN-4 | 2026-11-14 Sourcery (trivy): 10 "unknown license" findings on `@vscode/vsce-sign` and its platform packages in the VS Code extension's `package-lock.json` (host#839) — dev-only packaging tool, not in the `.vsix` | host | 🟡 accepted by the maintainer 2026-11-14 |
+| HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
 
 ---
 
@@ -756,6 +758,32 @@ carries the procedure.
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### HOST-7 — the bind-file regex backtracked exponentially (FIXED before merge)
+
+CodeQL `py/redos` (high) on host#916, `polyhost/services/game_assets/key_files.py`.
+`_BIND` read a quoted key as `"((?:\\\\|[^"])*)"`: a backslash matches both
+alternatives, so a line `bind "` followed by many backslashes and no closing quote
+makes the matcher try every split. Measured: 16 escaped backslashes 0.46 s, 20 took
+21 s, 22 did not finish in 60 s. The input is a game's own config file in the user's
+folders (TF2 `tf/cfg/config.cfg`, Apex `local/settings.cfg`), read on the background
+build thread when the overlay is first sent. So the reach is a planted or damaged
+file on the user's machine, and the effect a stalled thread, not code execution.
+
+Fix: each quoted part is one `[^"]*` run and the unquoted key `[^\s"]+`, so no two
+alternatives can match the same characters. `source_token` still unescapes `"\\"`.
+Check:
+
+```bash
+cd PolyKybdHost
+.venv/bin/python -c "
+import time; from polyhost.services.game_assets import key_files as k
+t=time.time(); k._BIND.match('bind \"' + '\\\\'*50000); print(time.time()-t)"   # ~0.001 s
+.venv/bin/python -m unittest tests.services.game_assets_f2p_keys_test   # test_a_line_of_backslashes_...
+```
+
+The regression test hangs (killed at 30 s) when the old pattern is restored. The PoE
+reader (`poe_keys.py`) splits lines with `str.partition` and uses no regex.
 
 ### FW-11 — a crafted `.plyf` could HardFault the board persistently (FIXED)
 
