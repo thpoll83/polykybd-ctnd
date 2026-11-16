@@ -989,6 +989,95 @@ def test_idle_wake(raw: RawHID, log: Callable[[str], None]) -> bool:
     return _resp_ok(response, CMD_IDLE_STATE, log, expect_status=ACK)
 
 
+# --- Overlays back on after a suspend (firmware fix of 2026-11-16) --------------
+#
+# poly_suspend() (the 20 min turn-off, USB suspend and host display-off, cmd 24)
+# clears DISPLAY_OVERLAYS. Before the fix no wake set it again, so a game that kept
+# the focus showed plain legends after the keyboard woke. The fix remembers the bit
+# and a wake prints this ungated line when it turns the overlays back on.
+CMD_DISPLAY_OFF                   = 24     # HID cmd 24: poly_suspend() + EEPROM flush
+OVERLAYS_BACK_LINE                = "Wake: overlays back on"
+OVERLAYS_BACK_MIN_FW              = "1.13.8"   # the FW_VERSION the fix merged as
+OVERLAYS_BACK_SETTLE_S            = 3.0
+
+
+def _suspend_and_wake(raw: RawHID, log: Callable[[str], None], clear_first: bool):
+    """Overlays on (cmd 11), displays off (cmd 24), optionally overlays off while
+    suspended (cmd 12), then wake (cmd 15 stop idle). Returns the console mark
+    taken before the wake, or None when a command was not ACKed."""
+    steps = [("overlays on", bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_ON, DISPLAY_OVERLAYS_BIT]),
+              CMD_OVERLAY_FLAGS_ON),
+             ("display off", bytes([POLY_CHANNEL, CMD_DISPLAY_OFF]), CMD_DISPLAY_OFF)]
+    if clear_first:
+        steps.append(("overlays off while suspended",
+                      bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_OFF, DISPLAY_OVERLAYS_BIT]),
+                      CMD_OVERLAY_FLAGS_OFF))
+    for label, request, cmd in steps:
+        resp = raw.send(request)
+        log(f"  {label} (cmd {cmd}) -> {resp!r}")
+        if not _resp_ok(resp, cmd, log, expect_status=ACK):
+            return None
+    mark = TAP.mark()
+    resp = raw.send(bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]))
+    log(f"  wake (cmd 15 stop idle) -> {resp!r}")
+    if not _resp_ok(resp, CMD_IDLE_STATE, log, expect_status=ACK):
+        return None
+    return mark
+
+
+def test_overlays_back_after_suspend(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """A wake turns the app overlays back on that a suspend turned off, and keeps
+    them off when the host turned them off meanwhile. ``needs_console``.
+
+    cmd 24 runs the same poly_suspend() as the firmware's 20 min turn-off and USB
+    suspend, so this is the user's case without the 20 minutes. The rig has no
+    camera and no command reads the overlay flags back, so the console line is the
+    only observable. The first case is the positive control: its line proves the
+    console is live when the second case measures a silence. Cleanup in a finally:
+    overlays off (the rig's resting state) and the panels awake.
+    """
+    passed = False
+    try:
+        mark = _suspend_and_wake(raw, log, clear_first=False)
+        if mark is None:
+            return False
+        line = TAP.wait_for(OVERLAYS_BACK_LINE, mark, timeout=OVERLAYS_BACK_SETTLE_S)
+        if line is None:
+            log(f"  FAIL: no '{OVERLAYS_BACK_LINE}' within {OVERLAYS_BACK_SETTLE_S:.0f}s: "
+                "the wake left the overlays off (or the console is not live)")
+            return False
+        log(f"  overlays came back: {line.strip()}")
+
+        mark = _suspend_and_wake(raw, log, clear_first=True)
+        if mark is None:
+            return False
+        line = TAP.wait_for(OVERLAYS_BACK_LINE, mark, timeout=OVERLAYS_BACK_SETTLE_S)
+        if line is not None:
+            log(f"  FAIL: the wake turned on overlays the host had turned off: {line.strip()}")
+            return False
+        log(f"  overlays turned off while suspended stayed off ({OVERLAYS_BACK_SETTLE_S:.0f}s)")
+        passed = _master_alive(raw, log)
+    finally:
+        # Each cleanup command is sent on its own: send() can raise (a read that
+        # fails after the write), and the wake must still be tried after that.
+        ok = True
+        for label, request, cmd in (
+                ("overlays off", bytes([POLY_CHANNEL, CMD_OVERLAY_FLAGS_OFF, DISPLAY_OVERLAYS_BIT]),
+                 CMD_OVERLAY_FLAGS_OFF),
+                ("panels awake", bytes([POLY_CHANNEL, CMD_IDLE_STATE, 0]), CMD_IDLE_STATE)):
+            try:
+                resp = raw.send(request)
+            except Exception as exc:  # noqa: BLE001 - cleanup must go on to the next command
+                log(f"  cleanup {label} (cmd {cmd}) raised {exc!r}")
+                ok = False
+                continue
+            if not _resp_ok(resp, cmd, lambda *_a: None, expect_status=ACK):
+                log(f"  cleanup {label} (cmd {cmd}) -> {resp!r}")
+                ok = False
+        log("  cleanup (overlays off, panels awake): " + ("ok" if ok else "FAILED"))
+    return passed and ok
+
+
 # --- mutate + restore ---------------------------------------------------------
 
 def test_idle_style_round_trip(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -4744,6 +4833,9 @@ TESTS = [
     {"name": "layer names (v14)",               "fn": test_layer_names,             "min_protocol": 14},
     {"name": "macro round-trip (v15)",          "fn": test_macro_round_trip,        "min_protocol": 15},
     {"name": "overlay flags round-trip",        "fn": test_overlay_flags_round_trip},
+    {"name": "overlays back on after a suspend (cmd 24/15, console)",
+     "fn": test_overlays_back_after_suspend, "min_fw": OVERLAYS_BACK_MIN_FW,
+     "needs_console": True},
     # Animation + idle. Both are slow by nature (the intro is ~14 s, the idle fade
     # 10 s), so they are EXTENDED-tier: they run when a release or a big change
     # asks for them, not on every push. The Eden one needs the console to CONFIRM
