@@ -121,19 +121,24 @@ and relative links were adjusted to suit a standalone file.
     period is ACKed at 23 and 100 and NACKed at 22 and 101, op 2, row 255, col 8 and
     the key without a display (3, 7) are NACKed, and a START until cancelled and
     CANCEL are ACKed. GET_ID must answer afterwards. Ends with CANCEL in a `finally`.
-  - The two **host tutorial** tests (cmd 49, `min_protocol: 35`; packer
+  - The three **host tutorial** tests (cmd 49, `min_protocol: 35`, op 7 from 37; packer
     `station/host_tutorial.py`). The rig cannot see the status display or the keycaps
     and cannot press keys, so the text, the spotlight, the reveal and a KEY condition
-    are not observable. `test_host_tutorial` checks INFO (7 ops, 4 conditions, 10 s,
+    are not observable. `test_host_tutorial` checks INFO (7 ops, 8 from v37 by the GET_ID protocol, 4 conditions, 10 s,
     59 text bytes), the ACK and NACK of every op (a UTF-8 byte, a length past the
     report, an unknown spotlight flag, a reveal from the key without a display (3, 7)
-    and from row 255, five conditions, layer 13, kind 0, op 7), and that a LAYER
+    and from row 255, five conditions, layer 13, kind 0, op 8), and that a LAYER
     condition on the board's own default layer (cmd 22) reads as matched on the next
     POLL while the KEY condition does not: that bit comes from the master's layer
     state. SPOTLIGHT off must clear the spotlight flag; with the spotlight on again, END
     must leave POLL flags 0. Ends with END in a `finally`. The DOOM
     monolith has no cmd 49; its rig image would fail this test, but the rig flashes the
     pack firmware.
+    - `test_host_tutorial_emoji_mode` (v37, default tier): op 7 EMOJI_MODE. Query,
+      then set the other mode, the first, the other again; each reply's `[3]` is the
+      mode before, also on the NACK of value 2. END must restore the first mode, read
+      back with an ACKed query. On a failure the test puts the mode back by hand, so
+      the tests after it see the rig's mode.
     - `test_host_tutorial_watchdog` (extended tier: it waits 11 s): TEXT and a
       SPOTLIGHT, a POLL that must report both (else nothing proves the session was open),
       then only GET_ID for 11 s, then POLL must read flags 0, because the
