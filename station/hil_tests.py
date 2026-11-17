@@ -2083,7 +2083,9 @@ def test_host_tutorial_emoji_mode(raw: RawHID, log: Callable[[str], None]) -> bo
                  (other, first, "set the other mode again"),
                  (ht.EMOJI_QUERY, other, "query")]
         for value, before, label in steps:
-            r = raw.send(ht.emoji_mode_request(value))
+            # attempts=1: send() resends after a timeout, and a resent set would report
+            # the mode the first one already applied, not the mode before it.
+            r = raw.send(ht.emoji_mode_request(value), attempts=1)
             got = ht.parse_emoji_mode(r)
             log(f"  {label} -> {chr(ht.status(r)) if ht.status(r) else None!r}, before {got}")
             if ht.status(r) != ACK or got != before:
