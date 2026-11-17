@@ -239,9 +239,35 @@ class EmojiModeTest(unittest.TestCase):
             "accepts value 2": FakeBoard(protocol=37, emoji_check_value=False),
             "v36 NACKs op 7": FakeBoard(protocol=36),
         }
+        broken_nack = FakeBoard(protocol=37)
+        real_send = broken_nack.send
+
+        def nack_with_zero(data, **kw):         # a value-2 NACK that drops [3]
+            r = real_send(data, **kw)
+            if data[1] == ht.CMD_HOST_TUTORIAL and data[2] == ht.OP_EMOJI_MODE and data[3] == 2:
+                return r[:3] + bytes(61)
+            return r
+        broken_nack.emoji = 0      # the mode before value 2 is then 1: a dropped [3] reads 0
+        broken_nack.send = nack_with_zero
+        broken["a NACK without the mode before"] = broken_nack
         for why, board in broken.items():
             with self.subTest(why):
                 self.assertFalse(self.run_test(board)[0])
+
+
+class EmojiModeCleanupTest(unittest.TestCase):
+    def test_a_failed_restore_is_put_back_by_hand(self):
+        board = FakeBoard(protocol=37, emoji_restore=False)
+        board.emoji = 1
+        lines = []
+        self.assertFalse(hil_tests.test_host_tutorial_emoji_mode(board, lines.append))
+        self.assertEqual(board.emoji, 1, "\n".join(lines))
+
+    def test_get_id_errors_read_as_unknown(self):
+        class Flaky:
+            def send(self, data, **_):
+                raise OSError("hid read failed")
+        self.assertIsNone(hil_tests._device_protocol(Flaky()))
 
 
 class WatchdogTest(unittest.TestCase):

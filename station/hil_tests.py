@@ -483,7 +483,10 @@ def parse_fontpack_versions(response):
 
 def _device_protocol(raw: RawHID):
     """The firmware PROTOCOL_VERSION from GET_ID, or None when it cannot be read."""
-    resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    try:
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
+    except Exception:      # a transient HID error: the caller treats None as unknown
+        return None
     if not resp or len(resp) < 3 or resp[0] != POLY_CHANNEL or resp[1] != CMD_GET_ID:
         return None
     identity = bytes(resp[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
@@ -2038,13 +2041,28 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
     return ok
 
 
+def _restore_emoji_mode(raw: RawHID, log: Callable[[str], None], mode: int) -> None:
+    """After a failed run: put the rig's emoji mode back to `mode` by hand, so a firmware
+    that does not restore it does not change the mode for the tests after this one."""
+    ht = host_tutorial
+    try:
+        raw.send(ht.emoji_mode_request(mode))
+        raw.send(ht.end_request())
+        got = ht.parse_emoji_mode(raw.send(ht.emoji_mode_request(ht.EMOJI_QUERY)))
+        raw.send(ht.end_request())
+        log(f"  emoji mode put back to {mode} by hand: now {got}")
+    except Exception as exc:     # the test has failed already; this is cleanup only
+        log(f"  could not put the emoji mode back: {exc}")
+
+
 def test_host_tutorial_emoji_mode(raw: RawHID, log: Callable[[str], None]) -> bool:
     """HOST TUTORIAL EMOJI_MODE (cmd 49 op 7, v37+): the tutorial sets the emoji layer's
     tab or search mode, and END restores the mode the session found.
 
     Reads the mode (query), sets the other mode, the first, the other again: each
-    reply's [3] must be the mode before that request. END must restore the first mode, read back with a query. A
-    value of 2 is NACKed. A set refused on a keyboard without an emoji search dictionary
+    reply's [3] must be the mode before that request. A value of 2 is NACKed and its
+    reply still carries the mode before. END must restore the first mode, read back with
+    an ACKed query. On a failure the test puts the mode back by hand. A set refused on a keyboard without an emoji search dictionary
     fails the test: the rig flashes the font packs, so it has one. Ends with END and
     checks the mode is the one the test found.
     """
@@ -2073,13 +2091,21 @@ def test_host_tutorial_emoji_mode(raw: RawHID, log: Callable[[str], None]) -> bo
                 ok = False
                 break
         if ok:
-            ok = _host_tut_cases(raw, log, [
-                (ht.emoji_mode_request(2), NACK, "EMOJI_MODE value 2"),
-                (ht.end_request(), ACK, "END")])
+            # A refusal still reports the mode before it.
+            r = raw.send(ht.emoji_mode_request(2))
+            got = ht.parse_emoji_mode(r)
+            log(f"  value 2 -> {chr(ht.status(r)) if ht.status(r) else None!r}, before {got}")
+            if ht.status(r) != NACK or got != other:
+                log(f"  FAIL: value 2: expected NACK with the mode before = {other}")
+                ok = False
         if ok:
-            got = ht.parse_emoji_mode(raw.send(ht.emoji_mode_request(ht.EMOJI_QUERY)))
-            log(f"  query after END -> mode {got}")
-            if got != first:
+            ok = _host_tut_cases(raw, log, [(ht.end_request(), ACK, "END")])
+        if ok:
+            r = raw.send(ht.emoji_mode_request(ht.EMOJI_QUERY))
+            got = ht.parse_emoji_mode(r)
+            log(f"  query after END -> {chr(ht.status(r)) if ht.status(r) else None!r}, "
+                f"mode {got}")
+            if ht.status(r) != ACK or got != first:
                 log(f"  FAIL: END did not restore the mode {first}")
                 ok = False
     finally:
@@ -2087,6 +2113,8 @@ def test_host_tutorial_emoji_mode(raw: RawHID, log: Callable[[str], None]) -> bo
         if ended != ACK:
             log("  FAIL: could not end the session")
             ok = False
+        if not ok and first is not None:
+            _restore_emoji_mode(raw, log, first)
     if ok and not _master_alive(raw, log):
         log("  FAIL: master stopped answering GET_ID after EMOJI_MODE")
         ok = False
