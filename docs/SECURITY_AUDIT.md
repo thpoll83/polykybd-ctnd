@@ -12,7 +12,8 @@ them. That scan also reached a **fifth** repo the ID scheme did not cover
 (`Adafruit-GFX-Library`); tracked under `SCAN-1` rather than a new prefix, since the
 finding was in an accidentally-committed build directory rather than in our code.
 
-**2026-11-16**: HOST-7 raised by CodeQL on host#916 and fixed in the same PR before
+**2026-11-17**: SCAN-5, a Dependabot alert on `minimatch` in the VS Code extension's
+packaging tool: dev-only and not shipped, fixed with an npm override. **2026-11-16**: HOST-7 raised by CodeQL on host#916 and fixed in the same PR before
 merge (exponential regex in the TF2/Apex bind-file reader). **2026-10-25**: HOST-3 extended with the daily archive's read token (no change needed;
 recorded). **2026-08-06**: HOST-3 added alongside
 the telemetry feature — a single new surface reviewed on its own, not a fresh sweep of the
@@ -744,6 +745,40 @@ The Sourcery check on host#839 stays red for these ten; that is expected. The ac
 covers `@vscode/vsce-sign` 2.1.1 only. A lock file update that changes its version must
 re-read that version's `LICENSE.txt` (`npm pack @vscode/vsce-sign@<version>`) and record
 the result here; only the same terms and the same dev-only, not-shipped use keep this answer.
+
+### SCAN-5 — minimatch and glob in the VS Code packaging tool (Dependabot, 2026-11-17)
+
+Dependabot raised CVE-2026-118764 (moderate) on PolyKybdHost: `minimatch` >= 7.0.0,
+< 11.0.1 in `package-lock.json`. `npm audit` names the same issue GHSA-g3hv-75wg-m249
+("denial of service via globparts amplification") and one more, GHSA-3g3m-2fjr-6pw4 in
+`glob` 9.0.0 - 14.0.1 ("AbortSignal cancellation bypass").
+
+- The only lock file with an affected copy is `vscode-extension/package-lock.json`:
+  `node_modules/glob/node_modules/minimatch` 10.2.6, under `glob` 11.1.0, under
+  `@vscode/vsce` 3.2.2, a devDependency. All three are `dev: true`. The top-level
+  `minimatch` 3.1.5 is outside the affected range.
+- Not shipped, for the reason in SCAN-4: the `.vsix` excludes `node_modules/**`.
+- Not reachable with outside input. `vsce package` runs in `build.sh` on the
+  maintainer's machine, and the glob patterns it matches come from our own
+  `.vscodeignore` and `package.json`.
+
+Fixed anyway, because the fix is one line: `"overrides": { "glob": "^14.0.6" }` in
+`vscode-extension/package.json`, which brings `minimatch` 11.0.9. `npm audit` then
+reports 0 vulnerabilities, `build.sh` passes (30 tests) and builds both `.vsix` files.
+Compared with a build from the old lock file, the file lists are the same and only
+`extension/package.json` grows by 108 bytes (the `overrides` block). `@vscode/vsce-sign`
+stays at 2.1.1, so SCAN-4 is unchanged.
+
+⚠️ Do not override `minimatch` itself: `vsce` 3.2.2 calls the top-level `minimatch` 3.x
+as a default import, and with 11.x `vsce package` fails with
+`(0 , minimatch_1.default) is not a function`.
+
+```bash
+cd PolyKybdHost/vscode-extension
+npm ci --no-audit --no-fund && npm audit        # found 0 vulnerabilities
+npm ls minimatch glob                            # glob 14.0.6 > minimatch 11.0.9; minimatch 3.1.5
+./build.sh                                       # both .vsix files under dist/
+```
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
