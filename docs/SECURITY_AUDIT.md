@@ -69,6 +69,7 @@ signing the firmware image alone was not enough.**
 | HOST-6 | Window-report endpoint authenticates the handshake, not each message; the agent keys add a sink for remote agents and a raise relay to the forwarder | host | 🟡 accepted + documented (off by default; two opt-ins, a third for the raise) |
 | SCAN-3 | 2026-11-03 Sourcery (opengrep): the overlay generators run `scripts/generate_app_overlays.py` with `subprocess.run` (host#508) — an argv list, no shell, repository paths | host | ✅ checked, not vulnerable (audit note + `nosemgrep`) |
 | SCAN-4 | 2026-11-14 Sourcery (trivy): 10 "unknown license" findings on `@vscode/vsce-sign` and its platform packages in the VS Code extension's `package-lock.json` (host#839) — dev-only packaging tool, not in the `.vsix` | host | 🟡 accepted by the maintainer 2026-11-14 |
+| SCAN-5 | 2026-11-17 Dependabot: CVE-2026-118764 (GHSA-g3hv-75wg-m249), `minimatch` 10.2.6 under `@vscode/vsce` > `glob` in the VS Code extension's `package-lock.json` — dev-only packaging tool, not in the `.vsix` | host | ✅ checked, not vulnerable; dependency updated in host#970 |
 | HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
 
 ---
@@ -762,12 +763,16 @@ Dependabot raised CVE-2026-118764 (moderate) on PolyKybdHost: `minimatch` >= 7.0
   maintainer's machine, and the glob patterns it matches come from our own
   `.vscodeignore` and `package.json`.
 
-Fixed anyway, because the fix is one line: `"overrides": { "glob": "^14.0.6" }` in
+Updated anyway in host#970 (merge it before this entry), because the fix is small: `"overrides": { "glob": "^14.0.6" }` in
 `vscode-extension/package.json`, which brings `minimatch` 11.0.9. `npm audit` then
 reports 0 vulnerabilities, `build.sh` passes (30 tests) and builds both `.vsix` files.
 Compared with a build from the old lock file, the file lists are the same and only
-`extension/package.json` grows by 108 bytes (the `overrides` block). `@vscode/vsce-sign`
-stays at 2.1.1, so SCAN-4 is unchanged.
+`extension/package.json` grows by 108 bytes (the `overrides` block). `vsce` copies
+`package.json` into the `.vsix`, so the shipped `polyhost/res/vscode/polykybd-mode-reporter.vsix`
+was rebuilt too (CI compares it with the sources). Its digest changed, so Integrations →
+Editors shows VS Code as "outdated" once for users who installed the extension; the
+maintainer accepted that on 2026-11-17. The remote `.vsix` did not change.
+`@vscode/vsce-sign` stays at 2.1.1, so SCAN-4 is unchanged.
 
 ⚠️ Do not override `minimatch` itself: `vsce` 3.2.2 calls the top-level `minimatch` 3.x
 as a default import, and with 11.x `vsce package` fails with
