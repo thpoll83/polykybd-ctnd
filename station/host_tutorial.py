@@ -25,6 +25,18 @@ HOST_TUTORIAL_MIN_PROTOCOL = 35
 
 POLY_CHANNEL = ord("P")
 OP_INFO, OP_TEXT, OP_SPOTLIGHT, OP_REVEAL, OP_ARM, OP_POLL, OP_END = range(7)
+# v37: op 7 EMOJI_MODE sets the emoji layer's tab or search mode; END restores it.
+OP_EMOJI_MODE = 7
+EMOJI_MODE_MIN_PROTOCOL = 37
+EMOJI_TAB, EMOJI_SEARCH, EMOJI_QUERY = 0, 1, 0xFF
+OP_UNKNOWN = 8                  # no op 8 in any version
+
+
+def info_ops(protocol):
+    """INFO's op bitmask for a firmware protocol, or None when it is not known."""
+    if protocol is None:
+        return None
+    return 0xFF if protocol >= EMOJI_MODE_MIN_PROTOCOL else 0x7F
 REPORT_BYTES = 64
 TEXT_BYTES = 59                 # 64 - 3 header - 2 length bytes
 MASK_BYTES = 10
@@ -79,6 +91,18 @@ def poll_request() -> bytes:
 
 def end_request() -> bytes:
     return _req(OP_END)
+
+
+def emoji_mode_request(value: int) -> bytes:
+    return _req(OP_EMOJI_MODE, value)
+
+
+def parse_emoji_mode(resp):
+    """The mode before the request (0 tab, 1 search) from an EMOJI_MODE reply, ACK or
+    NACK, else None."""
+    if status(resp) is None or len(resp) < 4:
+        return None
+    return resp[3]
 
 
 def op_request(op: int) -> bytes:

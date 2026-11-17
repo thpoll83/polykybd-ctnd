@@ -32,7 +32,8 @@ class FakeBoard:
     def __init__(self, check_ascii=True, check_flags=True, check_display=True,
                  max_conds=ht.MAX_CONDS, layer_match=True, end_clears=True, watchdog=True,
                  end_keeps_spot=False, keeps_nothing=False,
-                 info=(0x7F, ht.MAX_CONDS, ht.WATCHDOG_S, ht.TEXT_BYTES)):
+                 info=(0x7F, ht.MAX_CONDS, ht.WATCHDOG_S, ht.TEXT_BYTES), protocol=None,
+                 emoji_restore=True, emoji_before_ok=True, emoji_check_value=True):
         self.check_ascii, self.check_flags = check_ascii, check_flags
         self.check_display, self.max_conds = check_display, max_conds
         self.layer_match, self.end_clears, self.watchdog = layer_match, end_clears, watchdog
@@ -41,11 +42,18 @@ class FakeBoard:
         self.keeps_nothing = keeps_nothing     # TEXT and SPOTLIGHT ACK and store nothing
         self.text, self.spot, self.conds, self.matched = None, None, [], 0
         self.sent = []
+        self.protocol = protocol        # in GET_ID; None sends no identity
+        self.emoji_restore, self.emoji_before_ok = emoji_restore, emoji_before_ok
+        self.emoji_check_value = emoji_check_value
+        self.emoji, self.emoji_saved = 0, None
 
     def _reply(self, cmd, ok, body=b""):
         return (bytes([ord("P"), cmd, ord(".") if ok else ord("!")]) + body).ljust(64, b"\0")
 
     def _end(self):
+        if self.emoji_saved is not None and self.emoji_restore:
+            self.emoji = self.emoji_saved
+        self.emoji_saved = None
         if self.end_clears:
             spot = self.spot if self.end_keeps_spot else None
             self.text, self.spot, self.conds, self.matched = None, spot, [], 0
@@ -60,7 +68,8 @@ class FakeBoard:
         self.sent.append(data)
         cmd = data[1]
         if cmd == hil_tests.CMD_GET_ID:
-            return self._reply(cmd, True)
+            ident = b"" if self.protocol is None else f"Split72 1.13.10 P{self.protocol} HW1 ".encode()
+            return self._reply(cmd, True, ident)
         if cmd == hil_tests.CMD_GET_DEFAULT_LAYER:
             return self._reply(cmd, True, bytes([DEFAULT_LAYER]))
         op = data[2]
@@ -93,6 +102,16 @@ class FakeBoard:
         if op == ht.OP_END:
             self._end()
             return self._reply(ht.CMD_HOST_TUTORIAL, True)
+        if op == ht.OP_EMOJI_MODE and (self.protocol or 0) >= 37:
+            before, value = self.emoji, data[3]
+            if self.emoji_check_value and value not in (0, 1, 0xFF):
+                return self._reply(ht.CMD_HOST_TUTORIAL, False, bytes([before]))
+            if value in (0, 1):
+                if self.emoji_saved is None:
+                    self.emoji_saved = before
+                self.emoji = value
+            shown = before if self.emoji_before_ok else self.emoji
+            return self._reply(ht.CMD_HOST_TUTORIAL, True, bytes([shown]))
         return self._reply(ht.CMD_HOST_TUTORIAL, False)
 
     def _text(self, data):
@@ -187,10 +206,42 @@ class HilTest(unittest.TestCase):
             with self.subTest(why):
                 self.assertFalse(self.run_test(board)[0])
 
+    def test_info_ops_follow_the_protocol(self):
+        self.assertTrue(self.run_test(FakeBoard(protocol=36))[0])
+        self.assertTrue(self.run_test(FakeBoard(protocol=37, info=(0xFF, 4, 10, 59)))[0])
+        self.assertFalse(self.run_test(FakeBoard(protocol=37))[0])     # 7 ops on a v37
+        self.assertFalse(self.run_test(FakeBoard(protocol=36, info=(0xFF, 4, 10, 59)))[0])
+
     def test_old_firmware_nacks_info(self):
         board = FakeBoard()
         board.send = lambda data, **_: board._reply(ht.CMD_HOST_TUTORIAL, False)
         self.assertFalse(self.run_test(board)[0])
+
+
+class EmojiModeTest(unittest.TestCase):
+    def run_test(self, board):
+        lines = []
+        return hil_tests.test_host_tutorial_emoji_mode(board, lines.append), lines
+
+    def test_passes_and_leaves_the_mode(self):
+        for mode in (0, 1):
+            with self.subTest(mode=mode):
+                board = FakeBoard(protocol=37)
+                board.emoji = mode
+                ok, lines = self.run_test(board)
+                self.assertTrue(ok, "\n".join(lines))
+                self.assertEqual(board.emoji, mode)
+
+    def test_catches_each_broken_rule(self):
+        broken = {
+            "END does not restore": FakeBoard(protocol=37, emoji_restore=False),
+            "the reply carries the new mode": FakeBoard(protocol=37, emoji_before_ok=False),
+            "accepts value 2": FakeBoard(protocol=37, emoji_check_value=False),
+            "v36 NACKs op 7": FakeBoard(protocol=36),
+        }
+        for why, board in broken.items():
+            with self.subTest(why):
+                self.assertFalse(self.run_test(board)[0])
 
 
 class WatchdogTest(unittest.TestCase):
@@ -226,6 +277,9 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(main["min_protocol"], 35)
         self.assertNotIn("tier", main)
         self.assertEqual(dog["min_protocol"], 35)
+        emoji = by_fn[hil_tests.test_host_tutorial_emoji_mode]
+        self.assertEqual(emoji["min_protocol"], 37)
+        self.assertNotIn("tier", emoji)
         self.assertEqual(dog["tier"], hil_tests.TIER_EXTENDED)
 
 
