@@ -269,6 +269,22 @@ class EmojiModeCleanupTest(unittest.TestCase):
                 raise OSError("hid read failed")
         self.assertIsNone(hil_tests._device_protocol(Flaky()))
 
+    def test_get_id_is_sent_once_and_other_errors_surface(self):
+        sent = []
+
+        class Once:
+            def send(self, data, **kw):
+                sent.append(kw.get("attempts", 3))
+                return None
+        self.assertIsNone(hil_tests._device_protocol(Once()))
+        self.assertEqual(sent, [1])
+
+        class Bug:
+            def send(self, data, **_):
+                raise TypeError("a bug, not a HID error")
+        with self.assertRaises(TypeError):
+            hil_tests._device_protocol(Bug())
+
 
 class WatchdogTest(unittest.TestCase):
     def run_test(self, board):

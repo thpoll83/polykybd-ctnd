@@ -484,8 +484,9 @@ def parse_fontpack_versions(response):
 def _device_protocol(raw: RawHID):
     """The firmware PROTOCOL_VERSION from GET_ID, or None when it cannot be read."""
     try:
-        resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]))
-    except Exception:      # a transient HID error: the caller treats None as unknown
+        # attempts=1: GET_ID clears the one-shot fresh-boot marker (station/hid.py).
+        resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
+    except (OSError, RuntimeError):   # a failed HID read, or the board is gone
         return None
     if not resp or len(resp) < 3 or resp[0] != POLY_CHANNEL or resp[1] != CMD_GET_ID:
         return None
