@@ -1,11 +1,11 @@
-"""Cmd 49 HOST TUTORIAL (protocol v35, op 7 from v37): request packing and reply parsing for the HIL
+"""Cmd 49 HOST TUTORIAL (protocol v35): request packing and reply parsing for the HIL
 tests, unit-tested offline.
 
 Mirrors qmk_firmware keyboards/polykybd/base/host_tutorial_plan.[ch] and
 anim/host_tutorial.c (host_tutorial_hid):
-  data[2] op: 0 INFO, 1 TEXT, 2 SPOTLIGHT, 3 REVEAL, 4 ARM, 5 POLL, 6 END, and from v37
-            7 EMOJI_MODE; any other NACKs.
-  INFO      reply [3] op bitmask (0x7F, 0xFF from v37), [4] max conditions (4), [5] watchdog s (10),
+  data[2] op: 0 INFO, 1 TEXT, 2 SPOTLIGHT, 3 REVEAL, 4 ARM, 5 POLL, 6 END; any other
+            NACKs.
+  INFO      reply [3] op bitmask (0x7F), [4] max conditions (4), [5] watchdog s (10),
             [6] text bytes (59).
   TEXT      [3] len0, line 0, then len1, line 1, all in one 64-byte report; every byte
             0x20..0x7E. Both empty clears the text.
@@ -15,9 +15,7 @@ anim/host_tutorial.c (host_tutorial_hid):
             b = 0), 3 KEYCODE (low, high). Anything else NACKs and keeps the old set.
   POLL      reply [3] flags (1 text, 2 spotlight, 4 armed), [4] armed count,
             [5] matched bits (sticky since ARM), [6] the highest active layer.
-  END       clears text, spotlight and conditions, and restores the emoji mode.
-  EMOJI_MODE (v37) [3] 0 tab, 1 search, 0xFF query; reply [3] the mode before, also
-            on a NACK. A set NACKs without an emoji search dictionary.
+  END       clears text, spotlight and conditions.
 The first-run tutorial refuses TEXT, SPOTLIGHT, REVEAL and ARM while it runs. The
 master ends the session by itself after 10 s without a cmd 49 report. The DOOM
 monolith has no cmd 49 and NACKs every op.
@@ -28,18 +26,8 @@ HOST_TUTORIAL_MIN_PROTOCOL = 35
 
 POLY_CHANNEL = ord("P")
 OP_INFO, OP_TEXT, OP_SPOTLIGHT, OP_REVEAL, OP_ARM, OP_POLL, OP_END = range(7)
-# v37: op 7 EMOJI_MODE sets the emoji layer's tab or search mode; END restores it.
-OP_EMOJI_MODE = 7
-EMOJI_MODE_MIN_PROTOCOL = 37
-EMOJI_TAB, EMOJI_SEARCH, EMOJI_QUERY = 0, 1, 0xFF
-OP_UNKNOWN = 8                  # no op 8 in any version
-
-
-def info_ops(protocol):
-    """INFO's op bitmask for a firmware protocol, or None when it is not known."""
-    if protocol is None:
-        return None
-    return 0xFF if protocol >= EMOJI_MODE_MIN_PROTOCOL else 0x7F
+OP_UNKNOWN = 8                  # op 7 is not used either (qmk#443 was closed unmerged)
+INFO_OPS = 0x7F
 REPORT_BYTES = 64
 TEXT_BYTES = 59                 # 64 - 3 header - 2 length bytes
 MASK_BYTES = 10
@@ -94,18 +82,6 @@ def poll_request() -> bytes:
 
 def end_request() -> bytes:
     return _req(OP_END)
-
-
-def emoji_mode_request(value: int) -> bytes:
-    return _req(OP_EMOJI_MODE, value)
-
-
-def parse_emoji_mode(resp):
-    """The mode before the request (0 tab, 1 search) from an EMOJI_MODE reply, ACK or
-    NACK, else None."""
-    if status(resp) is None or len(resp) < 4:
-        return None
-    return resp[3]
 
 
 def op_request(op: int) -> bytes:

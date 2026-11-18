@@ -89,6 +89,20 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
 
 ## Closed
 
+### 2026-11-18: host tutorial tests for a v37 that was never merged
+- **Run:** 44295732221 a1 (qmk#445, protocol 37: hardware IDs, cmd 50).
+- **Symptom:** `FAIL: INFO does not match base/host_tutorial_plan.h` and `FAIL: the query
+  was not answered with a mode`, failing `host tutorial ops, NACKs, layer condition, END
+  (v35 cmd 49)` and `host tutorial emoji mode, before-values, END restores it (v37 cmd 49
+  op 7)`. The settle line read `need=15`.
+- **Class:** rig test.
+- **Cause and fix:** ctnd#156 added the rig side of qmk#443 (cmd 49 op 7 EMOJI_MODE,
+  INFO bitmask `0xFF`, both gated on protocol 37). The maintainer closed qmk#443 unmerged
+  on 2026-11-17, but the rig tests stayed. They ran first on qmk#445, the next firmware
+  to report protocol 37, which has no op 7. The ctnd PR for this entry removed them.
+  Resembles the `POLY_OS_COUNT` entry below: a rig mirror of firmware that does not exist.
+- **Cost:** qmk#445's HIL check red until the ctnd fix is on `main` and HIL is re-run.
+
 ### 2026-11-12 and 2026-11-13: combo commit "refused" after a firmware apply
 - **Runs:** 43226924017 a1 (qmk#428 merge) and 43317964268 a1 (qmk#435 merge).
 - **Symptom:** `[test] FAIL: reboot persistence: the keyboard refused combo [13, 14, 0, 0, 41] or its commit`
