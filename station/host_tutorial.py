@@ -26,7 +26,8 @@ HOST_TUTORIAL_MIN_PROTOCOL = 35
 
 POLY_CHANNEL = ord("P")
 OP_INFO, OP_TEXT, OP_SPOTLIGHT, OP_REVEAL, OP_ARM, OP_POLL, OP_END = range(7)
-OP_UNKNOWN = 8                  # op 7 is not used either (qmk#443 was closed unmerged)
+OP_REMOVED = 7                  # EMOJI_MODE, proposed in qmk#443 and closed unmerged: NACKs
+OP_UNKNOWN = 8                  # no op 8 in any version
 INFO_OPS = 0x7F
 REPORT_BYTES = 64
 TEXT_BYTES = 59                 # 64 - 3 header - 2 length bytes

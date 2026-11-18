@@ -91,10 +91,13 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
 
 ### 2026-11-18: host tutorial tests for a v37 that was never merged
 - **Run:** 44295732221 a1 (qmk#445, protocol 37: hardware IDs, cmd 50).
-- **Symptom:** `FAIL: INFO does not match base/host_tutorial_plan.h` and `FAIL: the query
-  was not answered with a mode`, failing `host tutorial ops, NACKs, layer condition, END
-  (v35 cmd 49)` and `host tutorial emoji mode, before-values, END restores it (v37 cmd 49
-  op 7)`. The settle line read `need=15`.
+- **Symptom:** two log lines, each failing one test:
+  - `FAIL: INFO does not match base/host_tutorial_plan.h`
+    in `host tutorial ops, NACKs, layer condition, END (v35 cmd 49)`
+  - `FAIL: the query was not answered with a mode`
+    in `host tutorial emoji mode, before-values, END restores it (v37 cmd 49 op 7)`
+
+  The settle line read `need=15`.
 - **Class:** rig test.
 - **Cause and fix:** ctnd#156 added the rig side of qmk#443 (cmd 49 op 7 EMOJI_MODE,
   INFO bitmask `0xFF`, both gated on protocol 37). The maintainer closed qmk#443 unmerged

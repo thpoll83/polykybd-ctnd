@@ -197,34 +197,22 @@ class HilTest(unittest.TestCase):
                 self.assertFalse(self.run_test(
                     FakeBoard(protocol=proto, info=(0xFF, 4, 10, 59)))[0])
 
+    def test_a_board_that_acks_op_7_fails(self):
+        # INFO can still say 0x7F; the op 7 request must NACK on its own.
+        board = FakeBoard(protocol=37)
+        real_send = board.send
+
+        def acks_op_7(data, **kw):
+            if data[1] == ht.CMD_HOST_TUTORIAL and data[2] == ht.OP_REMOVED:
+                return board._reply(ht.CMD_HOST_TUTORIAL, True)
+            return real_send(data, **kw)
+        board.send = acks_op_7
+        self.assertFalse(self.run_test(board)[0])
+
     def test_old_firmware_nacks_info(self):
         board = FakeBoard()
         board.send = lambda data, **_: board._reply(ht.CMD_HOST_TUTORIAL, False)
         self.assertFalse(self.run_test(board)[0])
-
-
-class DeviceProtocolTest(unittest.TestCase):
-    def test_get_id_errors_read_as_unknown(self):
-        class Flaky:
-            def send(self, data, **_):
-                raise OSError("hid read failed")
-        self.assertIsNone(hil_tests._device_protocol(Flaky()))
-
-    def test_get_id_is_sent_once_and_other_errors_surface(self):
-        sent = []
-
-        class Once:
-            def send(self, data, **kw):
-                sent.append(kw.get("attempts", 3))
-                return None
-        self.assertIsNone(hil_tests._device_protocol(Once()))
-        self.assertEqual(sent, [1])
-
-        class Bug:
-            def send(self, data, **_):
-                raise TypeError("a bug, not a HID error")
-        with self.assertRaises(TypeError):
-            hil_tests._device_protocol(Bug())
 
 
 class WatchdogTest(unittest.TestCase):

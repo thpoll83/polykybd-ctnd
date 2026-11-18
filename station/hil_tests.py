@@ -481,19 +481,6 @@ def parse_fontpack_versions(response):
     return {i: int.from_bytes(raw[p + 2 * i:p + 2 * i + 2], "little") for i in range(count)}
 
 
-def _device_protocol(raw: RawHID):
-    """The firmware PROTOCOL_VERSION from GET_ID, or None when it cannot be read."""
-    try:
-        # attempts=1: GET_ID clears the one-shot fresh-boot marker (station/hid.py).
-        resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
-    except (OSError, RuntimeError):   # a failed HID read, or the board is gone
-        return None
-    if not resp or len(resp) < 3 or resp[0] != POLY_CHANNEL or resp[1] != CMD_GET_ID:
-        return None
-    identity = bytes(resp[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
-    return parse_device_caps(identity).get("protocol")
-
-
 def _master_alive(raw: RawHID, log: Callable[[str], None], attempts: int = 3) -> bool:
     """GET_ID with a few retries. After an upload (or any EEPROM/refresh command)
     the master finishes an EEPROM write + a full keycap display refresh on its
@@ -1965,9 +1952,8 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
     row, col = KEY_ATTN_TEST_KEY
     ok = True
     try:
-        proto = _device_protocol(raw)
         info = ht.parse_info(raw.send(ht.info_request()))
-        log(f"  INFO -> {info} (device protocol {proto})")
+        log(f"  INFO -> {info}")
         if info is None or info["ops"] != ht.INFO_OPS \
                 or {k: v for k, v in info.items() if k != "ops"} != {
                     "max_conds": ht.MAX_CONDS, "watchdog_s": ht.WATCHDOG_S,
@@ -1995,6 +1981,7 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
             (ht.arm_request([(0, 0, 0)]), NACK, "ARM kind 0"),
             (ht.arm_request([(ht.COND_LAYER, base, 0), (ht.COND_KEY, row, col)]), ACK,
              f"ARM layer {base} on, key ({row},{col}) pressed"),
+            (ht.op_request(ht.OP_REMOVED), NACK, f"op {ht.OP_REMOVED}, never merged"),
             (ht.op_request(ht.OP_UNKNOWN), NACK, f"an unknown op ({ht.OP_UNKNOWN})"),
         ]
         ok = _host_tut_cases(raw, log, cases)
