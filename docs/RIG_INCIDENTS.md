@@ -29,8 +29,9 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
 
 ## Open
 
-### FW_UP_COMMIT gets no reply after a complete staging (4 times)
+### FW_UP_COMMIT gets no reply after a complete staging (5 times)
 - **Runs:**
+  - 2026-11-18: 44313791801 a1 (qmk#445 merge, firmware 1.13.10 image)
   - 2026-11-13: 43317964268 a2 (qmk#435 merge, firmware 1.13.3 image)
   - 2026-11-07: 42373381756 a1 (qmk#415 merge, 1.10.2)
   - 2026-11-06: 42305960229 a1 (qmk#414 merge, 1.10.1)
@@ -40,15 +41,16 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
   reach a clean COMMIT`. Each time it comes right after `all N bytes delivered … verifying
   CRC…` and `signature sent`, with the image staged over the bulk pipe. The signature
   replies also time out, so the master does not answer HID for more than 10 s.
-- **Class:** unexplained. It happened in 4 of about 40 apply jobs. The console is stopped
-  during the firmware-update section, so the log has nothing from the keyboard for that
-  window. Three of the four predate the runtime combos (1.13.3), so they are not the cause.
+- **Class:** unexplained. It happened in 5 of more than 40 apply jobs. The console is
+  stopped during the firmware-update section, so the log has nothing from the keyboard for that
+  window. Three of the five predate the runtime combos (1.13.3), so they are not the cause.
 - **Each time the next apply run on the same firmware passed:** 10-23, the 11-07 08:37
-  dispatch, 11-09, and 43394412385 on 11-13.
+  dispatch, 11-09, 43394412385 on 11-13, and attempt a2 of 44313791801 on 11-18.
 - **Next step:** a debug probe that keeps the console open across COMMIT, to see what the
   master does in those 10 s.
 - **Cost:** a red merge commit each time. 11-06 held the 1.10.2 release gate together with
   the PRC entry below. 11-13 left firmware 1.13.4 published with no files for about 45 min.
+  11-18 held the 1.13.11 release gate until the re-run passed.
 
 ### 2026-11-10: master reset by its RUN pin during the language sweep
 - **Run:** 42829271627 a1 (47d00071), Firmware apply round-trip.
