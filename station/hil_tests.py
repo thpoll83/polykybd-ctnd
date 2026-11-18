@@ -481,19 +481,6 @@ def parse_fontpack_versions(response):
     return {i: int.from_bytes(raw[p + 2 * i:p + 2 * i + 2], "little") for i in range(count)}
 
 
-def _device_protocol(raw: RawHID):
-    """The firmware PROTOCOL_VERSION from GET_ID, or None when it cannot be read."""
-    try:
-        # attempts=1: GET_ID clears the one-shot fresh-boot marker (station/hid.py).
-        resp = raw.send(bytes([POLY_CHANNEL, CMD_GET_ID]), attempts=1)
-    except (OSError, RuntimeError):   # a failed HID read, or the board is gone
-        return None
-    if not resp or len(resp) < 3 or resp[0] != POLY_CHANNEL or resp[1] != CMD_GET_ID:
-        return None
-    identity = bytes(resp[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
-    return parse_device_caps(identity).get("protocol")
-
-
 def _master_alive(raw: RawHID, log: Callable[[str], None], attempts: int = 3) -> bool:
     """GET_ID with a few retries. After an upload (or any EEPROM/refresh command)
     the master finishes an EEPROM write + a full keycap display refresh on its
@@ -1951,7 +1938,7 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
 
     The rig has no camera and cannot press keys (cmd 14 needs debug_enable), so the
     status text, the darkened keys, the reveal and a KEY condition are not observable.
-    What this checks: INFO reports 7 ops (8 from v37), 4 conditions, a 10 s watchdog and 59 text
+    What this checks: INFO reports 7 ops, 4 conditions, a 10 s watchdog and 59 text
     bytes; TEXT is ACKed for ASCII and NACKed for a byte outside 0x20..0x7E and for a
     length past the report; SPOTLIGHT is ACKed on and off and NACKed for an unknown
     flag; REVEAL is NACKed for a key without a display and for row 255; ARM is NACKed
@@ -1965,11 +1952,9 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
     row, col = KEY_ATTN_TEST_KEY
     ok = True
     try:
-        proto = _device_protocol(raw)
         info = ht.parse_info(raw.send(ht.info_request()))
-        log(f"  INFO -> {info} (device protocol {proto})")
-        want_ops = ht.info_ops(proto)
-        if info is None or info["ops"] not in ((0x7F, 0xFF) if want_ops is None else (want_ops,)) \
+        log(f"  INFO -> {info}")
+        if info is None or info["ops"] != ht.INFO_OPS \
                 or {k: v for k, v in info.items() if k != "ops"} != {
                     "max_conds": ht.MAX_CONDS, "watchdog_s": ht.WATCHDOG_S,
                     "text_bytes": ht.TEXT_BYTES}:
@@ -1996,6 +1981,7 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
             (ht.arm_request([(0, 0, 0)]), NACK, "ARM kind 0"),
             (ht.arm_request([(ht.COND_LAYER, base, 0), (ht.COND_KEY, row, col)]), ACK,
              f"ARM layer {base} on, key ({row},{col}) pressed"),
+            (ht.op_request(ht.OP_REMOVED), NACK, f"op {ht.OP_REMOVED}, never merged"),
             (ht.op_request(ht.OP_UNKNOWN), NACK, f"an unknown op ({ht.OP_UNKNOWN})"),
         ]
         ok = _host_tut_cases(raw, log, cases)
@@ -2039,90 +2025,6 @@ def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
     if ok:
         log("  host tutorial: ops ACKed/NACKed as specified, layer condition matched, "
             "END cleared, master alive")
-    return ok
-
-
-def _restore_emoji_mode(raw: RawHID, log: Callable[[str], None], mode: int) -> None:
-    """After a failed run: put the rig's emoji mode back to `mode` by hand, so a firmware
-    that does not restore it does not change the mode for the tests after this one."""
-    ht = host_tutorial
-    try:
-        raw.send(ht.emoji_mode_request(mode))
-        raw.send(ht.end_request())
-        got = ht.parse_emoji_mode(raw.send(ht.emoji_mode_request(ht.EMOJI_QUERY)))
-        raw.send(ht.end_request())
-        log(f"  emoji mode put back to {mode} by hand: now {got}")
-    except Exception as exc:     # the test has failed already; this is cleanup only
-        log(f"  could not put the emoji mode back: {exc}")
-
-
-def test_host_tutorial_emoji_mode(raw: RawHID, log: Callable[[str], None]) -> bool:
-    """HOST TUTORIAL EMOJI_MODE (cmd 49 op 7, v37+): the tutorial sets the emoji layer's
-    tab or search mode, and END restores the mode the session found.
-
-    Reads the mode (query), sets the other mode, the first, the other again: each
-    reply's [3] must be the mode before that request. A value of 2 is NACKed and its
-    reply still carries the mode before. END must restore the first mode, read back with
-    an ACKed query. On a failure the test puts the mode back by hand. A set refused on a keyboard without an emoji search dictionary
-    fails the test: the rig flashes the font packs, so it has one. Ends with END and
-    checks the mode is the one the test found.
-    """
-    ht = host_tutorial
-    ok = True
-    first = None
-    try:
-        q = raw.send(ht.emoji_mode_request(ht.EMOJI_QUERY))
-        first = ht.parse_emoji_mode(q)
-        log(f"  query -> {chr(ht.status(q)) if ht.status(q) else None!r}, mode {first}")
-        if ht.status(q) != ACK or first not in (ht.EMOJI_TAB, ht.EMOJI_SEARCH):
-            log("  FAIL: the query was not answered with a mode")
-            return False
-        # End on the mode opposite to the one found, so END has something to restore.
-        other = ht.EMOJI_TAB if first == ht.EMOJI_SEARCH else ht.EMOJI_SEARCH
-        steps = [(other, first, "set the other mode"),
-                 (first, other, "set the first mode back"),
-                 (other, first, "set the other mode again"),
-                 (ht.EMOJI_QUERY, other, "query")]
-        for value, before, label in steps:
-            # attempts=1: send() resends after a timeout, and a resent set would report
-            # the mode the first one already applied, not the mode before it.
-            r = raw.send(ht.emoji_mode_request(value), attempts=1)
-            got = ht.parse_emoji_mode(r)
-            log(f"  {label} -> {chr(ht.status(r)) if ht.status(r) else None!r}, before {got}")
-            if ht.status(r) != ACK or got != before:
-                log(f"  FAIL: {label}: expected ACK with the mode before = {before}")
-                ok = False
-                break
-        if ok:
-            # A refusal still reports the mode before it.
-            r = raw.send(ht.emoji_mode_request(2))
-            got = ht.parse_emoji_mode(r)
-            log(f"  value 2 -> {chr(ht.status(r)) if ht.status(r) else None!r}, before {got}")
-            if ht.status(r) != NACK or got != other:
-                log(f"  FAIL: value 2: expected NACK with the mode before = {other}")
-                ok = False
-        if ok:
-            ok = _host_tut_cases(raw, log, [(ht.end_request(), ACK, "END")])
-        if ok:
-            r = raw.send(ht.emoji_mode_request(ht.EMOJI_QUERY))
-            got = ht.parse_emoji_mode(r)
-            log(f"  query after END -> {chr(ht.status(r)) if ht.status(r) else None!r}, "
-                f"mode {got}")
-            if ht.status(r) != ACK or got != first:
-                log(f"  FAIL: END did not restore the mode {first}")
-                ok = False
-    finally:
-        ended = host_tutorial.status(raw.send(host_tutorial.end_request()))
-        if ended != ACK:
-            log("  FAIL: could not end the session")
-            ok = False
-        if not ok and first is not None:
-            _restore_emoji_mode(raw, log, first)
-    if ok and not _master_alive(raw, log):
-        log("  FAIL: master stopped answering GET_ID after EMOJI_MODE")
-        ok = False
-    if ok:
-        log("  host tutorial emoji mode: set, before-values and the END restore as specified")
     return ok
 
 
@@ -4928,9 +4830,6 @@ TESTS = [
      "fn": test_key_guide, "min_protocol": key_attention.KEY_GUIDE_MIN_PROTOCOL},
     {"name": "host tutorial ops, NACKs, layer condition, END (v35 cmd 49)",
      "fn": test_host_tutorial, "min_protocol": host_tutorial.HOST_TUTORIAL_MIN_PROTOCOL},
-    {"name": "host tutorial emoji mode, before-values, END restores it (v37 cmd 49 op 7)",
-     "fn": test_host_tutorial_emoji_mode,
-     "min_protocol": host_tutorial.EMOJI_MODE_MIN_PROTOCOL},
     {"name": "host tutorial 10 s watchdog ends the session (v35 cmd 49)",
      "fn": test_host_tutorial_watchdog,
      "min_protocol": host_tutorial.HOST_TUTORIAL_MIN_PROTOCOL, "tier": TIER_EXTENDED},
