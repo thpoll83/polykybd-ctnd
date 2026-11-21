@@ -5,7 +5,7 @@ Runs on a Raspberry Pi 4 with a 7" touchscreen and provides automated flashing, 
 
 ## AI-assisted development
 
-Since this repository was created in May 2026, its code is written with AI assistance, mainly with Claude Code. CI and AI review bots check each change, but AI-written code can contain mistakes that these checks do not find. Please report problems as GitHub issues.
+Since this repository was created in May 2026, its code is written with AI assistance, mainly with Claude Code. CI and AI review bots check most pull requests, but not every change, and AI-written code can contain mistakes that these checks do not find. Please report problems as GitHub issues.
 
 ## Features
 
