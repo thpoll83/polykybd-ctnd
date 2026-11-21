@@ -1,8 +1,8 @@
 """Cmd 45 AI and cmd 46 AI_CARD (protocol v31): the agent keys. Request packing
 and reply parsing for the HIL test, unit-tested offline.
 
-Mirrors qmk_firmware keyboards/polykybd/ai_mode.c (ai_hid_cmd, ai_hid_card) and
-base/ai_events.h (PROTOCOL_HISTORY.md, v31):
+Mirrors qmk_firmware keyboards/polykybd/modes/ai_mode.c (ai_hid_cmd, ai_hid_card) and
+base/ai_events.h (keyboards/polykybd/docs/protocol/protocol-history.md, v31):
   cmd 45 op 0 QUERY        reply data[3] AI mode, data[4] newest event seq,
                            data[5] number keys found (0..10), data[6] ESC found
   cmd 45 op 1 SET_KEYS     data[3..12] 10 states (0..5, CLOSED), data[13] flags

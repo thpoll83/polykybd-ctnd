@@ -22,7 +22,7 @@ from .usb_suspend import (HeldAwake, UsbSuspend, find_device, grant_missing,
                           interface_drivers)
 
 # Raw HID display-off control command — mirrors the firmware dispatcher in
-# keyboards/polykybd/hid_com.c (case 24 / 0x18). A command report is
+# keyboards/polykybd/hid/hid_com.c (case 24 / 0x18). A command report is
 # data[0]='P' (channel marker) then data[1]=command id; the firmware replies "P\x18.".
 POLY_CHANNEL     = 0x50  # 'P'
 CMD_GET_ID       = 0x06  # device identity string — advertises fw + protocol version
@@ -40,7 +40,7 @@ ACK              = ord(".")
 # the firmware routes data[0]==0x06 to legacy_command_kb(), which calls
 # dynamic_keymap_reset(), bridges the reset to the slave over the split link, and
 # echoes the request back unchanged (no "P<cmd>." ACK). Same id PolyKybdHost uses
-# in PolyKybd.reset_dynamic_keymap(). See keyboards/polykybd/hid_com.c.
+# in PolyKybd.reset_dynamic_keymap(). See keyboards/polykybd/hid/hid_com.c.
 VIA_DYNAMIC_KEYMAP_RESET = 0x06
 
 # USB suspend with Eden on core1 (see TestRunner.suspend_wake_eden).

@@ -2,7 +2,7 @@
 packing and reply parsing for the HIL test, unit-tested offline.
 
 Mirrors qmk_firmware keyboards/polykybd/anim/key_attention.c (key_attention_hid)
-and PROTOCOL_HISTORY.md, v32:
+and keyboards/polykybd/docs/protocol/protocol-history.md, v32:
   data[2] op, CLOSED: 0 START, 1 CANCEL; any other op NACKs.
   START   data[3] row, data[4] col (matrix position; a key without a display
           NACKs), data[5] ripple count (0 = until cancelled), data[6] period in

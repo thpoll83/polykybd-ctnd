@@ -7,7 +7,7 @@ subclass 0x01) with no endpoints, and a MIDIStreaming interface (class 0x01,
 subclass 0x03) with exactly ONE endpoint, bulk IN. ``MIDI_SEND_ONLY`` (a
 PolyKybd patch to QMK core) removes the OUT endpoint, so an OUT endpoint here
 means the build lost that define and spends ~400 B of RAM on a receive path the
-firmware never reads (qmk keyboards/polykybd/MIDI.md).
+firmware never reads (qmk keyboards/polykybd/docs/features/midi.md).
 
 Reads sysfs only, so it is unit-testable with a fake tree.
 """

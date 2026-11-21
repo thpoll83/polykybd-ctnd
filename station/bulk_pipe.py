@@ -2,7 +2,7 @@
 """The keyboard's bulk pipe on the rig: find it, open it raw, measure it.
 
 A ``POLYKYBD_BULK_PIPE`` firmware adds a CDC-ACM interface next to raw HID
-(qmk ``keyboards/polykybd/BULK_PIPE.md``). On the Pi it is ``/dev/ttyACM*``
+(qmk ``keyboards/polykybd/docs/protocol/bulk-pipe.md``). On the Pi it is ``/dev/ttyACM*``
 with the keyboard's idVendor. The frame format is the firmware's
 (``poly_pipe.h``)::
 

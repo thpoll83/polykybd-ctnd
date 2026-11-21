@@ -488,7 +488,7 @@ def measure_app_switch(raw: RawHID, profiler: Profiler, log: Callable[[str], Non
     every switch after a reconnect does. ``warm`` is the same switch with every
     image already in the pool: prepare + mapping + enable only. ``warm`` is also
     the lower bound for a switch whose images come from a flash icon library
-    (qmk_firmware OVERLAY_ICON_LIBRARY_DESIGN.md), which adds only its fill
+    (qmk_firmware keyboards/polykybd/docs/design/overlay-icon-library.md), which adds only its fill
     reports on top."""
     ops = fixture[phase]
     name = fixture.get("stem", "?")
