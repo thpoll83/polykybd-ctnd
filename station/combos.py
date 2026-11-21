@@ -2,7 +2,7 @@
 parsing, shared by the HIL test and the reboot-persistence check, and unit-tested
 offline.
 
-Mirrors qmk_firmware keyboards/polykybd/poly_combos.c and base/combo_store.h:
+Mirrors qmk_firmware keyboards/polykybd/keymap/poly_combos.c and base/combo_store.h:
   request  data[2] op: 0 INFO, 1 GET, 2 SET, 3 COMMIT; GET/SET data[3] kind
            (0 combo, 1 tap dance), data[4] index, SET data[5..14] five u16 LE.
   reply    INFO data[3] combo slots, [4] tap-dance slots, [5] record bytes,

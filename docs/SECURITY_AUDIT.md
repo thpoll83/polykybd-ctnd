@@ -317,7 +317,7 @@ until you read the guard, and re-deriving that costs more than reading it.
 
 The `POLYKYBD_BULK_PIPE` firmware adds a CDC-ACM interface that any process able to
 open a serial port can write to, with no gate (the same trust level as raw HID,
-which also needs only device access). The parser (`keyboards/polykybd/poly_pipe.c`)
+which also needs only device access). The parser (`keyboards/polykybd/hid/poly_pipe.c`)
 was read for memory safety: the only buffer is the 512-byte `s_buf` for `ECHO`, a
 frame whose length exceeds it sets `s_oversize` and is drained without storing,
 `SINK` payloads are counted and CRC-chained byte by byte and never stored, every
@@ -343,7 +343,7 @@ firmware update's CHUNK step on the pipe. Read for the same properties as HID's
   signature check;
 - the handler runs inside `virtser_task()` on the main loop and programs flash
   there, like the HID handler inside `raw_hid_receive()`; the host paces itself by
-  the replies (BULK_PIPE.md), and a host that does not only stalls the keyboard's
+  the replies (keyboards/polykybd/docs/protocol/bulk-pipe.md), and a host that does not only stalls the keyboard's
   own main loop for the length of its stream.
 
 ### Key injection is double-gated — host debug flag AND firmware debug flag
@@ -1230,7 +1230,7 @@ actually signed. That is expected, not a regression.
 ⚠️ **Step 4 only after 1–3** — otherwise the firmware refuses to flash anything, including
 the image that would undo it (BOOTSEL/UF2 remains the unconditional recovery path, since it
 bypasses `fw_staging` entirely). Full procedure:
-`qmk_firmware/keyboards/polykybd/tools/SIGNING.md`.
+`qmk_firmware/keyboards/polykybd/docs/fw-update/signing.md`.
 
 Enforcement needs **no slave-side work**: verification is master-only by design, on the
 argument that reaching the slave requires a cable to the UART bridge, and anyone with that

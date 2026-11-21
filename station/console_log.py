@@ -38,7 +38,7 @@ import time
 from collections import deque
 from typing import Callable
 
-# keyboards/polykybd/bridge_helper.c:
+# keyboards/polykybd/split_link/bridge_helper.c:
 #   "Split link: %lu tx crc_err=%lu nack=%lu transport_fail=%lu giveup=%lu err=%lu.%lu%%\n"
 _LINK_RE = re.compile(
     r"Split link:\s*(?P<tx>\d+)\s+tx\s+crc_err=(?P<crc_err>\d+)\s+nack=(?P<nack>\d+)"
