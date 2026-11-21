@@ -653,3 +653,9 @@ polykybd-ctnd/
 ## License
 
 GPL-2.0 — consistent with `qmk_firmware` and `PolyKybdHost`.
+
+## AI-assisted development
+
+This repository started in May 2026, and its code has been written with AI tools from the start. The PolyKybd code base has grown too large for one person to write alone, and AI tools let me move faster towards the vision of the project.
+
+I decide on every change. I review the changes, test them myself on the test rig, and write the summaries based on the results. AI-written code can still contain mistakes. Please report problems as GitHub issues.
