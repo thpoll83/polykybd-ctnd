@@ -3,6 +3,10 @@
 Continuous Test and Deploy station for the [PolyKybd](https://github.com/thpoll83/qmk_firmware) split keyboard.
 Runs on a Raspberry Pi 4 with a 7" touchscreen and provides automated flashing, HID console reading, and GitHub Actions HIL (hardware-in-the-loop) CI integration — no physical button pressing required.
 
+## AI-assisted development
+
+Since this repository was created in May 2026, its code is written with AI assistance, mainly with Claude Code. CI and AI review bots check each change, but AI-written code can contain mistakes that these checks do not find. Please report problems as GitHub issues.
+
 ## Features
 
 - Automated UF2 flashing of both keyboard halves via USB (GPIO-controlled BOOTSEL + uhubctl power switching)
