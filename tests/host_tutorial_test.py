@@ -1,5 +1,5 @@
 """Cmd 49 HOST TUTORIAL (v35): the packers, and both HIL tests against a fake board
-that decodes like qmk base/host_tutorial_plan.c and anim/host_tutorial.c. No hardware."""
+that decodes like qmk base/host_tutorial_plan.c and features/anim/host_tutorial.c. No hardware."""
 import sys
 import types
 import unittest

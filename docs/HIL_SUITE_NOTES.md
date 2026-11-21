@@ -248,7 +248,7 @@ and relative links were adjusted to suit a standalone file.
 - [x] **A firmware crash anywhere in the run now FAILS the run — `test_no_crash_record`.**
   The firmware announces a HardFault / unhandled exception / watchdog reboot as a
   `crash: side=<master|slave> kind=… pc=… fw=…` console line on its next boot (qmk
-  `drivers/crash_record.*`, protocol v16 cmd 39). Until this the rig echoed it into the
+  `lib/drivers/crash_record.*`, protocol v16 cmd 39). Until this the rig echoed it into the
   log like any other line, so a crash inside a test read as a flake or a dead reply.
   The scan runs `needs_console`, DEFAULT tier, **last among the default tests** so
   its window covers them all, and reads `TAP.find_all("crash: side=")` from the start

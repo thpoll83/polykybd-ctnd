@@ -6,7 +6,7 @@ The rig is not reachable from a development session, so the parts of
 hardware are pinned down here:
 
 * ``FakeProfilerDevice`` re-implements the firmware's cmd-32 replies **byte for
-  byte** from the C in ``keyboards/polykybd/profiling/loop_profile.c``. That makes
+  byte** from the C in ``keyboards/polykybd/dev/profiling/loop_profile.c``. That makes
   this a real contract test of the wire format: if the C encoder and the Python
   decoder ever disagree about layout, ordering or endianness, this fails here
   instead of producing plausible-looking nonsense on the rig.

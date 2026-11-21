@@ -7,7 +7,7 @@ the firmware printed" — so a firmware bug can be chased on the rig without a
 human flashing a ``.bin`` and pasting a console log back.
 
 A probe is an ordinary Python file living in the FIRMWARE repo under
-``keyboards/polykybd/tools/hil_probes/``, next to the change it is investigating,
+``keyboards/polykybd/dev/tools/hil_probes/``, next to the change it is investigating,
 so the probe and the firmware it probes are one commit and one branch. It
 defines::
 
@@ -41,8 +41,11 @@ import os
 import sys
 from typing import Callable, Optional
 
-# Where a probe must live, relative to the firmware checkout root.
-PROBE_SUBDIR = os.path.join("keyboards", "polykybd", "tools", "hil_probes")
+# Where a probe must live, relative to the firmware checkout root. The firmware moved
+# tools/ to dev/tools/ in 2026-11; the rig flashes branches of either age, so the
+# older place is tried when the current one does not exist.
+PROBE_SUBDIR = os.path.join("keyboards", "polykybd", "dev", "tools", "hil_probes")
+PROBE_SUBDIRS = (PROBE_SUBDIR, os.path.join("keyboards", "polykybd", "tools", "hil_probes"))
 
 
 class ProbeError(Exception):
@@ -50,7 +53,12 @@ class ProbeError(Exception):
 
 
 def probe_root(firmware_dir: str) -> str:
-    """Absolute path of the directory probes are read from."""
+    """Absolute path of the directory probes are read from: the first of
+    :data:`PROBE_SUBDIRS` that exists in ``firmware_dir``, else the current one."""
+    for sub in PROBE_SUBDIRS:
+        path = os.path.realpath(os.path.join(firmware_dir, sub))
+        if os.path.isdir(path):
+            return path
     return os.path.realpath(os.path.join(firmware_dir, PROBE_SUBDIR))
 
 
@@ -74,7 +82,8 @@ def resolve_probe(name: str, firmware_dir: str) -> str:
     # the path as it appears in the repo.
     if os.path.isabs(candidate):
         target = candidate
-    elif candidate.replace("\\", "/").startswith(PROBE_SUBDIR.replace("\\", "/")):
+    elif any(candidate.replace("\\", "/").startswith(sub.replace("\\", "/"))
+             for sub in PROBE_SUBDIRS):
         target = os.path.join(firmware_dir, candidate)
     else:
         target = os.path.join(root, candidate)

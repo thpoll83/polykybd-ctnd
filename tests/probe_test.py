@@ -11,7 +11,7 @@ import os
 import tempfile
 import unittest
 
-from station.probe import (PROBE_SUBDIR, ProbeError, load_probe, probe_root,
+from station.probe import (PROBE_SUBDIR, PROBE_SUBDIRS, ProbeError, load_probe, probe_root,
                            resolve_probe)
 
 GOOD = '''
@@ -37,6 +37,28 @@ class ProbeFixture(unittest.TestCase):
         with open(path, "w") as fh:
             fh.write(body)
         return path
+
+
+class OlderLayoutTest(unittest.TestCase):
+    """A firmware branch from before 2026-11 keeps its probes in tools/hil_probes/."""
+
+    def test_the_older_probe_directory_is_used_when_the_current_one_is_missing(self):
+        with tempfile.TemporaryDirectory() as fw:
+            root = os.path.join(fw, PROBE_SUBDIRS[1])
+            os.makedirs(root)
+            want = os.path.join(root, "fw_apply.py")
+            with open(want, "w") as fh:
+                fh.write(GOOD)
+            self.assertEqual(probe_root(fw), os.path.realpath(root))
+            self.assertEqual(resolve_probe("fw_apply", fw), os.path.realpath(want))
+            self.assertEqual(resolve_probe(os.path.join(PROBE_SUBDIRS[1], "fw_apply.py"), fw),
+                             os.path.realpath(want))
+
+    def test_the_current_directory_takes_priority(self):
+        with tempfile.TemporaryDirectory() as fw:
+            for sub in PROBE_SUBDIRS:
+                os.makedirs(os.path.join(fw, sub))
+            self.assertEqual(probe_root(fw), os.path.realpath(os.path.join(fw, PROBE_SUBDIR)))
 
 
 class ResolveTest(ProbeFixture):
