@@ -67,6 +67,14 @@ class OlderLayoutTest(unittest.TestCase):
             with self.assertRaises(ProbeError):
                 resolve_probe(os.path.join(PROBE_SUBDIRS[1], "..", "..", "x.py"), fw)
 
+    def test_an_explicit_path_into_a_missing_older_directory_is_a_probe_error(self):
+        # Only the current folder exists: the path names the older one, which the
+        # error must report instead of an os.listdir() FileNotFoundError.
+        with tempfile.TemporaryDirectory() as fw:
+            os.makedirs(os.path.join(fw, PROBE_SUBDIRS[0]))
+            with self.assertRaises(ProbeError):
+                resolve_probe(os.path.join(PROBE_SUBDIRS[1], "fw_apply.py"), fw)
+
     def test_the_current_directory_takes_priority(self):
         with tempfile.TemporaryDirectory() as fw:
             for sub in PROBE_SUBDIRS:

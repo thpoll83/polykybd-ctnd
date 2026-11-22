@@ -91,6 +91,8 @@ def resolve_probe(name: str, firmware_dir: str) -> str:
             if candidate.replace("\\", "/").startswith(sub.replace("\\", "/")):
                 root = os.path.realpath(os.path.join(firmware_dir, sub))
                 break
+        if not os.path.isdir(root):
+            raise ProbeError(f"no probe directory at {root} — is the path right?")
     else:
         target = os.path.join(root, candidate)
 
