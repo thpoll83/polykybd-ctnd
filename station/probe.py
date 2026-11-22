@@ -85,6 +85,12 @@ def resolve_probe(name: str, firmware_dir: str) -> str:
     elif any(candidate.replace("\\", "/").startswith(sub.replace("\\", "/"))
              for sub in PROBE_SUBDIRS):
         target = os.path.join(firmware_dir, candidate)
+        # The containment check below uses the folder the path names, so a path
+        # into the older folder also resolves when both folders exist.
+        for sub in PROBE_SUBDIRS:
+            if candidate.replace("\\", "/").startswith(sub.replace("\\", "/")):
+                root = os.path.realpath(os.path.join(firmware_dir, sub))
+                break
     else:
         target = os.path.join(root, candidate)
 

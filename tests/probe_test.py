@@ -54,6 +54,19 @@ class OlderLayoutTest(unittest.TestCase):
             self.assertEqual(resolve_probe(os.path.join(PROBE_SUBDIRS[1], "fw_apply.py"), fw),
                              os.path.realpath(want))
 
+    def test_an_explicit_path_into_the_older_directory_works_when_both_exist(self):
+        with tempfile.TemporaryDirectory() as fw:
+            for sub in PROBE_SUBDIRS:
+                os.makedirs(os.path.join(fw, sub))
+            want = os.path.join(fw, PROBE_SUBDIRS[1], "old_probe.py")
+            with open(want, "w") as fh:
+                fh.write(GOOD)
+            self.assertEqual(
+                resolve_probe(os.path.join(PROBE_SUBDIRS[1], "old_probe.py"), fw),
+                os.path.realpath(want))
+            with self.assertRaises(ProbeError):
+                resolve_probe(os.path.join(PROBE_SUBDIRS[1], "..", "..", "x.py"), fw)
+
     def test_the_current_directory_takes_priority(self):
         with tempfile.TemporaryDirectory() as fw:
             for sub in PROBE_SUBDIRS:
