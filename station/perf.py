@@ -4,7 +4,7 @@
 Why this exists
 ---------------
 The firmware already carries a main-loop timing profiler
-(``keyboards/polykybd/profiling/loop_profile.c``, built with
+(``keyboards/polykybd/dev/profiling/loop_profile.c``, built with
 ``-e POLYKYBD_LOOP_PROFILE=yes``). Until now reading it meant a human flashing a
 profiling build, poking the keyboard by hand, watching the HID console and
 pasting the ``LoopProf:`` block into a conversation. That is slow, unrepeatable,

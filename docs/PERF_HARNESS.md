@@ -10,7 +10,7 @@ performance automatically**, replacing the old loop of "deploy a build by hand,
 poke the keyboard, paste the `LoopProf:` block from the console".
 
 - **What drives it**: the firmware's main-loop profiler
-  (`qmk_firmware/keyboards/polykybd/profiling/`, built with
+  (`qmk_firmware/keyboards/polykybd/dev/profiling/`, built with
   `-e POLYKYBD_LOOP_PROFILE=yes`) plus its **on-demand control command, HID cmd
   32** (`RESET` / `READ` / `LOG`). Every measurement is therefore a *bounded
   window*: RESET → run one workload → READ the counters back as binary. ⚠️ The

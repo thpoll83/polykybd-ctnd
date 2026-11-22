@@ -317,7 +317,7 @@ until you read the guard, and re-deriving that costs more than reading it.
 
 The `POLYKYBD_BULK_PIPE` firmware adds a CDC-ACM interface that any process able to
 open a serial port can write to, with no gate (the same trust level as raw HID,
-which also needs only device access). The parser (`keyboards/polykybd/hid/poly_pipe.c`)
+which also needs only device access). The parser (`keyboards/polykybd/lib/hid/poly_pipe.c`)
 was read for memory safety: the only buffer is the 512-byte `s_buf` for `ECHO`, a
 frame whose length exceeds it sets `s_oversize` and is drained without storing,
 `SINK` payloads are counted and CRC-chained byte by byte and never stored, every
@@ -567,10 +567,10 @@ on ctnd #125.
 | `py/catch-base-exception` | 3 | `hid_worker.py:285`, `:292`, `:308` | Deliberate. The HID worker thread must not die from a job, an `on_done` or a periodic; each handler calls `log.exception()`, so nothing is swallowed silently. |
 | `py/uninitialized-local-variable` | 1 | `main_app.py:264` | False. `is_plain_gui` is assigned unconditionally at `:242` at function-body indent; there is no `try`, loop or `del` between the two lines, and CodeQL reports no path of its own for this one. |
 | `py/empty-except` | 51 (38 in `polyhost/`) | `protocol.py`, `instance.py`, `mpc_listener.py`, `poly_kybd.py`, … | No change. Every one read is a NARROW typed except (`except OSError: pass`, `except FileNotFoundError: pass`) on a best-effort cleanup path, with a comment. The rule fires on the bare `pass`, not on the breadth of the catch. ⚠️ One is worth a note rather than a fix: `protocol.py:290` tightens the control socket to 0600 and passes on `OSError`, so a failed `chmod` is silent. The authkey is the actual gate, so a looser mode grants nothing on its own, but a WARNING there would be one line. |
-| `py/file-not-closed` | 33 | 31 in `tools/`+`scripts/`, 1 test, `crash_log.py:380` | No change. The `crash_log.py` one is REQUIRED to stay open: `faulthandler` owns that descriptor, and closing it is the rule this repo already states. The rest are hand-run developer scripts. |
+| `py/file-not-closed` | 33 | 31 in `dev/tools/`+`scripts/`, 1 test, `crash_log.py:380` | No change. The `crash_log.py` one is REQUIRED to stay open: `faulthandler` owns that descriptor, and closing it is the rule this repo already states. The rest are hand-run developer scripts. |
 | `py/side-effect-in-assert` | 1 | `tests/device/overlay_cmdctrl_test.py:65` | Real pattern, test-only: `assert conv.open(png)` does the loading, so `python -O` would skip it. Nothing here runs tests with `-O`. One-line fix when that file is next touched. |
 | `py/implicit-string-concatenation-in-list` | 1 | `problem_report.py:158` | False. One sentence wrapped over three source lines inside a list of Markdown parts — not a missing comma. (Checked because a missing comma in a curated pattern list is exactly how `CONSOLE_PATTERNS` would lose an entry; this is not that list.) |
-| `py/missing-call-to-init`, `py/overwritten-inherited-attribute`, `py/unused-import`, `py/import-and-import-from`, `py/repeated-import`, `py/unused-global-variable`, `py/unused-local-variable`, `py/commented-out-code`, `py/imprecise-assert`, `py/mixed-returns`, `py/multiple-definition`, `py/overly-complex-delete` | 109 | mostly `tests/` and `tools/` | Known style backlog with a written stance already: `PolyKybdHost/docs/testing.md` → *No test CI* names five of these rules and the fix for each (host #301), and `.claude/rules/tests.md` repeats them. The two error/warning-severity ones are the documented pair — `_Helper(HidHelper)` skipping `super().__init__()` (`hid_reboot_wait_test.py:25`) and the `log` attribute in `observable.py:37` — whose settled shape is the `HidHelper._enumerate()`/`_open()` hook. No security content. One visible side effect: that stub's `_open` returns a bare `object()`, so `HidHelper.__del__` prints an `AttributeError` traceback into the suite output on every run. Noise, not a failure. |
+| `py/missing-call-to-init`, `py/overwritten-inherited-attribute`, `py/unused-import`, `py/import-and-import-from`, `py/repeated-import`, `py/unused-global-variable`, `py/unused-local-variable`, `py/commented-out-code`, `py/imprecise-assert`, `py/mixed-returns`, `py/multiple-definition`, `py/overly-complex-delete` | 109 | mostly `tests/` and `dev/tools/` | Known style backlog with a written stance already: `PolyKybdHost/docs/testing.md` → *No test CI* names five of these rules and the fix for each (host #301), and `.claude/rules/tests.md` repeats them. The two error/warning-severity ones are the documented pair — `_Helper(HidHelper)` skipping `super().__init__()` (`hid_reboot_wait_test.py:25`) and the `log` attribute in `observable.py:37` — whose settled shape is the `HidHelper._enumerate()`/`_open()` hook. No security content. One visible side effect: that stub's `_open` returns a bare `object()`, so `HidHelper.__del__` prints an `AttributeError` traceback into the suite output on every run. Noise, not a failure. |
 
 The CodeQL check on a PR compares against the base, so this backlog is also why a PR
 can go red on alerts it did not introduce (host #403): the check says so itself when
@@ -871,7 +871,7 @@ succeeds. Signing the header too is load-bearing: `entry_off`/`ram_base` are wha
 attacker would edit to re-target a signed image. There is no on-keycap escape hatch
 (unlike an unsigned firmware image): the load runs at idle with nobody present to
 answer a prompt, so an unsigned pack is refused and the fire demo runs.
-`tools/sign_doompack.py` appends the trailer and `release.yml` signs the `.plyx`
+`dev/tools/sign_doompack.py` appends the trailer and `release.yml` signs the `.plyx`
 beside the `.bin`; `PACK_VERSION` 3→4 so the enforcing firmware release ships a
 matching signed pack (host `validate_doompack` tolerates the trailer, so no host
 change). The `.whx` / `.plyf` note below still stands — those are data, not code,
@@ -1170,7 +1170,7 @@ The Ed25519 image-signature check is **enforced**: an image without a valid sign
 the project key is not applied. The steps, in the order they had to happen:
 
 1. ✅ **Done 2026-08-04** (qmk PR #183) — real keypair generated with
-   `tools/gen_signing_key.py`; `base/fw_pubkey.h` committed with the real public key (no
+   `dev/tools/gen_signing_key.py`; `base/fw_pubkey.h` committed with the real public key (no
    longer the all-zero placeholder). The private half was generated on the maintainer's
    machine and never entered the repo or a transcript. Build + HIL both green with it.
 2. ✅ **Done 2026-08-04** — `FW_SIGNING_KEY` set; `PolyKybd-fw-v0.9.94` ships

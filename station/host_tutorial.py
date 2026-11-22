@@ -2,7 +2,7 @@
 tests, unit-tested offline.
 
 Mirrors qmk_firmware keyboards/polykybd/base/host_tutorial_plan.[ch] and
-anim/host_tutorial.c (host_tutorial_hid):
+features/anim/host_tutorial.c (host_tutorial_hid):
   data[2] op: 0 INFO, 1 TEXT, 2 SPOTLIGHT, 3 REVEAL, 4 ARM, 5 POLL, 6 END; any other
             NACKs.
   INFO      reply [3] op bitmask (0x7F), [4] max conditions (4), [5] watchdog s (10),

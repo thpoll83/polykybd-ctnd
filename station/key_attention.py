@@ -1,7 +1,7 @@
 """Cmd 47 KEY ATTENTION (protocol v32): the focus ripple on one key. Request
 packing and reply parsing for the HIL test, unit-tested offline.
 
-Mirrors qmk_firmware keyboards/polykybd/anim/key_attention.c (key_attention_hid)
+Mirrors qmk_firmware keyboards/polykybd/features/anim/key_attention.c (key_attention_hid)
 and keyboards/polykybd/docs/protocol/protocol-history.md, v32:
   data[2] op, CLOSED: 0 START, 1 CANCEL; any other op NACKs.
   START   data[3] row, data[4] col (matrix position; a key without a display

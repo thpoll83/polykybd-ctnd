@@ -12,7 +12,7 @@ pasting a console log back**. That round trip used to be the slowest part of eve
 hardware bug, and it is what the HID-apply brick (qmk#258) was diagnosed through.
 
 A probe is a Python file in the **firmware** repo under
-`keyboards/polykybd/tools/hil_probes/`, so the probe and the firmware it probes
+`keyboards/polykybd/dev/tools/hil_probes/`, so the probe and the firmware it probes
 are one commit on one branch:
 
 ```python

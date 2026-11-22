@@ -57,7 +57,7 @@ window: 25 graded HIL or apply jobs failed, 22 of them for a rig or unexplained 
 - **Symptom:** `FAIL: swept 92/161 languages: esSV rebooted (the master crashed drawing this layout)`.
   The boot banner after it reads `reset: cause=run-pin reason=0x02 ram=kept record=no`.
 - **Class:** unexplained, probably rig hardware. A RUN-pin reset is a hardware reset: no
-  watchdog and no crash record (`crash_reset_cause_name()` in `drivers/crash_record.c`). The
+  watchdog and no crash record (`crash_reset_cause_name()` in `lib/drivers/crash_record.c`). The
   RUN line is driven by a 2N2222 switch (`RIG_HARDWARE.md`). Attempt a3 passed.
 - **Cost:** with the segfault entry below, release 1.11.5 was refused on its first attempt.
 

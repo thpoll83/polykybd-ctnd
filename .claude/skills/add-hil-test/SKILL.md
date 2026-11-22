@@ -42,7 +42,7 @@ returning `None`, so poll through the exception for a few seconds.
 ⚠️ **The rig can never hold a modifier.** Key injection (cmd 14) needs `debug_enable`,
 which only the physical `DB_TOGG` key sets. So nothing that needs Shift, Caps Lock or
 AltGr held is observable here; the language sweep draws the resting view only (base
-legend + Shift preview + AltGr hint). The firmware's `tools/check_glyph_coverage.py`
+legend + Shift preview + AltGr hint). The firmware's `dev/tools/check_glyph_coverage.py`
 covers the rest statically.
 
 ## 2. Pick the gate

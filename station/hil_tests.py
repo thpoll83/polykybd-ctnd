@@ -74,7 +74,7 @@ from . import key_attention
 from . import host_tutorial
 from . import usb_midi
 
-# --- Raw HID protocol constants (mirror keyboards/polykybd/hid/hid_com.c
+# --- Raw HID protocol constants (mirror keyboards/polykybd/lib/hid/hid_com.c
 # and PolyKybdHost's polyhost/device/command_ids.py) ---
 # A command report is: data[0] = 'P' (channel marker), data[1] = command id,
 # data[2..] = payload. Responses echo "P<id><status>...", where status is
@@ -171,7 +171,7 @@ def describe_fontpack_commit(reply) -> str:
     return f"unknown status byte {status:#04x}"
 FONTPACK_CHUNK_SIZE         = 56    # payload bytes/chunk (matches firmware FW_UP_CHUNK_SIZE)
 # Doom easter egg pseudo bundles (same BEGIN/CHUNK/COMMIT transport, routed to the
-# game-data / engine-pack resource slots). Lockstep with qmk drivers/fw_staging.h
+# game-data / engine-pack resource slots). Lockstep with qmk lib/drivers/fw_staging.h
 # FONTPACK_BUNDLE_DOOMWAD/_DOOMPACK and PolyKybdHost hid_fontpack.py.
 DOOMWAD_BUNDLE_ID           = 0x7F
 DOOMPACK_BUNDLE_ID          = 0x7E
@@ -284,7 +284,7 @@ IDLE_STYLE_EDEN      = 3     # enum poly_idle_style (state.h): pulse/jitter/iddq
 # Firmware version that introduced the Eden animation + IDLE_STYLE_EDEN, for the
 # min_fw gate (the feature bumps no PROTOCOL_VERSION, so GET_ID's P<n> can't gate it).
 EDEN_MIN_FW          = "0.11.0"
-# One-shot intro length (anim/startup_anim.c SA_TOTAL_MS = 5000+5000+3200+1000).
+# One-shot intro length (features/anim/startup_anim.c SA_TOTAL_MS = 5000+5000+3200+1000).
 ANIM_TOTAL_S         = 14.2
 OVERLAY_MAP_IDX_BITS = 10    # cmd 21's fixed value width
 HID_DATA_MAX         = 62    # payload bytes in a cmd-21 mapping report
@@ -317,7 +317,7 @@ LINK_SUMMARY_TIMEOUT_S = 30.0
 # The firmware's GET_ID reply (cmd 6) names the board, firmware version and
 # protocol version, e.g. the text after the "P\x06." header reads
 #   "Split72 0.8.21 P2 HW1 "
-# (see keyboards/polykybd/hid/hid_com.c: name = "P\x06.Split72 " FW_VERSION
+# (see keyboards/polykybd/lib/hid/hid_com.c: name = "P\x06.Split72 " FW_VERSION
 #  " P" STR(PROTOCOL_VERSION) " HW" STR(DEVICE_VER) " "). That advertised version
 # is the "has the update landed yet?" signal the per-test gate keys read.
 _CAPS_RE = re.compile(r"Split72\s+(?P<fw>\S+)\s+P(?P<proto>\d+)")
@@ -2581,7 +2581,7 @@ def test_language_sweep(raw: RawHID, log: Callable[[str], None]) -> bool:
     four LUT columns per layout. Caps only
     shows with Caps Lock on, and the rig cannot hold a modifier: key injection
     (cmd 14) needs debug mode, which only the physical DB_TOGG key sets. The
-    firmware's tools/check_glyph_coverage.py checks all four columns of all
+    firmware's dev/tools/check_glyph_coverage.py checks all four columns of all
     layouts against the fonts on every PR; this test is the hardware half.
 
     EXTENDED tier: about 160 switches at roughly half a second each, and each
@@ -3841,7 +3841,7 @@ def test_split_link_health(raw: RawHID, log: Callable[[str], None]) -> bool:
 #
 # The firmware records a HardFault / unhandled exception / watchdog timeout into
 # NOLOAD RAM, reboots, and announces it ONCE per boot on the console as
-# ``crash: side=<master|slave> kind=… pc=… … fw=…`` (drivers/crash_record.c). Until
+# ``crash: side=<master|slave> kind=… pc=… … fw=…`` (lib/drivers/crash_record.c). Until
 # now a crash on the rig looked like a boot-burst flake or a dead HID reply; the
 # console line is the firmware's own confession, and a run that shows it must
 # not go green whatever the other tests say.
@@ -3851,7 +3851,7 @@ CRASH_HID_FLAG_PRESENT = 1 << 0
 CRASH_HID_FLAG_FRESH   = 1 << 1
 CRASH_HID_BODY_LEN     = 49    # [flags][48-byte poly_crash_record_t]
 
-# The 48-byte record, as qmk drivers/crash_record.h lays it out (packed, little-endian):
+# The 48-byte record, as qmk lib/drivers/crash_record.h lays it out (packed, little-endian):
 # magic, kind, core, consecutive, reset_reason, pc, lr, sp, xpsr, icsr, uptime_ms,
 # phase, phase_arg, fw[8], crc.
 _CRASH_REC_FMT   = "<IBBBBIIIIIIHH8sI"
@@ -4525,7 +4525,7 @@ def test_layer_names(raw: RawHID, log: Callable[[str], None]) -> bool:
     """GET_LAYER_NAMES (cmd 35, protocol v14+): the layers the host may remap, named.
 
     The host layout editor labels its layer tabs from this. It used to label them
-    from a file generated out of the firmware's layers.h at build time, which went
+    from a file generated out of the firmware's keys_com/layers.h at build time, which went
     stale silently and described an enum the firmware no longer had — so the point
     of the command is that a name the keyboard states itself cannot drift.
 
