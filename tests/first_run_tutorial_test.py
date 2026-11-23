@@ -54,10 +54,12 @@ class FakeBoard:
     is shown to catch it."""
 
     def __init__(self, tap, clock, debug=True, accept_letters=True, accept_shift=True,
-                 log_phases=True, skip_works=True):
+                 log_phases=True, skip_works=True, preview_items=2, tour=True):
         self.tap, self.clock = tap, clock
         self.debug, self.accept_letters = debug, accept_letters
         self.accept_shift, self.log_phases, self.skip_works = accept_shift, log_phases, skip_works
+        self.preview_items, self.tour = preview_items, tour
+        self.lang = "deDE"
         self.layer = "L0"
         self.settings_more = False
         self.phase = None
@@ -75,7 +77,9 @@ class FakeBoard:
 
     # cmd 14
     def send(self, data, timeout_ms=3000, attempts=3):
-        assert attempts == 1, "cmd 14 must not be retried"
+        assert attempts == 1 or data[1] != frt.CMD_KEYPRESS, "cmd 14 must not be retried"
+        if data[1] == frt.CMD_GET_LANG:
+            return bytes([ord("P"), 7, ord(".")]) + self.lang.encode() + bytes(59 - len(self.lang))
         assert data[0] == frt.POLY_CHANNEL and data[1] == frt.CMD_KEYPRESS
         kc = data[2] << 8 | data[3]
         pressed = data[4] == 0
@@ -129,9 +133,12 @@ class FakeBoard:
         elif self.phase == "SHIFT_WAIT" and kc == frt.KC_LSFT and self.accept_shift:
             self._phase("SHIFT_SWEEP", "SHIFT_HELD", "SHIFT_AGAIN")
         elif self.phase == "SHIFT_AGAIN" and kc == frt.KC_RSFT and self.accept_shift:
-            self._phase("SHIFT_SWEEP", "SHIFT_HELD", "LAYER_WAIT")
-        elif self.phase == "LAYER_WAIT" and kc == frt.MO_FL:
-            self._phase("LAYER_SWEEP", "LAYER_HELD", "NOTATION")
+            # tutorial_plan.c: the layer chapter is postponed, so the second Shift
+            # leads to the board reveal and the language preview, run on timers.
+            self._phase("SHIFT_SWEEP", "SHIFT_HELD", "BOARD_REVEAL", "BOARD_SHOW", "LANG_INTRO")
+            for _ in range(self.preview_items):
+                self._phase("LANG_DARK", "LANG_NAME", "LANG_WIPE", "LANG_SHOW")
+            self._phase("LANG_MORE", "LANG_MORE2", "TOUR_WAIT" if self.tour else "FINALE")
         if kc == frt.KC_ESC:
             self.esc_down_at = self.clock[0]
 
@@ -227,6 +234,22 @@ class RunTest(unittest.TestCase):
         run, _, logs = make(skip_works=False)
         self.assertFalse(run.run())
         self.assertTrue(any("did not end the lesson" in line for line in logs))
+
+    def test_a_board_without_a_tour_ends_at_the_finale(self):
+        run, board, logs = make(tour=False)
+        self.assertTrue(run.run(), "\n".join(logs))
+        self.assertEqual(board.phase, "DONE")
+
+    def test_a_preview_with_no_items_fails(self):
+        run, _, logs = make(preview_items=0)
+        self.assertFalse(run.run())
+        self.assertTrue(any("LANG_SHOW" in line for line in logs))
+
+    def test_read_lang(self):
+        run, board, _ = make()
+        self.assertEqual(run.read_lang(), "deDE")
+        board.lang = "jaJP"
+        self.assertEqual(run.read_lang(), "jaJP")
 
     def test_esc_is_held_past_the_skip_time(self):
         self.assertGreater(frt.SKIP_HOLD_S * 1000, SKIP_HOLD_MS)
