@@ -1960,8 +1960,9 @@ def test_first_run_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
             run.release_all()
         else:
             run.abandon()
-    resp = _send_with_retry(raw, bytes([POLY_CHANNEL, CMD_GET_ID]), CMD_GET_ID, log)
-    if not _resp_ok(resp, CMD_GET_ID, log):
+    # A liveness check, like the other tests' _master_alive(): it reads no fresh-boot
+    # marker, so it keeps the retry for the master's busy window.
+    if not _master_alive(raw, log):
         log("  FAIL: master stopped answering GET_ID after the tutorial")
         return False
     return ok
