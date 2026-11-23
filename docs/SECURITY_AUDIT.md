@@ -355,6 +355,7 @@ firmware debug flag?"). The answer has two halves and they are *different* flags
 |---|---|---|---|
 | Host — command file / `commands.execute` RPC | `allow_key_injection`, set from the host's `--debug` | off | restart the host in debug mode |
 | Firmware — HID **cmd 14** itself | `debug_enable` | off | **`DB_TOGG` key — physical access** |
+| Firmware — a `-e POLYKYBD_DEBUG=yes` build | `debug_enable` | **on at boot** | test images only: the qmk-test.yml `tutorial-test` job builds them for the rig; no release workflow passes the option |
 
 `PolyCore.execute_commands` runs `strip_key_injection()` (`poly_core.py`), dropping
 `press`/`release` unless the host process was started in debug mode — so a command file,

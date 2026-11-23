@@ -148,7 +148,8 @@ class TestRunner:
                        bin_path: str = None, extended: bool = False,
                        reflash_slave: bool = False,
                        doom: bool = False,
-                       apply_bin: str = None) -> dict:
+                       apply_bin: str = None,
+                       tutorial: bool = False) -> dict:
         """Flash both halves and run ``tests`` against the master.
 
         ``extended`` opts the run into the slow tier — the animation/idle checks,
@@ -183,6 +184,9 @@ class TestRunner:
                 self.log(f"[runner] HID console unavailable (continuing without it): {exc}")
 
             self.status = "testing"
+            if tutorial:
+                self.log("[runner] configuration: TUTORIAL (debug images; only the "
+                         "first-run tutorial tests and the crash scan)")
             self.log("[runner] suite tier: "
                      + ("EXTENDED (slow checks included: animation, idle, link "
                         "soak, USB suspend, reboot power cycle)" if extended else
@@ -231,6 +235,7 @@ class TestRunner:
                         caps["console"] = console_started
                         caps["extended"] = extended
                         caps["doom"] = doom
+                        caps["tutorial"] = tutorial
                         reason = skip_reason(test, caps)
                     except Exception as exc:
                         results.append({"name": name, "status": "fail",
@@ -1752,6 +1757,13 @@ def build_parser():
                              "load/refuse). Needs --plyx-valid, a signed .plyx built "
                              "against these HIL images' signing key. Also settable "
                              "with DOOM_HIL=1.")
+    parser.add_argument("--tutorial", action="store_true",
+                        default=os.environ.get("TUTORIAL_HIL", "").lower()
+                        in ("1", "true", "yes"),
+                        help="the first-run tutorial configuration: run ONLY the "
+                             "TIER_TUTORIAL tests and the closing crash scan. Needs "
+                             "POLYKYBD_DEBUG images (debug_enable on at boot, so cmd 14 "
+                             "can press keys). Also settable with TUTORIAL_HIL=1.")
     parser.add_argument("--plyx-valid", dest="plyx_valid", default=None,
                         help="a signed DOOM engine pack (.plyx) for the --doom tests; "
                              "the rig derives the tampered/unsigned variants from it.")
@@ -1775,7 +1787,7 @@ def build_parser():
 
 if __name__ == "__main__":
     import argparse
-    from .hil_tests import TESTS, set_doom_pack
+    from .hil_tests import TESTS, set_doom_pack, tutorial_suite
     parser = build_parser()
     args = parser.parse_args()
     if args.doom and not args.plyx_valid:
@@ -1787,7 +1799,7 @@ if __name__ == "__main__":
     # A probe REPLACES the graded suite unless asked otherwise (see --probe-with-suite).
     # Resolve and import it BEFORE flashing: a typo'd probe name should cost a
     # message, not a full flash-and-enumerate cycle on the rig.
-    suite = TESTS
+    suite = tutorial_suite(TESTS) if args.tutorial else TESTS
     if args.probe:
         from .probe import ProbeError, load_probe, resolve_probe
         try:
@@ -1804,7 +1816,8 @@ if __name__ == "__main__":
                                        extended=args.extended,
                                        reflash_slave=args.reflash_slave,
                                        doom=args.doom,
-                                       apply_bin=args.apply_bin)
+                                       apply_bin=args.apply_bin,
+                                       tutorial=args.tutorial)
     except Exception as exc:
         # A fatal flash/enumerate error still gets a summary line so the run page
         # shows *why* there are no per-test results, not just a red X.

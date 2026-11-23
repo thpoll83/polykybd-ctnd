@@ -72,6 +72,7 @@ from . import combos
 from . import agent_keys
 from . import key_attention
 from . import host_tutorial
+from . import first_run_tutorial
 from . import usb_midi
 
 # --- Raw HID protocol constants (mirror keyboards/polykybd/lib/hid/hid_com.c
@@ -226,6 +227,10 @@ TIER_EXTENDED = "extended"
 # HID and drive the idle screensaver (slow, like EXTENDED), AND they need a signed
 # pack artifact CI builds only on demand (see --plyx-valid / the `hil-doom` label).
 TIER_DOOM     = "doom"
+# A FOURTH opt-in tier: the first-run tutorial, answered over cmd 14. It needs a
+# POLYKYBD_DEBUG image (debug_enable on at boot), which only the `tutorial-test` CI job
+# builds, so it is its own rig configuration: --tutorial runs ONLY these tests.
+TIER_TUTORIAL = "tutorial"
 FRESH_BOOT = ord("*")    # GET_ID status byte when the firmware just (re)booted
 
 # Firmware facts (keyboards/polykybd/{config.h,base/com.h}).
@@ -383,6 +388,9 @@ def skip_reason(test: dict, caps: dict):
     # also needs a signed .plyx artifact that only the `doom` CI path produces.
     if test.get("tier") == TIER_DOOM and not caps.get("doom"):
         return "doom suite — re-run with --doom + a signed --plyx-valid (or the hil-doom label)"
+    # The tutorial tier is fail-closed on its own opt-in: it needs the debug images.
+    if test.get("tier") == TIER_TUTORIAL and not caps.get("tutorial"):
+        return "tutorial suite — re-run with --tutorial on POLYKYBD_DEBUG images (or the hil-tutorial label)"
     # Rig-side gate: a callable answering "why can this test not run HERE", or
     # None. For checks that need something a push cannot provision (a device
     # node, a group, a sudoers grant): SKIP while it is absent, never FAIL
@@ -1930,6 +1938,34 @@ def _host_tut_poll(raw, log):
     poll = host_tutorial.parse_poll(raw.send(host_tutorial.poll_request()))
     log(f"  POLL -> {poll}")
     return poll
+
+
+def test_first_run_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """FIRST-RUN TUTORIAL (TIER_TUTORIAL, POLYKYBD_DEBUG images): start it with
+    Fn + TO(_SL), KC_SETTINGS_MORE and KC_EDEN, answer chapter 1 with the three letters
+    the console names, chapter 2 with left and then right Shift, chapter 3 with a held
+    Fn, then hold Esc to skip. Every step is followed through the firmware's
+    `Tutorial phase <NAME>` lines, so a press the tutorial did not accept fails at the
+    step that did not come. Ends with GET_ID: the master still answers after the
+    lesson hands the displays back.
+
+    What it does NOT cover: the language/script preview and the key tour (the skip
+    comes at the notation screen), and anything a camera would see."""
+    run = first_run_tutorial.TutorialRun(raw, TAP, log)
+    ok = False
+    try:
+        ok = run.run()
+    finally:
+        if ok:
+            run.release_all()
+        else:
+            run.abandon()
+    # A liveness check, like the other tests' _master_alive(): it reads no fresh-boot
+    # marker, so it keeps the retry for the master's busy window.
+    if not _master_alive(raw, log):
+        log("  FAIL: master stopped answering GET_ID after the tutorial")
+        return False
+    return ok
 
 
 def test_host_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
@@ -4949,9 +4985,22 @@ TESTS = [
      "needs_console": True, "tier": TIER_DOOM},
     {"name": "handedness resolution is self-consistent (boot banner)",
      "fn": test_handedness_banner, "needs_console": True, "min_fw": "0.27.4"},
+    # The first-run tutorial runs only in its own rig configuration (--tutorial on
+    # POLYKYBD_DEBUG images), so it sits with the other opt-in tiers, before the scan.
+    {"name": "first-run tutorial answered over cmd 14, skipped with Esc (debug build)",
+     "fn": test_first_run_tutorial, "needs_console": True, "tier": TIER_TUTORIAL},
     # LAST, whatever tiers ran: the console scan over this run's whole window, so
     # a crash inside any test above — the flash tests and the doom set included —
     # or on the slave lands here rather than reading as a flake.
     {"name": "no firmware crash during the run (console crash: line)",
      "fn": test_no_crash_record, "needs_console": True},
 ]
+
+
+def tutorial_suite(tests: list) -> list:
+    """The --tutorial configuration: the TIER_TUTORIAL tests and the closing crash scan.
+
+    The default suite already ran on the normal images in the hil-test job, so the
+    debug images do not repeat it."""
+    return [t for t in tests
+            if t.get("tier") == TIER_TUTORIAL or t["fn"] is test_no_crash_record]
