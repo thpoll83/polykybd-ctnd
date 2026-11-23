@@ -26,7 +26,7 @@ When you implement one of these, move it out of this file, add it to `hil_tests.
   `test_language_round_trip` for the `try/finally` pattern).
 - Log generously via the `log` callback — the rig has no other console.
 - Reference the firmware command IDs in
-  [`keyboards/polykybd/hid/hid_com.c`](https://github.com/thpoll83/qmk_firmware/blob/PolyKybd/keyboards/polykybd/hid/hid_com.c)
+  [`keyboards/polykybd/lib/hid/hid_com.c`](https://github.com/thpoll83/qmk_firmware/blob/PolyKybd/keyboards/polykybd/lib/hid/hid_com.c)
   (`raw_hid_receive()` dispatcher); responses are `"P<id><status>…"` where status is
   `.` (ACK), `!` (NACK), or `*` (GET_ID fresh-boot marker). The command IDs also have
   names in PolyKybdHost's `polyhost/device/command_ids.py` (the shared protocol).
@@ -70,7 +70,7 @@ unattended rig now has a test. Covered:
   and after. Added after hy-AM's U+2014 legend (in no font) HardFaulted the master in demo mode,
   2026-10-01. It draws base, Shift preview and AltGr hint; the Caps column and the held-Shift and
   held-AltGr views need a modifier held, which waits on GPIO key-matrix injection below. The
-  firmware's `tools/check_glyph_coverage.py` checks all four columns against the fonts on every PR.
+  firmware's `dev/tools/check_glyph_coverage.py` checks all four columns against the fonts on every PR.
 - [x] **plain overlay keeps master alive** (cmd 10) — full uncompressed overlay upload (6
   segments) does not wedge the master; GET_ID still answers. Exercises the uncompressed
   upload + `USER_SYNC_OVERLAY_DATA` split-sync.
@@ -252,7 +252,7 @@ The manual loop that session ran, six times over, was always the same five steps
 1. build a probe image with extra console markers,
 2. BOOTSEL both halves with the probe `.uf2` so the board *runs* the instrumented code,
 3. HID-flash the matching `.bin` to exercise the apply path,
-4. capture the console with `tools/poly_console.py` and read how far the markers got,
+4. capture the console with `dev/tools/poly_console.py` and read how far the markers got,
 5. interpret, form the next single-variable hypothesis, repeat.
 
 ⚠️ **The rig already owns every piece of that except the orchestration.** `FlashController`
