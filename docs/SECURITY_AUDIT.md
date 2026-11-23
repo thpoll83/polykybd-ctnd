@@ -13,8 +13,8 @@ them. That scan also reached a **fifth** repo the ID scheme did not cover
 finding was in an accidentally-committed build directory rather than in our code.
 
 **2026-11-23**: SCAN-6, an Aikido scan of PolyKybdHost: two `yaml.load` findings (false
-positives, both loaders were already safe) and Pillow 12.x CVEs (floor raised to 13.0.0 on
-Python 3.11+, host#1016). **2026-11-17**: SCAN-5, a Dependabot alert on `minimatch` in the VS Code extension's
+positives, both loaders were already safe). HOST-8 from the same scan: Pillow 12.x CVEs
+(floor raised to 13.0.0 on Python 3.11+, Python 3.10 accepted, host#1016). **2026-11-17**: SCAN-5, a Dependabot alert on `minimatch` in the VS Code extension's
 packaging tool: dev-only and not shipped, fixed with an npm override. **2026-11-16**: HOST-7 raised by CodeQL on host#916 and fixed in the same PR before
 merge (exponential regex in the TF2/Apex bind-file reader). **2026-10-25**: HOST-3 extended with the daily archive's read token (no change needed;
 recorded). **2026-08-06**: HOST-3 added alongside
@@ -73,7 +73,8 @@ signing the firmware image alone was not enough.**
 | SCAN-4 | 2026-11-14 Sourcery (trivy): 10 "unknown license" findings on `@vscode/vsce-sign` and its platform packages in the VS Code extension's `package-lock.json` (host#839) — dev-only packaging tool, not in the `.vsix` | host | 🟡 accepted by the maintainer 2026-11-14 |
 | SCAN-5 | 2026-11-17 Dependabot: CVE-2026-118764 (GHSA-g3hv-75wg-m249), `minimatch` 10.2.6 under `@vscode/vsce` > `glob` in the VS Code extension's `package-lock.json` — dev-only packaging tool, not in the `.vsix` | host | ✅ checked, not vulnerable; dependency updated in host#970 |
 | HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
-| SCAN-6 | 2026-11-23 Aikido on PolyKybdHost: (a) two `yaml.load` calls flagged as unsafe (B506), already `CSafeLoader`/`SafeLoader`; (b) Pillow 12.x CVEs (58 listed) | host | ✅ (a) checked, not vulnerable, changed to `yaml.safe_load` anyway; (b) fixed on Python 3.11+ (Pillow 13.0.0); 🟡 Python 3.10 stays on 12.x, logged at startup. Host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) |
+| SCAN-6 | 2026-11-23 Aikido on PolyKybdHost: two `yaml.load` calls flagged as unsafe (B506), already `CSafeLoader`/`SafeLoader` on our own specs | host | ✅ checked, not vulnerable; changed to `yaml.safe_load` anyway, host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) |
+| HOST-8 | 2026-11-23 Aikido on PolyKybdHost: Pillow 12.x CVEs (58 listed). Floor is 13.0.0 on Python 3.11+; Python 3.10 cannot install Pillow 13 | host | 🟡 3.11+ fixed; 3.10 stays on 12.x, accepted and logged at startup. 🔲 `zerofish` pin (12.2.0) not touched |
 
 ---
 
@@ -203,6 +204,39 @@ answer (see the `polyctl fw version` note in `PolyKybdHost/CLAUDE.md` — return
 value instead was the actual bug). Worth revisiting only if the daemon ever needs to serve
 something time-critical during a flash.
 
+
+### HOST-8 — Python 3.10 installs stay on Pillow 12.x (accepted, 2026-11-23)
+
+Aikido listed 58 Pillow vulnerabilities on PolyKybdHost and named Pillow 13.0.0 as the fix
+for all of them. I did not check the 58 one by one. The reachable path is the one HOST-4
+found: `im_converter.open()` calls `Image.open(filename)` on a user-chosen overlay image.
+Host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) raised the
+floor to 13.0.0.
+
+- ⚠️ Pillow 13 needs Python 3.11 or newer, and the host still supports 3.10 (README,
+  `scripts/install.sh`, `polyhost/__main__.py`). `requirements.txt` and
+  `tools/requirements.txt` use environment markers: `Pillow>=13.0.0` on 3.11 and newer,
+  `Pillow>=12.3.0` on 3.10. **A Python 3.10 install stays on 12.x and keeps the exposure
+  to whatever 13.0.0 fixes beyond 12.3.0.** `main_app.main()` logs one WARNING at startup
+  on 3.10 (log bundles show it).
+- **Accepted:** the maintainer kept Python 3.10 supported and asked for the warning.
+  Dropping 3.10 would close this and changes the README, `install.sh` and the startup
+  check. Revisit when 3.10 reaches end of life (October 2026 upstream; it has already
+  passed).
+- Also fixed in #1016: `polyhost/_bootstrap.py` `missing_requirements` only checked that
+  a package was installed, so a manual source update never ran pip for a raised floor.
+  It now compares the installed version with the specifier (`packaging`, with a
+  standard-library fallback for `>=` and `==` on the first run). Before this, any floor
+  bump had the same gap.
+- 🔲 **Open, outside this project's repositories:** `zerofish` pins Pillow 12.2.0 in
+  `requirements.txt` (Aikido lists CVE-2026-112900 and CVE-2026-112398 there). It was not
+  attached to the session and was not touched. It needs the same bump to 13.0.0.
+
+Review state of #1016: Sourcery, CodeRabbit (after its first review) and Revix were out
+of budget, and J-Bot's `review` check failed because its Gemini credits were depleted.
+CodeRabbit reviewed only the first commit (`965f492`) and found the 3.10 and bootstrap
+gaps. The fix commits `76b6a59` (markers) and `967eb61` (bootstrap check, 3.10 warning)
+were merged without a bot review.
 
 ### HOST-3 — usage telemetry is a new outbound surface, and it is on by default
 
@@ -789,13 +823,14 @@ npm ls minimatch glob                            # glob 14.0.6 > minimatch 11.0.
 ./build.sh                                       # both .vsix files under dist/
 ```
 
-### SCAN-6 — Aikido on PolyKybdHost: `yaml.load` and Pillow (2026-11-23)
+### SCAN-6 — Aikido on PolyKybdHost: two `yaml.load` calls (2026-11-23)
 
-Aikido reported two Critical `yaml.load` findings (Bandit B506) and a Pillow group of 58
-vulnerabilities, with a suggested fix of Pillow 13.0.0. Host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016)
-(squash-merged as `0bdb99e`) handled both.
+Aikido reported two Critical `yaml.load` findings (Bandit B506) on PolyKybdHost, in the
+same scan as the Pillow group tracked in HOST-8. Host
+[#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (squash-merged as `0bdb99e`)
+handled both.
 
-**The two `yaml.load` calls were not vulnerable.**
+**Not vulnerable.**
 
 - `.claude/skills/generate-app-overlays/regen_all.py:33` and
   `scripts/build_icon_library.py:73` passed `Loader=CSafeLoader` (or `SafeLoader` where
@@ -812,31 +847,6 @@ cd PolyKybdHost
 .venv/bin/python -c "import yaml; print(yaml.__with_libyaml__)"        # True: CSafeLoader was used
 grep -rn "yaml.load(" --include=*.py . | grep -v "^./.venv"            # no match after #1016
 ```
-
-**Pillow.** The host already required `Pillow>=12.3.0` (HOST-4). #1016 raised the floor to
-13.0.0, which Aikido names as the fix for all 58. I did not check the 58 CVEs one by one.
-The reachable path is the one HOST-4 found: `im_converter.open()` calls
-`Image.open(filename)` on a user-chosen overlay image.
-
-- ⚠️ Pillow 13 needs Python 3.11 or newer, and the host still supports 3.10 (README,
-  `scripts/install.sh`, `polyhost/__main__.py`). `requirements.txt` and
-  `tools/requirements.txt` use environment markers: `Pillow>=13.0.0` on 3.11 and newer,
-  `Pillow>=12.3.0` on 3.10. **A Python 3.10 install stays on 12.x and keeps the CVE
-  exposure.** `main_app.main()` logs one WARNING at startup on 3.10. Dropping 3.10 would
-  close this; that is the maintainer's decision and is not made.
-- ⚠️ `polyhost/_bootstrap.py` `missing_requirements` only checked that a package was
-  installed, so a manual source update never ran pip for a raised floor. It now compares
-  the installed version with the specifier (`packaging`, with a standard-library
-  fallback for `>=` and `==` on the first run). Before this, any floor bump had the same gap.
-- Not changed: the `zerofish` repository also pins Pillow 12.2.0 in `requirements.txt`
-  (Aikido lists CVE-2026-112900 and CVE-2026-112398 there). It was not attached
-  to the session and was not touched. It needs the same bump.
-
-Review state of #1016: Sourcery, CodeRabbit (after its first review) and Revix were out
-of budget, and J-Bot's `review` check failed because its Gemini credits were depleted.
-CodeRabbit reviewed only the first commit (`965f492`) and found the 3.10 and bootstrap
-gaps. The fix commits `76b6a59` (markers) and `967eb61` (bootstrap check, 3.10 warning)
-were merged without a bot review.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
