@@ -829,13 +829,14 @@ The reachable path is the one HOST-4 found: `im_converter.open()` calls
   the installed version with the specifier (`packaging`, with a standard-library
   fallback for `>=` and `==` on the first run). Before this, any floor bump had the same gap.
 - Not changed: the `zerofish` repository also pins Pillow 12.2.0 in `requirements.txt`
-  (Aikido lists CVE-2026-112900 and CVE-2026-112398 there). It is not part of this
-  project's tracked repositories and was not touched. It needs the same bump.
+  (Aikido lists CVE-2026-112900 and CVE-2026-112398 there). It was not attached
+  to the session and was not touched. It needs the same bump.
 
 Review state of #1016: Sourcery, CodeRabbit (after its first review) and Revix were out
 of budget, and J-Bot's `review` check failed because its Gemini credits were depleted.
-Only the first two commits were reviewed (CodeRabbit found the 3.10 and bootstrap gaps);
-the bootstrap and 3.10-warning commit `967eb61` was merged without a bot review.
+CodeRabbit reviewed only the first commit (`965f492`) and found the 3.10 and bootstrap
+gaps. The fix commits `76b6a59` (markers) and `967eb61` (bootstrap check, 3.10 warning)
+were merged without a bot review.
 
 ### If a scan lands again, the disposition goes here — even when nothing changes
 
