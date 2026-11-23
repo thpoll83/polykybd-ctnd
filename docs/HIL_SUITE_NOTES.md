@@ -128,12 +128,15 @@ and relative links were adjusted to suit a standalone file.
     `debug_enable` is off. `--tutorial` runs this test and the closing crash scan, not
     the default suite. The test presses `MO(_FL)` and `TO(_SL)`, taps
     `KC_SETTINGS_MORE` (0x7FA3), and presses `KC_EDEN` (0x7FA0). It then answers
-    chapter 1 with the three letters the console names, chapter 2 with left and then
-    right Shift, and chapter 3 with a held Fn, and holds Esc for 1.6 s to skip at the
-    notation screen. It follows each step through the firmware's
+    chapter 1 with the three letters the console names and chapter 2 with left and
+    then right Shift. Then it lets the board reveal and the language preview run on
+    their timers (at least one `LANG_SHOW`) until `TOUR_WAIT` or `FINALE`, and holds
+    Esc for 1.6 s to skip. The layer chapter is postponed in the firmware
+    (`tutorial_plan.c`), so nothing waits for Fn. GET_LANG must report the same
+    language before and after the lesson: the preview writes other languages onto the
+    board, and `poly_reported_lang()` and the skip must hide and undo that. It follows each step through the firmware's
     `Tutorial phase <NAME>` lines and fails at the step that did not come. It ends with
-    `Tutorial skipped; displays handed back` and a GET_ID. The language preview and
-    the key tour are not covered. Every press uses `attempts=1`. cmd 14 releases a key
+    `Tutorial skipped; displays handed back` and a GET_ID. The key tour is not covered. Every press uses `attempts=1`. cmd 14 releases a key
     at the position its press used (the press of `TO(_SL)` changes the layer), so the
     test does not need the layer to match at release time. Keys that reach the rig
     host: the two Shifts and the Esc release; the tutorial swallows the letters.

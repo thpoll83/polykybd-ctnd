@@ -22,11 +22,19 @@ Mirrors qmk_firmware keyboards/polykybd:
              KC_EDEN and KC_SETTINGS_MORE are pinned in keys_com/keycode_helper.h.
   skip       holding Esc (slot 0,0) for TUT_SKIP_HOLD_MS (1000 ms) skips the lesson
              from any step.
+  flow       base/tutorial_plan.c: after the second Shift the tutorial goes to the board
+             reveal and the language preview (BOARD_REVEAL ... LANG_MORE2), then the
+             key tour (TOUR_WAIT) or FINALE. The layer chapter (LAYER_WAIT ...
+             NOTATION) is postponed: tut_tick() no longer routes to it.
+  language   while the preview shows another language, GET_LANG (cmd 7) still reports
+             the user's own (poly_reported_lang(), keys_com/tutorial_board.c), and the
+             skip writes it back.
 """
 import re
 import time
 
 CMD_KEYPRESS = 14
+CMD_GET_LANG = 7
 POLY_CHANNEL = ord("P")
 ACK = ord(".")
 
@@ -49,9 +57,12 @@ SKIP_HOLD_S = 1.6                # > TUT_SKIP_HOLD_MS (1.0 s)
 START_TIMEOUT_S = 45.0           # Eden (~14 s) runs before the tutorial starts
 STEP_TIMEOUT_S = 20.0            # the longest timed run between two waits is ~9 s
 END_TIMEOUT_S = 10.0
+# The board reveal, up to 11 preview items at ~9.25 s each and the two "more" screens.
+PREVIEW_TIMEOUT_S = 150.0
 
 START_LINE = "Tutorial start"
 SKIPPED_LINE = "Tutorial skipped; displays handed back"
+_AFTER_PREVIEW_RE = re.compile(r"Tutorial phase (TOUR_WAIT|FINALE)$")
 _LETTER_RE = re.compile(r"Tutorial slot(\d+): (LEFT|RIGHT) idx=\d+ letter=([A-Za-z])\(")
 
 
@@ -161,6 +172,13 @@ class TutorialRun:
             self.log(f"  cleanup: the skip raised {exc}")
         self.log("  cleanup: could not skip the lesson; the board may still be in it")
 
+    def read_lang(self):
+        """GET_LANG's code ("enUS"), or None. Read-only, so send() may retry."""
+        resp = self.raw.send(bytes([POLY_CHANNEL, CMD_GET_LANG]))
+        if resp is None or len(resp) < 3 or resp[1] != CMD_GET_LANG or resp[2] != ACK:
+            return None
+        return bytes(resp[3:]).split(b"\x00", 1)[0].decode("ascii", "replace")
+
     # -- console --
     def wait_phase(self, name: str, mark: int, timeout: float = STEP_TIMEOUT_S) -> bool:
         line = self.tap.wait_for(phase_pattern(name), mark, timeout=timeout)
@@ -228,16 +246,21 @@ class TutorialRun:
                 self.log(f"  (0x{key:04X} was held but the board did not sweep)")
                 return False
             self._mark_before_wait = mark
-        # Chapter 3: hold Fn, then the notation screen.
-        if not self.wait_phase("LAYER_WAIT", self._mark_before_wait):
+        # Chapter 3: the board reveal and the language preview run on timers. The
+        # layer chapter is postponed in the firmware, so no key is asked for here.
+        if not self.wait_phase("BOARD_REVEAL", self._mark_before_wait):
             return False
-        mark = self.tap.mark()
-        if not self.tap_key(MO_FL, HOLD_S):
+        mark = self._mark_before_wait
+        line = self.tap.wait_for(_AFTER_PREVIEW_RE, mark, timeout=PREVIEW_TIMEOUT_S)
+        if line is None:
+            self.log(f"  FAIL: the preview did not reach TOUR_WAIT or FINALE within "
+                     f"{PREVIEW_TIMEOUT_S:.0f} s")
             return False
-        if not self.wait_phase("LAYER_SWEEP", mark):
+        shown = sum(1 for ln in self.tap.since(mark) if phase_pattern("LANG_SHOW").search(ln))
+        if shown == 0:
+            self.log("  FAIL: the preview ran without a single LANG_SHOW step")
             return False
-        if not self.wait_phase("NOTATION", mark):
-            return False
+        self.log(f"  preview: {shown} item(s) shown, then {line.split()[-1]}")
         # Skip: hold Esc past TUT_SKIP_HOLD_MS.
         mark = self.tap.mark()
         if not self.tap_key(KC_ESC, SKIP_HOLD_S):
@@ -247,8 +270,8 @@ class TutorialRun:
                      f"(no '{SKIPPED_LINE}' line)")
             return False
         self.ended = True
-        self.log("  chapters 1-3 answered over cmd 14, skipped with a held Esc, "
-                 "displays handed back")
+        self.log("  chapters 1-2 answered over cmd 14, the preview ran, skipped with a "
+                 "held Esc, displays handed back")
         return True
 
 

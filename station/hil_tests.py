@@ -1943,15 +1943,19 @@ def _host_tut_poll(raw, log):
 def test_first_run_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
     """FIRST-RUN TUTORIAL (TIER_TUTORIAL, POLYKYBD_DEBUG images): start it with
     Fn + TO(_SL), KC_SETTINGS_MORE and KC_EDEN, answer chapter 1 with the three letters
-    the console names, chapter 2 with left and then right Shift, chapter 3 with a held
-    Fn, then hold Esc to skip. Every step is followed through the firmware's
-    `Tutorial phase <NAME>` lines, so a press the tutorial did not accept fails at the
-    step that did not come. Ends with GET_ID: the master still answers after the
-    lesson hands the displays back.
+    the console names and chapter 2 with left and then right Shift, let the board
+    reveal and the language preview run to the key tour (or the finale), then hold Esc
+    to skip. Every step is followed through the firmware's `Tutorial phase <NAME>`
+    lines, so a press the tutorial did not accept fails at the step that did not come.
 
-    What it does NOT cover: the language/script preview and the key tour (the skip
-    comes at the notation screen), and anything a camera would see."""
+    GET_LANG must report the same language before and after: the preview writes other
+    languages onto the board, and poly_reported_lang() / the skip must hide and undo
+    that. Ends with a GET_ID liveness check.
+
+    What it does NOT cover: the key tour itself, and anything a camera would see."""
     run = first_run_tutorial.TutorialRun(raw, TAP, log)
+    before = run.read_lang()
+    log(f"  language before: {before!r}")
     ok = False
     try:
         ok = run.run()
@@ -1960,6 +1964,15 @@ def test_first_run_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
             run.release_all()
         else:
             run.abandon()
+    after = run.read_lang()
+    log(f"  language after: {after!r}")
+    if before is None or after is None:
+        log("  FAIL: could not read GET_LANG "
+            + ("before" if before is None else "after") + " the lesson")
+        ok = False
+    elif after != before:
+        log(f"  FAIL: GET_LANG changed across the lesson ({before!r} -> {after!r})")
+        ok = False
     # A liveness check, like the other tests' _master_alive(): it reads no fresh-boot
     # marker, so it keeps the retry for the master's busy window.
     if not _master_alive(raw, log):
@@ -4987,7 +5000,7 @@ TESTS = [
      "fn": test_handedness_banner, "needs_console": True, "min_fw": "0.27.4"},
     # The first-run tutorial runs only in its own rig configuration (--tutorial on
     # POLYKYBD_DEBUG images), so it sits with the other opt-in tiers, before the scan.
-    {"name": "first-run tutorial answered over cmd 14, skipped with Esc (debug build)",
+    {"name": "first-run tutorial over cmd 14: letters, Shifts, preview, Esc skip (debug build)",
      "fn": test_first_run_tutorial, "needs_console": True, "tier": TIER_TUTORIAL},
     # LAST, whatever tiers ran: the console scan over this run's whole window, so
     # a crash inside any test above — the flash tests and the doom set included —
