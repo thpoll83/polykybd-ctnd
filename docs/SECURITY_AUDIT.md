@@ -74,7 +74,7 @@ signing the firmware image alone was not enough.**
 | SCAN-5 | 2026-11-17 Dependabot: CVE-2026-118764 (GHSA-g3hv-75wg-m249), `minimatch` 10.2.6 under `@vscode/vsce` > `glob` in the VS Code extension's `package-lock.json` — dev-only packaging tool, not in the `.vsix` | host | ✅ checked, not vulnerable; dependency updated in host#970 |
 | HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
 | SCAN-6 | 2026-11-23 Aikido on PolyKybdHost: two `yaml.load` calls flagged as unsafe (B506), already `CSafeLoader`/`SafeLoader` on our own specs | host | ✅ checked, not vulnerable; changed to `yaml.safe_load` anyway, host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) |
-| HOST-8 | 2026-11-23 Aikido on PolyKybdHost: Pillow 12.x CVEs (58 listed). Floor is 13.0.0 on Python 3.11+; Python 3.10 cannot install Pillow 13 | host | 🟡 3.11+ fixed; 3.10 stays on 12.x, accepted and logged at startup. 🔲 `zerofish` pin (12.2.0) not touched |
+| HOST-8 | 2026-11-23 Aikido on PolyKybdHost: Pillow 12.x CVEs (58 listed). Floor is 13.0.0 on Python 3.11+; Python 3.10 cannot install Pillow 13 | host | 🟡 3.11+ fixed once bootstrap's pip install succeeds (a failed install keeps 12.x until a later launch); 3.10 stays on 12.x, accepted and logged at startup. 🔲 `zerofish` pin (12.2.0) not touched |
 
 ---
 
@@ -219,6 +219,10 @@ floor to 13.0.0.
   `Pillow>=12.3.0` on 3.10. **A Python 3.10 install stays on 12.x and keeps the exposure
   to whatever 13.0.0 fixes beyond 12.3.0.** `main_app.main()` logs one WARNING at startup
   on 3.10 (log bundles show it).
+- The 3.11+ fix holds once bootstrap's `pip install -r requirements.txt` succeeds. If pip
+  fails, `bootstrap_dependencies` returns without recording success, so the app starts on
+  the old Pillow for that launch and the next launch retries. Check the installed version
+  with `python -m pip show pillow`: it must report 13.0.0 or later on Python 3.11+.
 - **Accepted:** the maintainer kept Python 3.10 supported and asked for the warning.
   Dropping 3.10 would close this and changes the README, `install.sh` and the startup
   check. Revisit when 3.10 reaches end of life (October 2026 upstream; it has already
