@@ -1966,7 +1966,11 @@ def test_first_run_tutorial(raw: RawHID, log: Callable[[str], None]) -> bool:
             run.abandon()
     after = run.read_lang()
     log(f"  language after: {after!r}")
-    if before is None or after != before:
+    if before is None or after is None:
+        log("  FAIL: could not read GET_LANG "
+            + ("before" if before is None else "after") + " the lesson")
+        ok = False
+    elif after != before:
         log(f"  FAIL: GET_LANG changed across the lesson ({before!r} -> {after!r})")
         ok = False
     # A liveness check, like the other tests' _master_alive(): it reads no fresh-boot
