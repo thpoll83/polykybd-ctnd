@@ -39,8 +39,11 @@ designing around any line. `Split link:` is deliberately ungated.
 reboot answers `*`, and a retry inside `send()` consumes it and answers `.`. While the
 master re-enumerates, `send()` RAISES `RuntimeError` (interface not found) rather than
 returning `None`, so poll through the exception for a few seconds.
-⚠️ **The rig can never hold a modifier.** Key injection (cmd 14) needs `debug_enable`,
-which only the physical `DB_TOGG` key sets. So nothing that needs Shift, Caps Lock or
+⚠️ **The default suite can never hold a modifier.** Key injection (cmd 14) needs
+`debug_enable`, which only the physical `DB_TOGG` key sets. The one exception is the
+tutorial configuration (`--tutorial`, `TIER_TUTORIAL`): its images are built with
+`-e POLYKYBD_DEBUG=yes`, which boots with `debug_enable` on. A new key-pressing test
+belongs in that configuration, not in the default suite. So nothing that needs Shift, Caps Lock or
 AltGr held is observable here; the language sweep draws the resting view only (base
 legend + Shift preview + AltGr hint). The firmware's `dev/tools/check_glyph_coverage.py`
 covers the rest statically.

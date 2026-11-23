@@ -209,11 +209,13 @@ unattended rig now has a test. Covered:
 
 ## Deliberately excluded (not suitable for the unattended rig)
 
-- **KEYPRESS** (cmd 14) — injects a *real* key event: the firmware resolves the keycode to a
-  matrix position and runs `action_exec`, so it types a character into whatever has focus on the
-  rig host (the kiosk). It also can't confirm the slave received the bridged event without a
-  camera. The meaningful version of "did the keypress reach the slave" is the GPIO key-matrix
-  injection infra item, not this host-driven command.
+- **KEYPRESS** (cmd 14) in the default suite — injects a *real* key event: the firmware resolves
+  the keycode to a matrix position and runs `action_exec`, so it types a character into whatever
+  has focus on the rig host (the kiosk), and it NACKs on a normal image (`debug_enable` off). It
+  also can't confirm the slave received the bridged event without a camera. The meaningful
+  version of "did the keypress reach the slave" is the GPIO key-matrix injection infra item.
+  The one place cmd 14 is used is the tutorial configuration (`--tutorial`, POLYKYBD_DEBUG
+  images; see `HIL_SUITE_NOTES.md`), where the tutorial swallows the letters it asks for.
 - **ENTER_BOOTLOADER** (cmd 23) — resets the master into the RP2040 ROM bootloader and ends the
   HID session. Only meaningful as a terminal action, which the flash sequence already performs.
 

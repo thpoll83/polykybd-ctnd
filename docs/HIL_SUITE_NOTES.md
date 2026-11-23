@@ -121,6 +121,22 @@ and relative links were adjusted to suit a standalone file.
     period is ACKed at 23 and 100 and NACKed at 22 and 101, op 2, row 255, col 8 and
     the key without a display (3, 7) are NACKed, and a START until cancelled and
     CANCEL are ACKed. GET_ID must answer afterwards. Ends with CANCEL in a `finally`.
+  - The **first-run tutorial** test (`test_first_run_tutorial`, `TIER_TUTORIAL`,
+    `needs_console`; `station/first_run_tutorial.py`). It runs only in its own rig
+    configuration: `--tutorial` on images built with `-e POLYKYBD_DEBUG=yes` (the
+    qmk-test.yml `tutorial-test` job), because cmd 14 refuses every press while
+    `debug_enable` is off. `--tutorial` runs this test and the closing crash scan, not
+    the default suite. The test presses `MO(_FL)` and `TO(_SL)`, taps
+    `KC_SETTINGS_MORE` (0x7FA3), and presses `KC_EDEN` (0x7FA0). It then answers
+    chapter 1 with the three letters the console names, chapter 2 with left and then
+    right Shift, and chapter 3 with a held Fn, and holds Esc for 1.6 s to skip at the
+    notation screen. It follows each step through the firmware's
+    `Tutorial phase <NAME>` lines and fails at the step that did not come. It ends with
+    `Tutorial skipped; displays handed back` and a GET_ID. The language preview and
+    the key tour are not covered. Every press uses `attempts=1`. cmd 14 releases a key
+    at the position its press used (the press of `TO(_SL)` changes the layer), so the
+    test does not need the layer to match at release time. Keys that reach the rig
+    host: the two Shifts and the Esc release; the tutorial swallows the letters.
   - The two **host tutorial** tests (cmd 49, `min_protocol: 35`; packer
     `station/host_tutorial.py`). The rig cannot see the status display or the keycaps
     and cannot press keys, so the text, the spotlight, the reveal and a KEY condition
