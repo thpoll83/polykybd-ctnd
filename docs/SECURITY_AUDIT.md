@@ -888,7 +888,9 @@ in the keymap EEPROM area.
 - **Fix:** a frame whose `size` is more than `in_len - 8` or `sizeof(commands) - 4` (the
   bytes it holds after crc32 (4), command (1), offset (2) and size (1)) is refused with
   `SYNC_NACK_REFUSED` and writes nothing. It is not truncated: a partial write answered
-  with `SYNC_ACK` would tell the master the whole update had been written.
+  with `SYNC_ACK` would tell the master the whole update had been written. A frame shorter
+  than 8 bytes is refused before `offset` and `size` are read, because the RPC buffer is
+  shared and the missing bytes would be stale data from an earlier frame.
 
 Check it is still fixed:
 ```bash
