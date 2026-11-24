@@ -12,7 +12,10 @@ them. That scan also reached a **fifth** repo the ID scheme did not cover
 (`Adafruit-GFX-Library`); tracked under `SCAN-1` rather than a new prefix, since the
 finding was in an accidentally-committed build directory rather than in our code.
 
-**2026-11-23**: SCAN-6, an Aikido scan of PolyKybdHost: two `yaml.load` findings (false
+**2026-11-24**: FW-13, found by code review while choosing new fuzz targets (after
+qmk#476): the slave's split-link `set_buffer` trusted a peer `size` byte; fixed in qmk#479.
+The fuzz work in qmk#476 also fixed a font-pack sort index that wrote below a stack array
+for packs over 129 fonts (an unsigned resource, see FW-11 for the same input). **2026-11-23**: SCAN-6, an Aikido scan of PolyKybdHost: two `yaml.load` findings (false
 positives, both loaders were already safe). HOST-8 from the same scan: Pillow 12.x CVEs
 (floor raised to 13.0.0 on Python 3.11+, Python 3.10 accepted, host#1016). **2026-11-17**: SCAN-5, a Dependabot alert on `minimatch` in the VS Code extension's
 packaging tool: dev-only and not shipped, fixed with an npm override. **2026-11-16**: HOST-7 raised by CodeQL on host#916 and fixed in the same PR before
@@ -51,6 +54,7 @@ signing the firmware image alone was not enough.**
 | FW-8 | RLE non-aligned OOB | qmk | ✅ fixed (PR #112) |
 | FW-11 | Font-pack (`.plyf`) glyph offset unvalidated — persistent HardFault DoS from an unsigned resource | qmk | ✅ fixed (offset alignment + extent checks) |
 | FW-12 | Bulk pipe (CDC) frame parser: bounds of the one buffer; FW_CHUNK writes staging | qmk | ✅ checked, not vulnerable (same gate as HID's FW_UP_CHUNK) |
+| FW-13 | Split-link slave `set_buffer` trusted the peer's `size` byte — read past the 36-byte frame into the keymap | qmk | ✅ fixed (qmk#479) |
 | HOST-1 | Legacy plaintext window relay on by default | host | ✅ fixed (PR #133) |
 | HOST-2 | Confirmation polling holds `worker.exclusive()` for up to 75 s | host | 🟡 accepted + documented |
 | HOST-3 | Usage telemetry: new outbound surface, unauthenticated collector, on by default | host | 🟡 accepted + documented |
@@ -865,6 +869,31 @@ carries the procedure.
 
 Kept because "is this actually fixed?" was re-asked once per finding; these are the checks
 that answer it.
+
+### FW-13 — the slave's split-link `set_buffer` trusted the peer's size (FIXED, qmk#479)
+
+`user_sync_dynamic_keymap_data_handler` (`keyboards/polykybd/lib/split_link/split_sync.c`),
+case `id_dynamic_keymap_set_buffer`, passed `size = command_data[2]` (0..255) to
+`dynamic_keymap_set_buffer_poly` without checking it against the frame. The frame is
+`dynamic_keymap_sync_t`: `crc32` + `commands[RAW_EPSIZE]`, 36 bytes, and the payload
+starts at byte 8. A `size` above 28 read up to ~220 bytes past the frame and stored them
+in the keymap EEPROM area.
+
+- **Who can send it:** only the other half over the bridge. The master clamps the same
+  byte on the HID side before bridging (FW-5, `hid_com.c`), so normal traffic never has
+  it. A forged or faulty peer half is the same trust boundary as FW-6.
+- **What it could not do:** write outside the keymap area. `dynamic_keymap_set_buffer_poly`
+  already clamps `offset + size` to `DYNAMIC_KEYMAP_UPDATE_MAX_LAYER_COUNT * MATRIX_ROWS *
+  MATRIX_COLS * 2`.
+- **Fix:** `size` is clamped to `in_len - 8` and to `sizeof(commands) - 4`, the bytes the
+  frame holds after crc32 (4), command (1), offset (2) and size (1).
+
+Check it is still fixed:
+```bash
+grep -n "FW-13" -A8 keyboards/polykybd/lib/split_link/split_sync.c   # the clamp before set_buffer
+```
+Found by reading the code while choosing new fuzz targets (2026-11-24), not by a fuzzer:
+the split-link handlers need ChibiOS transactions and do not build on the host.
 
 ### HOST-7 — the bind-file regex backtracked exponentially (FIXED before merge)
 
