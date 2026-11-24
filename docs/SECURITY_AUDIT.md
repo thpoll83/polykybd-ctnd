@@ -885,12 +885,14 @@ in the keymap EEPROM area.
 - **What it could not do:** write outside the keymap area. `dynamic_keymap_set_buffer_poly`
   already clamps `offset + size` to `DYNAMIC_KEYMAP_UPDATE_MAX_LAYER_COUNT * MATRIX_ROWS *
   MATRIX_COLS * 2`.
-- **Fix:** `size` is clamped to `in_len - 8` and to `sizeof(commands) - 4`, the bytes the
-  frame holds after crc32 (4), command (1), offset (2) and size (1).
+- **Fix:** a frame whose `size` is more than `in_len - 8` or `sizeof(commands) - 4` (the
+  bytes it holds after crc32 (4), command (1), offset (2) and size (1)) is refused with
+  `SYNC_NACK_REFUSED` and writes nothing. It is not truncated: a partial write answered
+  with `SYNC_ACK` would tell the master the whole update had been written.
 
 Check it is still fixed:
 ```bash
-grep -n "FW-13" -A8 keyboards/polykybd/lib/split_link/split_sync.c   # the clamp before set_buffer
+grep -n "FW-13" -A9 keyboards/polykybd/lib/split_link/split_sync.c   # the refusal before set_buffer
 ```
 Found by reading the code while choosing new fuzz targets (2026-11-24), not by a fuzzer:
 the split-link handlers need ChibiOS transactions and do not build on the host.
