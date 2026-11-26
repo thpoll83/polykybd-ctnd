@@ -615,10 +615,10 @@ class ViewOverrideTest(unittest.TestCase):
         from pathlib import Path
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "var" / "camera_view.json"
-        self._orig = (camera.SETTINGS.roi, camera.SETTINGS.split_x)
+        self._orig = (camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads)
 
     def tearDown(self):
-        camera.SETTINGS.roi, camera.SETTINGS.split_x = self._orig
+        camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads = self._orig
         self._tmp.cleanup()
 
     def test_override_wins_over_config_for_roi_and_split_only(self):
@@ -732,6 +732,118 @@ class RunnerHookTest(unittest.TestCase):
         rec = runner.rgb_phase_check(never, "")
         self.assertEqual(rec["status"], "skip")
         self.assertIn("never started", rec["reason"])
+
+
+LEFT_Q = [[0.05, 0.1], [0.45, 0.1], [0.45, 0.9], [0.05, 0.9]]
+RIGHT_Q = [[0.55, 0.1], [0.95, 0.1], [0.95, 0.9], [0.55, 0.9]]
+
+
+class QuadTest(unittest.TestCase):
+    """The two four-corner outlines from "Adjust view": masks and rectification."""
+
+    def test_parse_accepts_both_windings_and_rejects_bad_quads(self):
+        q = camera.parse_quads({"left": LEFT_Q, "right": RIGHT_Q[::-1]})
+        self.assertEqual(q[0][1], (0.45, 0.1))
+        bow_tie = [[0.1, 0.1], [0.4, 0.9], [0.4, 0.1], [0.1, 0.9]]
+        for bad, word in (({"left": bow_tie, "right": RIGHT_Q}, "convex"),
+                          ({"left": LEFT_Q, "right": [[0, 0], [1.2, 0], [1, 1], [0, 1]]}, "0..1"),
+                          ({"left": LEFT_Q[:3], "right": RIGHT_Q}, "4 corners"),
+                          ({"left": LEFT_Q}, "left and right"),
+                          ({"left": LEFT_Q, "right": [[0, "x"]] * 4}, "pairs")):
+            with self.assertRaisesRegex(ValueError, word):
+                camera.parse_quads(bad)
+        self.assertEqual(camera.parse_quads(None), ())
+
+    def test_view_from_quads_crops_to_both_and_splits_in_the_gap(self):
+        q = camera.parse_quads({"left": LEFT_Q, "right": RIGHT_Q})
+        roi, split = camera.view_from_quads(q, CameraSettings())
+        self.assertEqual(roi, "0.05,0.1,0.9,0.8")
+        self.assertAlmostEqual(split, 0.5, places=3)
+        # Quads that fill the view need no crop.
+        full = camera.parse_quads({"left": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]],
+                                   "right": [[0.6, 0], [1, 0], [1, 1], [0.6, 1]]})
+        self.assertEqual(camera.view_from_quads(full, CameraSettings())[0], "")
+
+    def test_rotation_mirrors_the_quads_into_the_recording(self):
+        s = CameraSettings.from_config({"rotation": 180, "quads": {"left": LEFT_Q, "right": RIGHT_Q}})
+        left_px, right_px = camera.quad_pixels(s, 100, 50)
+        # The left board's quad is on the sensor's left, so on the image's right.
+        self.assertGreater(min(x for x, _ in left_px), 50)
+        self.assertAlmostEqual(left_px[0][0], 95.0)
+        self.assertAlmostEqual(left_px[0][1], 45.0)
+
+    def test_quads_select_the_pixels_not_split_x(self):
+        # split_x 0.2 cuts through the left LED block; the quads hold each block whole.
+        quads = {"left": LEFT_Q, "right": RIGHT_Q}
+        s = CameraSettings.from_config({"split_x": 0.2, "quads": quads})
+        res = camera.analyse(synth(300.0), s)
+        self.assertAlmostEqual(res.offset_ms, 300.0, delta=6.0)
+        self.assertGreater(res.correlation, 0.9)
+
+    def test_a_quad_outside_the_recording_is_an_error(self):
+        s = CameraSettings.from_config({"roi": "0,0,0.5,1", "quads": {"left": LEFT_Q, "right": RIGHT_Q}})
+        with self.assertRaisesRegex(ValueError, "covers no pixel"):
+            camera.analyse(synth(0.0), s)
+
+    BOARD = {"width_mm": 100.0, "height_mm": 50.0, "leds": [{"ref": "LED1", "x": 25.0, "y": 25.0}]}
+
+    def test_homography_maps_the_corners_and_the_leds(self):
+        quad = [(10, 20), (210, 20), (210, 120), (10, 120)]
+        self.assertEqual([(r, round(x, 6), round(y, 6)) for r, x, y in camera.led_pixels(quad, self.BOARD)],
+                         [("LED1", 60.0, 70.0)])
+        skew = [(12, 7), (190, 30), (170, 140), (5, 110)]
+        hm = camera.board_to_image(skew, self.BOARD)
+        for (bx, by), (ix, iy) in zip([(0, 0), (100, 0), (100, 50), (0, 50)], skew):
+            x, y = camera.apply_h(hm, bx, by)
+            self.assertAlmostEqual(x, ix, places=6)
+            self.assertAlmostEqual(y, iy, places=6)
+        with self.assertRaisesRegex(ValueError, "degenerate"):
+            camera.homography([(0, 0), (1, 1), (2, 2), (0, 1)], skew)
+
+    def test_rectify_straightens_a_half(self):
+        w, h = 220, 140
+        frame = bytearray(w * h)
+        quad = [(10, 20), (210, 20), (210, 120), (10, 120)]   # 2 px per mm
+        frame[70 * w + 60] = 200                              # the LED at 25, 25 mm
+        ow, oh, out = camera.rectify(bytes(frame), w, h, quad, self.BOARD, px_per_mm=2.0)
+        self.assertEqual((ow, oh), (200, 100))
+        self.assertEqual(out[50 * ow + 50], 200)              # 25 mm at 2 px per mm
+        self.assertEqual(sum(1 for v in out if v), 1)
+
+    def test_board_files_match_their_outlines(self):
+        import re
+        for side in camera.QUAD_SIDES:
+            board = camera.load_board(side)
+            self.assertEqual(len(board["leds"]), 36)
+            svg = (camera.BOARD_DIR / f"{camera.BOARDS[side]}.svg").read_text()
+            vb = [float(v) for v in re.search(r'viewBox="([^"]+)"', svg).group(1).split()]
+            self.assertEqual(vb[2:], [board["width_mm"], board["height_mm"]])
+            for led in board["leds"]:
+                self.assertTrue(0 < led["x"] < vb[2] and 0 < led["y"] < vb[3])
+
+    def test_save_with_quads_derives_the_crop_and_round_trips(self):
+        import tempfile
+        from pathlib import Path
+        orig = (camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "camera_view.json"
+            try:
+                err = camera.save_view_override("ignored", 0.9, path,
+                                                quads={"left": LEFT_Q, "right": RIGHT_Q})
+                self.assertEqual(err, "")
+                self.assertEqual(camera.SETTINGS.roi, "0.05,0.1,0.9,0.8")
+                self.assertEqual(camera.SETTINGS.quads[1][0], (0.55, 0.1))
+                stored = camera.load_view_override(path)
+                self.assertEqual(stored["quads"]["right"][0], [0.55, 0.1])
+                s, err = camera._load_settings({}, stored)
+                self.assertEqual((s.quads, err), (camera.SETTINGS.quads, ""))
+                self.assertIn("convex", camera.save_view_override(
+                    "", 0.5, path, quads={"left": [[0.1, 0.1], [0.4, 0.9], [0.4, 0.1], [0.1, 0.9]],
+                                          "right": RIGHT_Q}))
+                self.assertEqual(camera.clear_view_override(path), "")
+                self.assertEqual(camera.SETTINGS.quads, camera._load_settings(camera.CAMERA)[0].quads)
+            finally:
+                camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads = orig
 
 
 if __name__ == "__main__":

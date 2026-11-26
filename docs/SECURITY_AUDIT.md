@@ -356,6 +356,14 @@ values reach `rpicam` as one `--roi` argument in an argv list, never a shell. Th
 caller can do is crop the camera badly, which makes the phase check SKIP. Same exposure as
 the rest of HIL-4: loopback only unless `allow_lan` is set.
 
+Since 2026-11-26 (later), `var/camera_view.json` can also hold `quads`: two outlines of
+four `[x, y]` corners each. `camera.parse_quads` accepts exactly the keys `left` and
+`right`, four numeric pairs inside 0..1 per side, and a convex quad; anything else refuses
+the save. The quads never reach a command line: the server derives the crop from them and
+validates that like any `roi`, and the analysis uses them only as pixel masks. The worst a
+caller can do is again a bad view, which makes the phase check SKIP. The board outlines
+under `station/ui/static/pcb/` are static files generated from the PolyKybd KiCad boards.
+
 The camera snapshot (2026-11-26, later) needs only the camera lock, so it also answers
 during a CI job, and during a recording it serves the recording's newest frame. Two GET
 routes serve the three saved frames: `/camera/frames` (JSON) and `/camera/frames/<n>.png`,

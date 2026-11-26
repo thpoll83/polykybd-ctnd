@@ -61,6 +61,46 @@ _TRUE = ("1", "true", "yes", "on")
 _FALSE = ("0", "false", "no", "off")
 
 
+QUAD_SIDES = ("left", "right")   # the board halves, as named in var/camera_view.json
+
+
+def parse_quads(v) -> tuple:
+    """{"left": [[x, y] * 4], "right": [...]} (or the tuple form) to
+    ((left corners), (right corners)). Each corner lies in 0..1 and each quad is
+    convex, so the outline can be warped into it and its inside tested."""
+    if not v:
+        return ()
+    if isinstance(v, dict):
+        if set(v) != set(QUAD_SIDES):
+            raise ValueError(f"camera quads need exactly the keys left and right, not {sorted(v)}")
+        v = [v[k] for k in QUAD_SIDES]
+    if not isinstance(v, (list, tuple)) or len(v) != 2:
+        raise ValueError("camera quads must be two four-corner outlines")
+    out = []
+    for side, q in zip(QUAD_SIDES, v):
+        try:
+            pts = tuple((float(x), float(y)) for x, y in q)
+        except (TypeError, ValueError):
+            raise ValueError(f"camera quad {side} must be four [x, y] pairs") from None
+        if len(pts) != 4:
+            raise ValueError(f"camera quad {side} must have 4 corners, not {len(pts)}")
+        if not all(0 <= c <= 1 for p in pts for c in p):
+            raise ValueError(f"camera quad {side} must lie inside 0..1")
+        if not _convex(pts):
+            raise ValueError(f"camera quad {side} must be convex (corners in order, no crossing edges)")
+        out.append(pts)
+    return tuple(out)
+
+
+def _cross(o, a, b) -> float:
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _convex(pts) -> bool:
+    turns = [_cross(pts[i], pts[(i + 1) % 4], pts[(i + 2) % 4]) for i in range(4)]
+    return all(t > 0 for t in turns) or all(t < 0 for t in turns)
+
+
 def _parse_bool(key: str, v) -> bool:
     """A real bool or an explicit spelling. A typo (ture, flase) is an error,
     so it disables the camera with the reason instead of reading as false."""
@@ -91,6 +131,11 @@ class CameraSettings:
     awb_gains: str = "1.5,1.5"     # fixed red,blue gains: no auto white balance
     record_s: float = 8.0
     roi: str = ""                  # digital crop "x,y,w,h" as fractions of the full view; "" = none
+    # Two four-corner outlines from the UI's "Adjust view": (left board, right
+    # board), each ((x, y) * 4) in sensor fractions, corners in the order of the
+    # board outline's top-left, top-right, bottom-right, bottom-left. () = none;
+    # the check then splits the image at split_x.
+    quads: tuple = ()
 
     @classmethod
     def from_config(cls, c: dict | None) -> "CameraSettings":
@@ -99,6 +144,9 @@ class CameraSettings:
         s = cls()
         for k, v in (c or {}).items():
             if not hasattr(s, k) or v is None:
+                continue
+            if k == "quads":
+                s.quads = parse_quads(v)
                 continue
             default = getattr(s, k)
             if isinstance(default, bool):
@@ -150,7 +198,7 @@ class CameraSettings:
 # nothing else. The UI writes the file, the CI runner reads it at import (each
 # run is a new process). A missing or invalid file leaves config.yaml in charge.
 VIEW_OVERRIDE_PATH = Path(__file__).resolve().parent.parent / "var" / "camera_view.json"
-VIEW_KEYS = ("roi", "split_x")
+VIEW_KEYS = ("roi", "split_x", "quads")
 _view_lock = threading.Lock()   # file write/unlink and the SETTINGS update, as one step
 
 
@@ -179,7 +227,7 @@ def _load_settings(c: dict | None, view: dict | None = None) -> tuple[CameraSett
         try:
             merged = {**(c or {}), **view}
             v = CameraSettings.from_config(merged)
-            s.roi, s.split_x = v.roi, v.split_x
+            s.roi, s.split_x, s.quads = v.roi, v.split_x, v.quads
         except (TypeError, ValueError) as exc:
             logging.getLogger("polykybd-ctnd").warning(
                 "camera view override ignored (config.yaml values used): %s", exc)
@@ -189,26 +237,77 @@ def _load_settings(c: dict | None, view: dict | None = None) -> tuple[CameraSett
 SETTINGS, CONFIG_ERROR = _load_settings(CAMERA, load_view_override())
 
 
-def save_view_override(roi: str, split_x: float, path: Path | None = None) -> str:
-    """Validate and store the crop and split line from the UI, and apply them to
-    SETTINGS in place (functions take SETTINGS as a default argument, so the
-    object must stay the same). Returns "" or the reason it was refused.
+def _flip_axes(s: CameraSettings) -> tuple[bool, bool]:
+    """Whether the output image is mirrored horizontally and vertically against
+    the sensor (rotation 180 flips both axes)."""
+    rot = s.rotation == 180
+    return s.hflip != rot, s.vflip != rot
+
+
+def _roi_box(s: CameraSettings) -> tuple[float, float, float, float]:
+    if not s.roi:
+        return 0.0, 0.0, 1.0, 1.0
+    x, y, w, h = (float(v) for v in s.roi.split(","))
+    return x, y, w, h
+
+
+def to_output(pt, s: CameraSettings) -> tuple[float, float]:
+    """A sensor fraction (x, y) as a fraction of the recorded (cropped, flipped)
+    image. Outside 0..1 when the point lies outside the crop."""
+    rx, ry, rw, rh = _roi_box(s)
+    u, v = (pt[0] - rx) / rw, (pt[1] - ry) / rh
+    fh, fv = _flip_axes(s)
+    return (1 - u if fh else u), (1 - v if fv else v)
+
+
+def view_from_quads(quads: tuple, s: CameraSettings) -> tuple[str, float]:
+    """The crop (roi) and split_x that go with two quads: the crop is the
+    bounding box of both, rounded outwards to 0.001; split_x lies between the
+    two quads in the recorded image (in the middle of the gap, or between their
+    centres when they overlap in x)."""
+    xs = [x for q in quads for x, _ in q]
+    ys = [y for q in quads for _, y in q]
+    x0, y0 = math.floor(min(xs) * 1000) / 1000, math.floor(min(ys) * 1000) / 1000
+    x1, y1 = math.ceil(max(xs) * 1000) / 1000, math.ceil(max(ys) * 1000) / 1000
+    full = x0 <= 0.001 and y0 <= 0.001 and x1 >= 0.999 and y1 >= 0.999
+    roi = "" if full else f"{x0:g},{y0:g},{round(x1 - x0, 3):g},{round(y1 - y0, 3):g}"
+    out = replace(s, roi=roi)
+    us = [[to_output(p, out)[0] for p in q] for q in quads]
+    a, b = sorted(us, key=lambda u: sum(u))
+    split = (max(a) + min(b)) / 2 if max(a) < min(b) else (sum(a) + sum(b)) / 8
+    return roi, round(split, 3)
+
+
+def save_view_override(roi: str, split_x: float, path: Path | None = None,
+                       quads=None) -> str:
+    """Validate and store the view from the UI, and apply it to SETTINGS in
+    place (functions take SETTINGS as a default argument, so the object must
+    stay the same). With quads, the crop and split_x are derived from them and
+    the roi and split_x given are ignored. Returns "" or the reason it was
+    refused.
     """
     path = VIEW_OVERRIDE_PATH if path is None else path
     try:
-        v = CameraSettings.from_config({**(CAMERA or {}), "roi": roi, "split_x": split_x})
+        if quads:
+            q = parse_quads(quads)
+            roi, split_x = view_from_quads(q, CameraSettings.from_config(CAMERA))
+        v = CameraSettings.from_config({**(CAMERA or {}), "roi": roi, "split_x": split_x,
+                                        "quads": quads or None})
     except (TypeError, ValueError) as exc:
         return str(exc)
+    data = {"roi": v.roi, "split_x": v.split_x}
+    if v.quads:
+        data["quads"] = {k: [list(p) for p in q] for k, q in zip(QUAD_SIDES, v.quads)}
     with _view_lock:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
             with os.fdopen(fd, "w") as f:
-                f.write(json.dumps({"roi": v.roi, "split_x": v.split_x}))
+                f.write(json.dumps(data))
             os.replace(tmp, path)
         except OSError as exc:
             return f"could not save the view: {exc}"
-        SETTINGS.roi, SETTINGS.split_x = v.roi, v.split_x
+        SETTINGS.roi, SETTINGS.split_x, SETTINGS.quads = v.roi, v.split_x, v.quads
     return ""
 
 
@@ -231,7 +330,7 @@ def clear_view_override(path: Path | None = None) -> str:
         except OSError as exc:
             return f"could not remove the view override: {exc}"
         s, _ = _load_settings(CAMERA)
-        SETTINGS.roi, SETTINGS.split_x = s.roi, s.split_x
+        SETTINGS.roi, SETTINGS.split_x, SETTINGS.quads = s.roi, s.split_x, s.quads
     return ""
 
 
@@ -528,10 +627,26 @@ class BackgroundRecording:
 
 # ── Analysis ─────────────────────────────────────────────────────────────────
 
+def quad_pixels(s: CameraSettings, width: int, height: int) -> tuple:
+    """settings.quads in pixels of the recorded image: ((left board), (right
+    board)), corners in the outline's order. () without quads."""
+    return tuple(tuple((u * width, v * height) for u, v in (to_output(p, s) for p in q))
+                 for q in s.quads)
+
+
+def inside_quad(q, x: float, y: float) -> bool:
+    """Whether (x, y) lies in the convex quad q (either winding)."""
+    turns = [_cross(q[i], q[(i + 1) % 4], (x, y)) for i in range(4)]
+    return all(t >= 0 for t in turns) or all(t <= 0 for t in turns)
+
+
 def side_traces(rec: Recording, split_x: float, step: int = 4,
-                keep: float = 0.25) -> tuple[list[float], list[float]]:
+                keep: float = 0.25, quads_px: tuple = ()) -> tuple[list[float], list[float]]:
     """One brightness trace per image side (left of split_x, right of it).
 
+    With quads_px (two quads in pixels, see quad_pixels), each side is the
+    inside of one quad instead, and the image-left side is the quad whose
+    centre lies further left.
     Samples every ``step``-th pixel in x and y, keeps the samples on each side
     whose variance over time is at least ``keep`` times that side's largest
     variance (the breathing LEDs), and averages them per frame. Static parts of
@@ -542,8 +657,15 @@ def side_traces(rec: Recording, split_x: float, step: int = 4,
     cut = int(w * split_x)
     cols = list(range(0, w, step))
     rows = list(range(0, h, step))
-    idx_l = [r * w + c for r in rows for c in cols if c < cut]
-    idx_r = [r * w + c for r in rows for c in cols if c >= cut]
+    if quads_px:
+        a, b = sorted(quads_px, key=lambda q: sum(x for x, _ in q))
+        idx_l = [r * w + c for r in rows for c in cols if inside_quad(a, c, r)]
+        idx_r = [r * w + c for r in rows for c in cols if inside_quad(b, c, r)]
+        if not idx_l or not idx_r:
+            raise ValueError("a camera quad covers no pixel of the recording; adjust the view again")
+    else:
+        idx_l = [r * w + c for r in rows for c in cols if c < cut]
+        idx_r = [r * w + c for r in rows for c in cols if c >= cut]
 
     def pick(idx: list[int]) -> list[int]:
         n = len(rec.lumas)
@@ -563,6 +685,76 @@ def side_traces(rec: Recording, split_x: float, step: int = 4,
     left = [sum(y[i] for i in sel_l) / len(sel_l) for y in rec.lumas]
     right = [sum(y[i] for i in sel_r) / len(sel_r) for y in rec.lumas]
     return left, right
+
+
+# ── Rectifying one half ──────────────────────────────────────────────────────
+# The quad of a half is where the corners of its board outline (the view box of
+# station/ui/static/pcb/<board>.svg) are in the image. A homography maps board
+# millimetres to image pixels, so each LED of the board JSON can be found in a
+# recording, and a half can be cut out as a straight, top-down image.
+
+BOARD_DIR = Path(__file__).resolve().parent / "ui" / "static" / "pcb"
+BOARDS = {"left": "split72_left", "right": "split72_right"}
+
+
+def load_board(side: str, directory: Path | None = None) -> dict:
+    """The board JSON of one half (width_mm, height_mm, leds with ref, x, y)."""
+    d = BOARD_DIR if directory is None else directory
+    return json.loads((d / f"{BOARDS[side]}.json").read_text())
+
+
+def homography(src, dst) -> list[float]:
+    """The 3x3 projective map (row-major, h[8] = 1) taking four src points to
+    four dst points, by Gaussian elimination on the 8x8 system."""
+    a = []
+    for (x, y), (u, v) in zip(src, dst):
+        a.append([x, y, 1, 0, 0, 0, -u * x, -u * y, u])
+        a.append([0, 0, 0, x, y, 1, -v * x, -v * y, v])
+    for col in range(8):
+        piv = max(range(col, 8), key=lambda r: abs(a[r][col]))
+        if abs(a[piv][col]) < 1e-12:
+            raise ValueError("degenerate quad: three corners on a line")
+        a[col], a[piv] = a[piv], a[col]
+        for r in range(8):
+            if r != col:
+                f = a[r][col] / a[col][col]
+                a[r] = [rv - f * cv for rv, cv in zip(a[r], a[col])]
+    return [a[i][8] / a[i][i] for i in range(8)] + [1.0]
+
+
+def apply_h(h: list[float], x: float, y: float) -> tuple[float, float]:
+    d = h[6] * x + h[7] * y + h[8]
+    return (h[0] * x + h[1] * y + h[2]) / d, (h[3] * x + h[4] * y + h[5]) / d
+
+
+def board_to_image(quad_px, board: dict) -> list[float]:
+    """The homography from board millimetres (the view box) to image pixels."""
+    w, h = board["width_mm"], board["height_mm"]
+    return homography([(0, 0), (w, 0), (w, h), (0, h)], quad_px)
+
+
+def led_pixels(quad_px, board: dict) -> list[tuple[str, float, float]]:
+    """Each LED of the board as (ref, x, y) in image pixels."""
+    hm = board_to_image(quad_px, board)
+    return [(led["ref"], *apply_h(hm, led["x"], led["y"])) for led in board["leds"]]
+
+
+def rectify(luma: bytes, width: int, height: int, quad_px, board: dict,
+            px_per_mm: float = 1.0) -> tuple[int, int, bytes]:
+    """One half cut out of a luma frame and straightened to the board's view
+    box, px_per_mm pixels per millimetre (nearest sample; 0 outside the frame).
+    Returns (width, height, luma)."""
+    ow = max(1, round(board["width_mm"] * px_per_mm))
+    oh = max(1, round(board["height_mm"] * px_per_mm))
+    hm = board_to_image(quad_px, board)
+    out = bytearray(ow * oh)
+    for j in range(oh):
+        for i in range(ow):
+            x, y = apply_h(hm, (i + 0.5) / px_per_mm, (j + 0.5) / px_per_mm)
+            xi, yi = int(x), int(y)
+            if 0 <= xi < width and 0 <= yi < height and x >= 0 and y >= 0:
+                out[j * ow + i] = luma[yi * width + xi]
+    return ow, oh, bytes(out)
 
 
 def resample(ts: list[float], values: list[float], dt: float) -> list[float]:
@@ -692,7 +884,8 @@ def phase_offset(ts: list[float], left: list[float], right: list[float],
 def analyse_traces(rec: Recording, settings: CameraSettings = SETTINGS
                    ) -> tuple[PhaseResult, list[float], list[float]]:
     """analyse() plus the two traces (master first), for the UI chart."""
-    left, right = side_traces(rec, settings.split_x)
+    left, right = side_traces(rec, settings.split_x,
+                              quads_px=quad_pixels(settings, rec.width, rec.height))
     if not settings.master_on_left:
         left, right = right, left
     return phase_offset(rec.timestamps_ms, left, right), left, right

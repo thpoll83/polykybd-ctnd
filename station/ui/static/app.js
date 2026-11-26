@@ -613,8 +613,10 @@ function openCamera() {
       document.getElementById('camera-tag-right').textContent = info.master_on_left ? slave : master;
       _cameraText = `rotation ${info.rotation}°, hflip ${info.hflip}, vflip ${info.vflip}, ` +
                     (info.roi ? `roi ${info.roi}, ` : '') +
-                    `split_x ${info.split_x} — the dashed line must fall between the halves`;
+                    (info.quads ? 'one outline per half — each must lie on its board'
+                                : `split_x ${info.split_x} — the dashed line must fall between the halves`);
       msg.textContent = _cameraText;
+      if (info.quads) loadBoards().then(() => { if (gen === _cameraGen) placeCameraOverlay(); }).catch(() => {});
       placeCameraOverlay();
       refreshCamera();
       cameraLive();
@@ -646,8 +648,10 @@ function placeCameraOverlay() {
   [split, tagL, tagR].forEach(el => { el.hidden = !show; });
   if (_adjust) { drawAdjust(); return; }
   document.getElementById('camera-box').hidden = true;
-  if (!show) return;
+  if (!show) { hideOutlines(); return; }
   const { x0, y0, pw, ph } = paintedRect(img);
+  if (_cameraInfo.quads && _boards.left && _boards.right) { split.hidden = true; drawSavedQuads(); }
+  else hideOutlines();
   split.style.left = (x0 + _cameraInfo.split_x * pw) + 'px';
   split.style.top = y0 + 'px';
   split.style.height = ph + 'px';
@@ -681,6 +685,7 @@ function refreshCamera() {
         // Only now is the full-frame image on screen: drawing may start.
         adjusting.ready = true;
         msg.textContent = adjustHint();
+        drawAdjust();
       } else if (recording) {
         msg.textContent = 'Recording in progress: ' + recording;
       } else if (_cameraText) msg.textContent = _cameraText;   // clear an earlier "busy" error
@@ -909,19 +914,22 @@ if (window.ResizeObserver) new ResizeObserver(() => placeCameraOverlay()).observ
 window.addEventListener('resize', placeCameraOverlay);
 
 /* ── Adjust view ──
-   Set camera.roi and camera.split_x by touch. The full (uncropped) image is
-   shown; step 1: drag a box around both halves; step 2: tap the gap between
-   them. Save sends both to the server, which validates them and stores them in
-   var/camera_view.json (they override config.yaml's roi and split_x). All
-   coordinates are fractions of the full image; split_x is converted to a
-   fraction of the cropped image, which is what the phase check uses. */
-let _adjust = null;   // { step: 'box'|'split', box: [x, y, w, h], split: x (full-image fraction), drag }
+   One four-corner outline per half. The full (uncropped) image is shown with
+   each board's PCB outline (keycaps, LEDs) warped into its four corners; drag
+   a corner until the outline lies on the board, or drag inside an outline to
+   move it whole. Save sends both quads to the server, which derives the crop
+   (the bounding box of both) and stores everything in var/camera_view.json
+   (it overrides config.yaml's roi and split_x). The phase check then reads
+   only the pixels inside each quad. The quads are stored in sensor fractions,
+   so they stay right when rotation or flips change; the editor works in
+   fractions of the displayed full image. */
+let _adjust = null;   // { quads: {left: [[x, y] x4], right: [...]} (displayed fractions), drag, ready }
+const _boards = {};   // side -> {width_mm, height_mm} from /static/pcb/<board>.json
 
 // rpicam's --roi is in sensor coordinates (libcamera ScalerCrop), before
 // hflip/vflip/rotation. The editor draws on the displayed (flipped) image, so a
 // box is mirrored on each flipped axis when it is saved and when it is loaded
-// (the same formula both ways). rotation 180 flips both axes. split_x is not
-// converted: it applies to the cropped, already flipped output image.
+// (the same formula both ways). rotation 180 flips both axes.
 function flipAxes(info) {
   const rot = Number(info.rotation) === 180;
   return { h: !!info.hflip !== rot, v: !!info.vflip !== rot };
@@ -935,6 +943,23 @@ function toFromSensor(box, info) {
   return [x, y, w, h];
 }
 
+// A point between sensor and displayed full-image fractions (the same both ways).
+function flipPoint([x, y], info) {
+  const f = flipAxes(info);
+  return [f.h ? 1 - x : x, f.v ? 1 - y : y];
+}
+
+// A sensor point as a fraction of the cropped image the live view shows
+// (station/camera.py to_output).
+function sensorToOutput([x, y], info) {
+  let [rx, ry, rw, rh] = [0, 0, 1, 1];
+  if (info.roi) {
+    const v = info.roi.split(',').map(Number);
+    if (v.length === 4 && v.every(n => isFinite(n))) [rx, ry, rw, rh] = v;
+  }
+  return flipPoint([(x - rx) / rw, (y - ry) / rh], info);
+}
+
 function fullViewFromInfo(info) {
   let box = [0, 0, 1, 1];
   if (info.roi) {
@@ -944,17 +969,109 @@ function fullViewFromInfo(info) {
   return { box, split: box[0] + info.split_x * box[2] };
 }
 
+// Start quads: the saved ones, else the crop box cut at the split line, 5 %
+// inside the box, so no corner starts on the image edge (half a handle would
+// be cut off there, and harder to grab).
+function initialQuads(info) {
+  if (info.quads) {
+    const q = {};
+    for (const side of ['left', 'right']) q[side] = info.quads[side].map(p => flipPoint(p, info));
+    return q;
+  }
+  const { box: [bx, by, bw, bh], split } = fullViewFromInfo(info);
+  const mx = bw * 0.05, my = bh * 0.05;
+  const rect = (x0, x1) => [[x0, by + my], [x1, by + my], [x1, by + bh - my], [x0, by + bh - my]];
+  return { left: rect(bx + mx, split - mx / 2), right: rect(split + mx / 2, bx + bw - mx) };
+}
+
+function loadBoards() {
+  const names = (_cameraInfo && _cameraInfo.boards) || { left: 'split72_left', right: 'split72_right' };
+  return Promise.all(['left', 'right'].map(side => {
+    document.getElementById('camera-pcb-' + side).src = `/static/pcb/${names[side]}.svg`;
+    if (_boards[side]) return null;
+    return fetch(`/static/pcb/${names[side]}.json`).then(r => r.json())
+      .then(b => { _boards[side] = { width_mm: b.width_mm, height_mm: b.height_mm }; });
+  }));
+}
+
+// The projective map taking four src points to four dst points (h[8] = 1).
+function homography(src, dst) {
+  const a = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i], [u, v] = dst[i];
+    a.push([x, y, 1, 0, 0, 0, -u * x, -u * y, u]);
+    a.push([0, 0, 0, x, y, 1, -v * x, -v * y, v]);
+  }
+  for (let c = 0; c < 8; c++) {
+    let piv = c;
+    for (let r = c + 1; r < 8; r++) if (Math.abs(a[r][c]) > Math.abs(a[piv][c])) piv = r;
+    if (Math.abs(a[piv][c]) < 1e-12) return null;
+    [a[c], a[piv]] = [a[piv], a[c]];
+    for (let r = 0; r < 8; r++) {
+      if (r === c) continue;
+      const f = a[r][c] / a[c][c];
+      for (let k = c; k < 9; k++) a[r][k] -= f * a[c][k];
+    }
+  }
+  return [...a.map((row, i) => row[8] / row[i]), 1];
+}
+
+function isConvex(q) {
+  const t = q.map((p, i) => {
+    const a = q[(i + 1) % 4], b = q[(i + 2) % 4];
+    return (a[0] - p[0]) * (b[1] - p[1]) - (a[1] - p[1]) * (b[0] - p[0]);
+  });
+  return t.every(v => v > 0) || t.every(v => v < 0);
+}
+
+function insideQuad(q, [x, y]) {
+  const t = q.map((p, i) => {
+    const a = q[(i + 1) % 4];
+    return (a[0] - p[0]) * (y - p[1]) - (a[1] - p[1]) * (x - p[0]);
+  });
+  return t.every(v => v >= 0) || t.every(v => v <= 0);
+}
+
+// Warp a board outline image onto four corners given in frame pixels.
+function placeOutline(side, corners) {
+  const el = document.getElementById('camera-pcb-' + side);
+  const b = _boards[side];
+  const h = b && homography([[0, 0], [b.width_mm, 0], [b.width_mm, b.height_mm], [0, b.height_mm]], corners);
+  if (!h) { el.hidden = true; return; }
+  el.hidden = false;
+  el.style.width = b.width_mm + 'px';
+  el.style.height = b.height_mm + 'px';
+  el.style.transform = `matrix3d(${h[0]},${h[3]},0,${h[6]},${h[1]},${h[4]},0,${h[7]},0,0,1,0,${h[2]},${h[5]},0,${h[8]})`;
+}
+
+function hideOutlines() {
+  ['left', 'right'].forEach(side => { document.getElementById('camera-pcb-' + side).hidden = true; });
+  document.querySelectorAll('.camera-handle').forEach(el => { el.hidden = true; });
+}
+
+// The saved quads on the cropped live view (no handles).
+function drawSavedQuads() {
+  const img = document.getElementById('camera-img');
+  const { x0, y0, pw, ph } = paintedRect(img);
+  for (const side of ['left', 'right']) {
+    const pts = _cameraInfo.quads[side].map(p => sensorToOutput(p, _cameraInfo))
+      .map(([u, v]) => [x0 + u * pw, y0 + v * ph]);
+    placeOutline(side, pts);
+  }
+  document.querySelectorAll('.camera-handle').forEach(el => { el.hidden = true; });
+}
+
 function adjustHint() {
   if (!_adjust) return '';
-  return _adjust.step === 'box'
-    ? 'Step 1 of 2: drag a box around both halves (full camera view shown).'
-    : 'Step 2 of 2: tap the gap between the halves. Drag again to redraw the box.';
+  const bad = ['left', 'right'].filter(s => !isConvex(_adjust.quads[s]));
+  return bad.length
+    ? `The ${bad.join(' and ')} outline is twisted: drag its corners back into order.`
+    : 'Drag each corner until the outline lies on its board; drag inside an outline to move it. Then Save.';
 }
 
 function startAdjust() {
   if (!_cameraInfo) return;
-  const v = fullViewFromInfo(_cameraInfo);
-  _adjust = { step: 'box', box: v.box, split: v.split, drag: null, ready: false };
+  _adjust = { quads: initialQuads(_cameraInfo), drag: null, ready: false };
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
   _cameraGen++;          // drop any cropped snapshot still in flight
   clearCameraImage();    // and the one on screen: the editor works on the full frame only
@@ -962,7 +1079,9 @@ function startAdjust() {
   document.getElementById('camera-adjust-buttons').hidden = false;
   document.getElementById('btn-adjust-reset').disabled = !_cameraInfo.view_override;
   document.getElementById('btn-adjust-save').disabled = true;
-  document.getElementById('camera-msg').textContent = adjustHint();
+  document.getElementById('camera-msg').textContent = 'Loading the full camera view…';
+  loadBoards().then(() => { if (_adjust) drawAdjust(); })
+    .catch(e => { document.getElementById('camera-msg').textContent = 'Board outlines failed: ' + e; });
   refreshCamera();
 }
 
@@ -971,6 +1090,7 @@ function endAdjust() {
   document.getElementById('camera-adjust-buttons').hidden = true;
   document.getElementById('camera-view-buttons').hidden = false;
   document.getElementById('camera-box').hidden = true;
+  hideOutlines();
 }
 
 function cancelAdjust() {
@@ -980,22 +1100,22 @@ function cancelAdjust() {
 
 function drawAdjust() {
   const img = document.getElementById('camera-img');
-  const boxEl = document.getElementById('camera-box');
-  const split = document.getElementById('camera-split');
-  ['camera-tag-left', 'camera-tag-right'].forEach(id => { document.getElementById(id).hidden = true; });
-  if (!img.naturalWidth || !img.clientWidth) { boxEl.hidden = split.hidden = true; return; }
+  ['camera-tag-left', 'camera-tag-right', 'camera-split', 'camera-box']
+    .forEach(id => { document.getElementById(id).hidden = true; });
+  if (!img.naturalWidth || !img.clientWidth || !_adjust.ready) { hideOutlines(); return; }
   const { x0, y0, pw, ph } = paintedRect(img);
-  const [bx, by, bw, bh] = _adjust.box;
-  boxEl.hidden = false;
-  boxEl.style.left = (x0 + bx * pw) + 'px';
-  boxEl.style.top = (y0 + by * ph) + 'px';
-  boxEl.style.width = (bw * pw) + 'px';
-  boxEl.style.height = (bh * ph) + 'px';
-  split.hidden = _adjust.step !== 'split';
-  split.style.left = (x0 + _adjust.split * pw) + 'px';
-  split.style.top = (y0 + by * ph) + 'px';
-  split.style.height = (bh * ph) + 'px';
-  split.style.bottom = 'auto';
+  for (const side of ['left', 'right']) {
+    const pts = _adjust.quads[side].map(([x, y]) => [x0 + x * pw, y0 + y * ph]);
+    placeOutline(side, pts);
+    pts.forEach(([x, y], i) => {
+      const h = document.getElementById(`camera-handle-${side}-${i}`);
+      h.hidden = false;
+      h.style.left = x + 'px';
+      h.style.top = y + 'px';
+    });
+  }
+  document.getElementById('btn-adjust-save').disabled =
+    !['left', 'right'].every(s => isConvex(_adjust.quads[s]));
 }
 
 // Pointer position as a fraction of the full image, clamped to it.
@@ -1007,67 +1127,68 @@ function imageFraction(e) {
   return [Math.min(1, Math.max(0, fx)), Math.min(1, Math.max(0, fy))];
 }
 
-// The values exactly as they are sent: each box edge rounded once to 0.001,
-// sizes derived from the rounded edges (so x + w never exceeds 1), and split_x
-// from the rounded box. splitValid() checks these same numbers.
-function roundedView() {
-  const r = n => Math.round(n * 1000) / 1000;
-  const [bx, by, bw, bh] = _adjust.box;
-  const x0 = r(bx), y0 = r(by), x1 = r(Math.min(1, bx + bw)), y1 = r(Math.min(1, by + bh));
-  const w = r(x1 - x0), h = r(y1 - y0);
-  const full = x0 <= 0.001 && y0 <= 0.001 && x1 >= 0.999 && y1 >= 0.999;
-  // Mirroring a rounded box keeps it inside 0..1 (1 - x - w >= 0), so this
-  // stays valid for the server; r() only drops float noise.
-  const sensor = toFromSensor([x0, y0, w, h], _cameraInfo || {}).map(r);
-  return { roi: full ? '' : sensor.join(','),
-           split_x: full ? r(_adjust.split) : r((_adjust.split - x0) / w) };
+// The nearest corner within reach (28 px on screen), else the quad under the
+// pointer, else null.
+function pickTarget(e) {
+  const img = document.getElementById('camera-img');
+  const { pw, ph } = paintedRect(img);
+  const [fx, fy] = imageFraction(e);
+  let best = null, bestD = 28;
+  for (const side of ['left', 'right']) {
+    _adjust.quads[side].forEach(([x, y], i) => {
+      const d = Math.hypot((x - fx) * pw, (y - fy) * ph);
+      if (d < bestD) { bestD = d; best = { side, corner: i }; }
+    });
+  }
+  if (best) return best;
+  for (const side of ['left', 'right']) {
+    if (insideQuad(_adjust.quads[side], [fx, fy])) return { side, corner: -1 };
+  }
+  return null;
 }
 
-function splitValid() {
-  const { split_x } = roundedView();
-  return split_x > 0.05 && split_x < 0.95;
-}
+const _r3 = n => Math.round(n * 1000) / 1000;
 
 const _frame = document.getElementById('camera-frame');
 _frame.addEventListener('pointerdown', e => {
   if (!_adjust || !_adjust.ready || !document.getElementById('camera-img').naturalWidth) return;
+  const target = pickTarget(e);
+  if (!target) return;
   e.preventDefault();
   _frame.setPointerCapture(e.pointerId);
-  _adjust.drag = { start: imageFraction(e), moved: false };
+  _adjust.drag = { ...target, start: imageFraction(e),
+                   orig: _adjust.quads[target.side].map(p => p.slice()) };
 });
 _frame.addEventListener('pointermove', e => {
   if (!_adjust || !_adjust.drag) return;
-  const [sx, sy] = _adjust.drag.start, [x, y] = imageFraction(e);
-  if (Math.abs(x - sx) < 0.02 && Math.abs(y - sy) < 0.02 && !_adjust.drag.moved) return;
-  _adjust.drag.moved = true;
-  _adjust.box = [Math.min(sx, x), Math.min(sy, y), Math.abs(x - sx), Math.abs(y - sy)];
+  const d = _adjust.drag, [x, y] = imageFraction(e);
+  if (d.corner >= 0) {
+    _adjust.quads[d.side][d.corner] = [x, y];
+  } else {
+    // Move the whole quad, but keep every corner inside the image.
+    const xs = d.orig.map(p => p[0]), ys = d.orig.map(p => p[1]);
+    const dx = Math.min(1 - Math.max(...xs), Math.max(-Math.min(...xs), x - d.start[0]));
+    const dy = Math.min(1 - Math.max(...ys), Math.max(-Math.min(...ys), y - d.start[1]));
+    _adjust.quads[d.side] = d.orig.map(([px, py]) => [px + dx, py + dy]);
+  }
   drawAdjust();
 });
-_frame.addEventListener('pointerup', e => {
+_frame.addEventListener('pointerup', () => {
   if (!_adjust || !_adjust.drag) return;
-  const moved = _adjust.drag.moved;
   _adjust.drag = null;
-  if (moved) {
-    // A box smaller than 10 % of the view either way is a mis-touch: keep step 1.
-    if (_adjust.box[2] < 0.1 || _adjust.box[3] < 0.1) { _adjust.step = 'box'; }
-    else {
-      _adjust.step = 'split';
-      _adjust.split = _adjust.box[0] + _adjust.box[2] / 2;
-    }
-  } else if (_adjust.step === 'split') {
-    _adjust.split = imageFraction(e)[0];
-  }
-  document.getElementById('btn-adjust-save').disabled = !(_adjust.step === 'split' && splitValid());
-  document.getElementById('camera-msg').textContent = adjustHint() +
-    (_adjust.step === 'split' && !splitValid() ? ' The line must lie inside the box, away from its edges.' : '');
+  document.getElementById('camera-msg').textContent = adjustHint();
   drawAdjust();
 });
 
 function saveAdjust() {
-  if (!_adjust || !_adjust.ready || _adjust.step !== 'split' || !splitValid()) return;
-  const { roi, split_x } = roundedView();
+  if (!_adjust || !_adjust.ready) return;
+  if (!['left', 'right'].every(s => isConvex(_adjust.quads[s]))) return;
+  const quads = {};
+  for (const side of ['left', 'right']) {
+    quads[side] = _adjust.quads[side].map(p => flipPoint(p, _cameraInfo).map(_r3));
+  }
   openLog();
-  socket.emit('camera_set_view', { roi, split_x });
+  socket.emit('camera_set_view', { quads });
 }
 
 function resetAdjust() {

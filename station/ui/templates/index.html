@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=18">
+  <link rel="stylesheet" href="/static/style.css?v=19">
 </head>
 <body data-status="idle">
   <header>
@@ -86,6 +86,17 @@
           <span class="camera-tag" id="camera-tag-left" hidden></span>
           <span class="camera-tag" id="camera-tag-right" hidden></span>
           <div id="camera-box" hidden></div>
+          <!-- "Adjust view": each board's outline warped into four draggable corners. -->
+          <img class="camera-pcb" id="camera-pcb-left" alt="" hidden>
+          <img class="camera-pcb" id="camera-pcb-right" alt="" hidden>
+          <div class="camera-handle" id="camera-handle-left-0" hidden></div>
+          <div class="camera-handle" id="camera-handle-left-1" hidden></div>
+          <div class="camera-handle" id="camera-handle-left-2" hidden></div>
+          <div class="camera-handle" id="camera-handle-left-3" hidden></div>
+          <div class="camera-handle" id="camera-handle-right-0" hidden></div>
+          <div class="camera-handle" id="camera-handle-right-1" hidden></div>
+          <div class="camera-handle" id="camera-handle-right-2" hidden></div>
+          <div class="camera-handle" id="camera-handle-right-3" hidden></div>
         </div>
         <p id="camera-msg">Loading camera…</p>
         <p id="camera-sharp" title="Variance of the Laplacian of the snapshot. Turn the lens until the number peaks; keep the camera and the scene still meanwhile."></p>
@@ -93,9 +104,9 @@
           <button class="btn btn-gray btn-sm" onclick="refreshCamera()">&#x21BB; Refresh</button>
           <label class="chk chk-sm"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (2 s)</label>
           <button class="btn btn-blue btn-sm" id="btn-adjust-view" onclick="startAdjust()"
-                  title="Draw the crop and the split line on the full camera image">Adjust view</button>
+                  title="Fit one PCB outline per half on the full camera image">Adjust view</button>
         </div>
-        <!-- "Adjust view": step 1 drag a box around both halves, step 2 tap the gap. -->
+        <!-- "Adjust view": drag the corners of each outline onto its board. -->
         <div class="button-row camera-buttons" id="camera-adjust-buttons" hidden>
           <button class="btn btn-green btn-sm" id="btn-adjust-save" onclick="saveAdjust()" disabled>Save</button>
           <button class="btn btn-amber btn-sm" id="btn-adjust-reset" onclick="resetAdjust()"
@@ -166,6 +177,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=25"></script>
+  <script src="/static/app.js?v=26"></script>
 </body>
 </html>
