@@ -60,8 +60,6 @@ class CapsFromImageTest(unittest.TestCase):
         self.assertNotEqual(caps_from_image(IMAGE)["fw"], "0.15.4")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class RequireIdentityTest(unittest.TestCase):
@@ -106,3 +104,7 @@ class RequireIdentityTest(unittest.TestCase):
         _, sent, logs = self._run(False)
         self.assertIn(0x40, sent)
         self.assertTrue(any("skipping the version cross-check" in line for line in logs))
+
+
+if __name__ == "__main__":
+    unittest.main()
