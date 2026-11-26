@@ -746,7 +746,7 @@ class QuadTest(unittest.TestCase):
         self.assertEqual(q[0][1], (0.45, 0.1))
         bow_tie = [[0.1, 0.1], [0.4, 0.9], [0.4, 0.1], [0.1, 0.9]]
         for bad, word in (({"left": bow_tie, "right": RIGHT_Q}, "convex"),
-                          ({"left": LEFT_Q, "right": [[0, 0], [1.2, 0], [1, 1], [0, 1]]}, "0..1"),
+                          ({"left": LEFT_Q, "right": [[0, 0], [float("nan"), 0], [1, 1], [0, 1]]}, "finite"),
                           ({"left": LEFT_Q[:3], "right": RIGHT_Q}, "4 corners"),
                           ({"left": LEFT_Q}, "left and right"),
                           ({"left": LEFT_Q, "right": [[0, "x"]] * 4}, "pairs")):
@@ -889,6 +889,20 @@ class QuadTest(unittest.TestCase):
                 "right": [[0.51, 0.0], [1.0, 0.0], [1.0, 1.0], [0.51, 1.0]]}
         res = camera.analyse(synth(300.0), CameraSettings.from_config({"lens_k": -0.3, "quads": full}))
         self.assertAlmostEqual(res.offset_ms, 300.0, delta=6.0)
+
+    def test_corners_may_leave_0_1_where_the_camera_still_sees_them(self):
+        # Barrel correction pulls the straightened view's edges outwards: a corner
+        # at x = -0.05 is seen inside the frame at k = -0.2, not at k = 0.
+        wide = {"left": [[-0.05, 0.2], [0.45, 0.2], [0.45, 0.8], [-0.05, 0.8]], "right": RIGHT_Q}
+        self.assertTrue(camera.visible((-0.05, 0.2), -0.2))
+        self.assertFalse(camera.visible((-0.05, 0.2), 0.0))
+        s = CameraSettings.from_config({"lens_k": -0.2, "quads": wide})
+        roi, _ = camera.view_from_quads(s.quads, s)
+        self.assertGreaterEqual(float(roi.split(",")[0]), 0.0)
+        with self.assertRaisesRegex(ValueError, "outside the camera image"):
+            CameraSettings.from_config({"quads": wide})
+        # Beyond the radius where the model folds back, a corner is refused too.
+        self.assertFalse(camera.visible((-0.6, -0.6), -0.3))
 
     def test_overlapping_quads_split_between_their_centres(self):
         q = camera.parse_quads({"left": [[0.1, 0.1], [0.6, 0.1], [0.6, 0.9], [0.1, 0.9]],
