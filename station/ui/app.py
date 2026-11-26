@@ -634,12 +634,13 @@ def list_firmware_bins():
                 caps = caps_from_image(p.read_bytes())
             except OSError:
                 continue
-            bins.append({"name": p.name, "size": st.st_size,
+            bins.append({"name": p.name, "size": st.st_size, "_mtime": st.st_mtime,
                          "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc)
                                           .isoformat(timespec="seconds"),
                          "fw": caps["fw"] if caps else None,
                          "board": caps["board"] if caps else None})
-    bins.sort(key=lambda b: b["mtime"], reverse=True)
+    # Sort on the exact st_mtime; the ISO string is rounded to whole seconds.
+    bins.sort(key=lambda b: b.pop("_mtime"), reverse=True)
 
     running, note = None, ""
     if _status["value"] not in ("idle", "error"):

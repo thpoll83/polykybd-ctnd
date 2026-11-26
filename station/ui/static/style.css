@@ -686,3 +686,6 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 .phase-hist-row .chip { flex: 0 0 44px; font-size: 9px; }
 .phase-hist-offset { flex: 0 0 76px; white-space: nowrap; text-align: right; color: #ddd; font-variant-numeric: tabular-nums; }
 .phase-hist-what { flex: 1; min-width: 0; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* An img with no picture draws a broken-image icon and its alt text: keep it
+   hidden until a snapshot has been set, also after a failed request. */
+#camera-img:not([src]) { visibility: hidden; }

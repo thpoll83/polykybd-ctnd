@@ -552,7 +552,11 @@ function openCamera() {
       refreshCamera();
       cameraLive();
     })
-    .catch(e => { if (gen === _cameraGen) msg.textContent = 'Camera info failed: ' + e; });
+    .catch(e => {
+      if (gen !== _cameraGen) return;
+      msg.textContent = 'Camera info failed: ' + e;
+      setCameraLoading(false);
+    });
 }
 
 // Put the split line and the labels on the PAINTED image. object-fit: contain
@@ -609,6 +613,9 @@ function refreshCamera() {
     .catch(e => {
       if (gen !== _cameraGen || adjusting !== _adjust) return;
       msg.textContent = 'Snapshot: ' + e.message;
+      // Stop the spinner unless an image is already shown; a retry or the live
+      // refresh starts it again by loading.
+      if (!document.getElementById('camera-img').hasAttribute('src')) setCameraLoading(false);
       // The editor needs the full frame; a live capture may hold the camera briefly.
       if (adjusting && !adjusting.ready) setTimeout(() => {
         if (gen === _cameraGen && adjusting === _adjust) refreshCamera();
@@ -787,6 +794,7 @@ function showSharpness() {
 document.getElementById('camera-img').addEventListener('load', placeCameraOverlay);
 document.getElementById('camera-img').addEventListener('load', showSharpness);
 document.getElementById('camera-img').addEventListener('load', () => setCameraLoading(false));
+document.getElementById('camera-img').addEventListener('error', () => setCameraLoading(false));
 // The image box changes size after load (the sharpness line appears below it,
 // the log drawer opens): place the split line and labels again each time.
 if (window.ResizeObserver) new ResizeObserver(() => placeCameraOverlay()).observe(document.getElementById('camera-img'));
@@ -977,13 +985,17 @@ socket.on('camera_view', ({ ok, error }) => {
    version built into it and its date. When the rig was idle, the server also
    asked the keyboard which version it runs; matching images are marked ✓ and
    the newest one is preselected (the measurement refuses other versions). */
+let _binsSeq = 0;   // a reply from an older loadPhaseBins() call is dropped
+
 function loadPhaseBins() {
   const sel = document.getElementById('phase-bin');
   const note = document.getElementById('phase-bin-note');
-  const prev = sel.value;
+  const seq = ++_binsSeq;
   fetch('/firmware/bins')
     .then(r => r.json())
     .then(({ bins, running, running_note }) => {
+      if (seq !== _binsSeq) return;
+      const prev = sel.value;   // read now: the operator may have chosen while the HID query ran
       sel.replaceChildren();
       const first = document.createElement('option');
       first.value = '';
@@ -1004,7 +1016,7 @@ function loadPhaseBins() {
         ? `Keyboard runs ${running}` + (pick ? ' — matching image selected.' : ' — no image with that version here.')
         : (running_note ? `Running version unknown: ${running_note}.` : '');
     })
-    .catch(() => { note.textContent = 'Could not list the .bin files.'; });
+    .catch(() => { if (seq === _binsSeq) note.textContent = 'Could not list the .bin files.'; });
 }
 
 function quitApp() { window.close(); }
