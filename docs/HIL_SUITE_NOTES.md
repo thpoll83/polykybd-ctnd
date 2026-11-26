@@ -116,8 +116,8 @@ and relative links were adjusted to suit a standalone file.
       provokes `ai: refused card segment`, so a console that does not show the `ai:`
       lines fails instead of passing.
   - The **key attention** test (`test_key_attention`, cmd 47, `min_protocol: 32`;
-    packer `station/key_attention.py`). The rig has no camera, so the ripple is not
-    observable; this checks the command. A START on split72 key (1, 1) is ACKed, the
+    packer `station/key_attention.py`). The rig camera does not check the ripple yet;
+    this checks the command. A START on split72 key (1, 1) is ACKed, the
     period is ACKed at 23 and 100 and NACKed at 22 and 101, op 2, row 255, col 8 and
     the key without a display (3, 7) are NACKed, and a START until cancelled and
     CANCEL are ACKed. GET_ID must answer afterwards. Ends with CANCEL in a `finally`.
@@ -642,6 +642,31 @@ and relative links were adjusted to suit a standalone file.
   published a baseline for it, and a threshold guessed from the source is how a
   check becomes flaky and then ignored. Read the logged medians across a few runs,
   then promote it (tracked in `docs/FUTURE_TESTS.md`).
+
+## The RGB phase check (camera, report-only)
+
+`station/camera.py`, run by `TestRunner.rgb_phase_check()` right after the HID stage+verify.
+While the firmware stages an image, both halves show the breathing flash cue
+(`keys_com/rgb.c`, a 2048 ms triangle). `stage_and_verify(on_begin=…)` starts an 8 s
+recording once BEGIN succeeds. The analysis finds the pixels that breathe on each side of
+`camera.split_x`, builds one brightness trace per half, and reports the lag with the highest
+cross-correlation within one period. A positive offset means the slave lags the master.
+
+- `pass`: offset within 35 ms (two frames at 58 fps).
+- `xfail`: a larger offset. The cue takes its phase from `timer_read32()`, the local clock
+  of each half, so the halves differ by their boot-time difference mod 2048 ms. Promote
+  this to `fail` once the firmware uses `sync_timer_read32()` there.
+- `skip`: no camera (`camera.enabled: auto` and `rpicam-hello --list-cameras` finds none),
+  staging failed before BEGIN, the `camera:` block in `config.yaml` is invalid (the
+  reason names the value), or the camera saw too little breathing on one half: swing
+  below 3 luma units, a trace that does not repeat after one 2048 ms period
+  (periodicity below 0.6, for example a one-off room-light change), or correlation
+  below 0.6. Check the framing in the UI:
+  More ··· → Camera shows the image with the `split_x` line and the master/slave labels.
+
+Capture uses `rpicam-vid` raw YUV into `/dev/shm`, with fixed exposure, gain and white
+balance from `config.yaml` (`camera:` block in `config/config.yaml.example`). It needs no
+new Python package and no sudo grant (the station user is in the `video` group).
 
 ## The bulk pipe (CDC serial next to raw HID)
 

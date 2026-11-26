@@ -178,7 +178,8 @@ def _get_version(link: _FwLink, log: Callable[[str], None]) -> dict | None:
 
 def stage_and_verify(bin_path: str, log: Callable[[str], None],
                      vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
-                     require_signed: bool = False) -> bool:
+                     require_signed: bool = False,
+                     on_begin: Callable[[], None] | None = None) -> bool:
     """Run BEGIN -> CHUNK* -> COMMIT for ``bin_path`` against the live keyboard.
 
     Returns True iff COMMIT ACKs (the keyboard's accumulated CRC matched the
@@ -189,6 +190,10 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
     fully exercised by the time COMMIT answers; the apply test sets it, because
     an image the keyboard will not accept is one it will never install, and
     reporting that as success would leave the apply step testing nothing.
+
+    ``on_begin`` runs once BEGIN has succeeded, when both halves show the flash
+    cue (the runner starts the camera recording there). An exception in it is
+    logged and does not stop the staging.
     """
     try:
         with open(bin_path, "rb") as f:
@@ -280,6 +285,11 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
                     "(disconnected / old firmware?)")
                 return False
         log("  BEGIN ok — staging erased on both halves")
+        if on_begin is not None:
+            try:
+                on_begin()
+            except Exception as exc:
+                log(f"  (on_begin hook failed: {exc})")
 
         # -- CHUNKs over the bulk pipe when the firmware has one (protocol 2+),
         #    else over HID. A pipe that stops hands the rest to HID from the
