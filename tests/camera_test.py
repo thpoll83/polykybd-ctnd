@@ -282,7 +282,37 @@ class LastResultTest(unittest.TestCase):
         for i in range(3):
             camera.save_last({"status": "pass", "n": i}, "ci", path=self.path)
         self.assertEqual(camera.load_last(self.path)["n"], 2)
-        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ["last.json"])
+        self.assertEqual([p.name for p in self.path.parent.iterdir() if p.suffix == ".tmp"], [])
+
+    def test_history_keeps_the_last_ten_newest_first_without_traces(self):
+        import os
+        rec = synth(300.0)
+        res, master, slave = camera.analyse_traces(rec, CameraSettings.from_config({}))
+        old = {k: os.environ.get(k) for k in ("GITHUB_SHA", "GITHUB_HEAD_REF", "GITHUB_REF_NAME")}
+        os.environ.update(GITHUB_SHA="0123456789abcdef", GITHUB_HEAD_REF="fix/cue")
+        try:
+            for i in range(12):
+                camera.save_last({**camera.judge(res), "n": i}, "ci", rec.timestamps_ms,
+                                 master, slave, path=self.path, fw=f"1.9.{i}")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        hist = camera.load_history(self.path.with_name(camera.HISTORY_PATH.name))
+        self.assertEqual(len(hist), camera.HISTORY_LEN)
+        self.assertEqual([h["fw"] for h in hist[:2]], ["1.9.11", "1.9.10"])   # newest first
+        self.assertEqual((hist[0]["commit"], hist[0]["ref"], hist[0]["source"]),
+                         ("0123456", "fix/cue", "ci"))
+        self.assertNotIn("traces", hist[0])
+        self.assertIn("traces", camera.load_last(self.path))   # the latest keeps its traces
+
+    def test_ui_measurement_has_no_commit(self):
+        camera.save_last({"status": "pass", "offset_ms": 3.0}, "ui", path=self.path, fw="1.9.4")
+        h = camera.load_history(self.path.with_name(camera.HISTORY_PATH.name))[0]
+        self.assertEqual((h["source"], h["fw"]), ("ui", "1.9.4"))
+        self.assertNotIn("commit", h)
 
     def test_write_failure_does_not_raise(self):
         # A path under a file cannot be created: save_last logs and returns.
@@ -484,12 +514,16 @@ class ViewOverrideTest(unittest.TestCase):
         got = {}
         camera._view_lock.acquire()   # a save is between the file write and SETTINGS
         t = threading.Thread(target=lambda: got.setdefault("s", camera.snapshot_settings(camera.SETTINGS)))
-        t.start()
-        t.join(0.2)
-        self.assertTrue(t.is_alive())   # the copy waits instead of reading half an update
-        camera.SETTINGS.roi, camera.SETTINGS.split_x = "0.1,0.3,0.8,0.4", 0.55
-        camera._view_lock.release()
-        t.join(2)
+        try:
+            t.start()
+            t.join(0.2)
+            self.assertTrue(t.is_alive())   # the copy waits instead of reading half an update
+            camera.SETTINGS.roi, camera.SETTINGS.split_x = "0.1,0.3,0.8,0.4", 0.55
+        finally:
+            # Release on every path, so a regression cannot leave the lock held
+            # for the tests that run after this one.
+            camera._view_lock.release()
+            t.join(2)
         self.assertEqual((got["s"].roi, got["s"].split_x), ("0.1,0.3,0.8,0.4", 0.55))
         self.assertIsNot(got["s"], camera.SETTINGS)
 

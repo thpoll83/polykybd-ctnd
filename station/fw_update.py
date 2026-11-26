@@ -176,6 +176,19 @@ def _get_version(link: _FwLink, log: Callable[[str], None]) -> dict | None:
     return {"version": version, "size": size, "crc": crc}
 
 
+def running_version(vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
+                    timeout_s: float = 3.0) -> dict | None:
+    """FW_UP_GET_VERSION (cmd 0x43) from the running keyboard: {"version",
+    "size", "crc"}, or None when it is not reachable. Read-only."""
+    link = _FwLink(vid, pid)
+    if not link.open(timeout_s=timeout_s):
+        return None
+    try:
+        return _get_version(link, lambda _m: None)
+    finally:
+        link.close()
+
+
 def stage_and_verify(bin_path: str, log: Callable[[str], None],
                      vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
                      require_signed: bool = False,

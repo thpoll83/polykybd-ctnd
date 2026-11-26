@@ -266,6 +266,27 @@ main {
 .ci-job-running .ci-job-label { color: #7ec87e; }
 .ci-job-queued  .ci-job-label { color: #FFD54F; }
 
+.ci-job-times {
+  font-size: 11px;
+  color: #9e9e9e;
+  font-variant-numeric: tabular-nums;
+}
+
+.ci-jobs-heading {
+  font-size: 12px;
+  color: #777;
+  margin: 10px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ci-job-done                      { background: #161616; border-color: #2e2e2e; }
+.ci-job-done .ci-job-label        { color: #9e9e9e; }
+.ci-result-success .ci-job-label  { color: #7ec87e; }
+.ci-result-failure .ci-job-label,
+.ci-result-timed_out .ci-job-label { color: #ef9a9a; }
+.ci-result-failure                { border-color: #5c1a1a; }
+
 /* ── Footer ── */
 /* ── Tabs ── */
 #tabs {
@@ -634,3 +655,37 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 #ci-jobs-list::-webkit-scrollbar-track { background: transparent; }
 #log-panel::-webkit-scrollbar-thumb,
 #ci-jobs-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+/* ── Camera image loading ── */
+#camera-frame[data-loading="true"] #camera-img { visibility: hidden; }
+#camera-frame { min-width: 200px; min-height: 150px; }
+#camera-spinner {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  border: 4px solid #333;
+  border-top-color: #4FC3F7;
+  border-radius: 50%;
+  animation: camera-spin 0.9s linear infinite;
+}
+#camera-frame[data-loading="true"] #camera-spinner { display: block; }
+@keyframes camera-spin { to { transform: rotate(360deg); } }
+
+#phase-bin-note { font-size: 11px; color: #888; line-height: 1.4; }
+.phase-measure select option.bin-other { color: #777; }
+
+/* ── Phase history ── */
+#phase-history-box[hidden] { display: none; }
+#phase-history-box h3 { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+#phase-history { max-height: 120px; overflow-y: auto; }
+.phase-hist-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
+.phase-hist-row .chip { flex: 0 0 44px; font-size: 9px; }
+.phase-hist-offset { flex: 0 0 76px; white-space: nowrap; text-align: right; color: #ddd; font-variant-numeric: tabular-nums; }
+.phase-hist-what { flex: 1; min-width: 0; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* An img with no picture draws a broken-image icon and its alt text: keep it
+   hidden until a snapshot has been set, also after a failed request. */
+#camera-img:not([src]) { visibility: hidden; }

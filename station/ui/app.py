@@ -568,26 +568,38 @@ def status():
     return jsonify({"status": _status["value"]})
 
 
+CI_FINISHED_SHOWN = 5   # finished runs kept in the Runner tab to look back at
+
+
+def _ci_job(run: dict) -> dict:
+    """The fields the Runner tab shows. created_at is when the run came in,
+    run_started_at when it started, updated_at when a finished run ended."""
+    return {
+        "id":             run.get("id"),
+        "name":           run.get("name"),
+        "run_number":     run.get("run_number"),
+        "status":         run.get("status"),
+        "conclusion":     run.get("conclusion"),
+        "head_branch":    run.get("head_branch"),
+        "event":          run.get("event"),
+        "html_url":       run.get("html_url"),
+        "created_at":     run.get("created_at"),
+        "run_started_at": run.get("run_started_at"),
+        "updated_at":     run.get("updated_at"),
+    }
+
+
 @app.route("/ci-jobs")
 def list_ci_jobs():
+    """Queued and running workflow runs, then the last CI_FINISHED_SHOWN finished ones."""
     if not GITHUB_REPO:
         return jsonify([])
     jobs = []
-    for status in ("queued", "in_progress"):
-        code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page=10")
+    for status, count in (("queued", 10), ("in_progress", 10), ("completed", CI_FINISHED_SHOWN)):
+        code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page={count}")
         if data is None:
             return jsonify({"error": "GitHub API failure", "status": code}), 502
-        for run in data.get("workflow_runs", []):
-            jobs.append({
-                "id":          run.get("id"),
-                "name":        run.get("name"),
-                "run_number":  run.get("run_number"),
-                "status":      run.get("status"),
-                "head_branch": run.get("head_branch"),
-                "event":       run.get("event"),
-                "html_url":    run.get("html_url"),
-                "created_at":  run.get("created_at"),
-            })
+        jobs.extend(_ci_job(run) for run in data.get("workflow_runs", []))
     return jsonify(jobs)
 
 
@@ -598,6 +610,55 @@ def list_firmware():
         return jsonify([])
     files = sorted(p.name for p in base.iterdir() if p.suffix.lower() in (".uf2", ".bin"))
     return jsonify(files)
+
+
+@app.route("/firmware/bins")
+def list_firmware_bins():
+    """The .bin images for "Measure phase now", newest first, each with the
+    firmware version compiled into it, plus the version the keyboard runs.
+
+    The running version is asked over HID only while neither the UI nor the CI
+    runner uses the rig, so the query cannot interleave with a test. Then
+    "running" is null and "running_note" says why.
+    """
+    from datetime import datetime, timezone
+    from station.fw_update import caps_from_image, running_version
+    base = Path(FIRMWARE_DIR)
+    bins = []
+    if base.exists():
+        for p in base.iterdir():
+            if p.suffix.lower() != ".bin" or not p.is_file():
+                continue
+            try:
+                st = p.stat()
+                caps = caps_from_image(p.read_bytes())
+            except OSError:
+                continue
+            bins.append({"name": p.name, "size": st.st_size, "_mtime": st.st_mtime,
+                         "mtime": datetime.fromtimestamp(st.st_mtime, timezone.utc)
+                                          .isoformat(timespec="seconds"),
+                         "fw": caps["fw"] if caps else None,
+                         "board": caps["board"] if caps else None})
+    # Sort on the exact st_mtime; the ISO string is rounded to whole seconds.
+    bins.sort(key=lambda b: b.pop("_mtime"), reverse=True)
+
+    running, note = None, ""
+    if _status["value"] not in ("idle", "error"):
+        note = f"rig busy ({_status['value']})"
+    elif _runner_state.get("status") == "busy":
+        note = "a CI job is running on the rig"
+    elif not _RIG_LOCK.acquire(blocking=False):
+        note = "rig busy"
+    else:
+        try:
+            v = running_version()
+            running = v["version"] if v else None
+            note = "" if v else "keyboard did not answer FW_UP_GET_VERSION"
+        except Exception as exc:
+            note = f"version query failed: {exc}"
+        finally:
+            _RIG_LOCK.release()
+    return jsonify({"bins": bins, "running": running, "running_note": note})
 
 
 @app.route("/camera/info")
@@ -618,6 +679,13 @@ def camera_last():
     from station import camera
     data = camera.load_last()
     return jsonify(data or {})
+
+
+@app.route("/camera/history")
+def camera_history():
+    """The last phase measurements (newest first) with firmware version and source."""
+    from station import camera
+    return jsonify(camera.load_history())
 
 
 @app.route("/camera/snapshot.jpg")

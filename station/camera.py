@@ -566,18 +566,91 @@ def _downsample(ts: list[float], values: list[float], n: int = CHART_POINTS):
     return [round(ts[i] - t0, 1) for i in idx], [round(values[i], 2) for i in idx]
 
 
+HISTORY_PATH = LAST_RESULT_PATH.with_name("camera_phase_history.json")
+HISTORY_LEN = 10   # measurements kept to compare builds (e.g. a release against a fix)
+_HISTORY_KEYS = ("time", "source", "fw", "commit", "ref", "status", "offset_ms", "reason", "info")
+
+
+def _append_history(entry: dict, path: Path) -> None:
+    """Append one summary (no traces) and keep the newest HISTORY_LEN.
+
+    The CI runner and the UI are separate processes, so the read-modify-write
+    runs under an flock on a lock file next to the history.
+    """
+    import fcntl
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            hist = json.loads(path.read_text())
+            if not isinstance(hist, list):
+                hist = []
+        except (OSError, ValueError):
+            hist = []
+        hist.append({k: entry[k] for k in _HISTORY_KEYS if k in entry})
+        hist = hist[-HISTORY_LEN:]
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(hist))
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+
+def load_history(path: Path | None = None) -> list:
+    """Newest first."""
+    path = LAST_RESULT_PATH.with_name(HISTORY_PATH.name) if path is None else path
+    try:
+        hist = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    return list(reversed(hist)) if isinstance(hist, list) else []
+
+
+def image_fw(bin_path: str | None) -> str | None:
+    """The firmware version in an image's GET_ID literal, or None."""
+    if not bin_path:
+        return None
+    from .fw_update import caps_from_image   # needs hid; keep the import lazy
+    try:
+        with open(bin_path, "rb") as f:
+            caps = caps_from_image(f.read())
+    except OSError:
+        return None
+    return caps["fw"] if caps else None
+
+
 def save_last(record: dict, source: str, ts: list[float] | None = None,
               master: list[float] | None = None, slave: list[float] | None = None,
-              path: Path | None = None) -> dict:
+              path: Path | None = None, fw: str | None = None,
+              history_path: Path | None = None) -> dict:
     """Write the result record (and the traces, when there are any) atomically,
-    and return what was written (also when the write failed).
+    append its summary to the history, and return what was written (also when
+    a write failed).
+
+    ``fw`` is the firmware version of the staged image. A CI run also records
+    the commit and branch from the Actions environment.
 
     Never raises: the UI view is a convenience, and a write failure must not
     change a test result.
     """
     path = LAST_RESULT_PATH if path is None else path
+    # The history always sits next to the result file (tests point both at a temp dir).
+    history_path = history_path or path.with_name(HISTORY_PATH.name)
     data = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "source": source, **record}
+    if fw:
+        data["fw"] = fw
+    if source == "ci" and os.environ.get("GITHUB_SHA"):
+        data["commit"] = os.environ["GITHUB_SHA"][:7]
+        ref = os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME")
+        if ref:
+            data["ref"] = ref
     if ts and master and slave:
         t, m = _downsample(ts, master)
         _, sl = _downsample(ts, slave)
@@ -599,6 +672,10 @@ def save_last(record: dict, source: str, ts: list[float] | None = None,
             raise
     except OSError as exc:
         logging.getLogger("polykybd-ctnd").warning("could not save the camera result: %s", exc)
+    try:
+        _append_history(data, history_path)
+    except OSError as exc:
+        logging.getLogger("polykybd-ctnd").warning("could not append the camera history: %s", exc)
     return data
 
 
@@ -624,7 +701,8 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
     if not ok:
         # Saved like any other outcome, so the panel never keeps showing an
         # older measurement after this one could not run.
-        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
+        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui",
+                         fw=image_fw(bin_path))
     # One copy for the whole measurement: a view saved meanwhile (Adjust view
     # changes SETTINGS in place) must not split frames captured with the old crop.
     settings = snapshot_settings(settings)
@@ -637,7 +715,8 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
         why = f"camera recording failed: {exc}"
         if not staged:
             why += " (the HID staging failed too, see the log)"
-        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
+        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui",
+                         fw=image_fw(bin_path))
     if not staged:
         # The recording may be fine, but the staging it belongs to was refused
         # or broke off (version mismatch, transfer, COMMIT). Report that, with
@@ -645,5 +724,6 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
         return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip",
                           "reason": "the HID staging failed (see the log), so this "
                                     "measurement is not used: " + judge(res).get("info", "")},
-                         "ui", recording.timestamps_ms, master, slave)
-    return save_last(judge(res), "ui", recording.timestamps_ms, master, slave)
+                         "ui", recording.timestamps_ms, master, slave, fw=image_fw(bin_path))
+    return save_last(judge(res), "ui", recording.timestamps_ms, master, slave,
+                     fw=image_fw(bin_path))
