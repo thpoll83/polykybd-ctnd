@@ -125,8 +125,9 @@ main {
 
 #log-panel {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 10px 16px;
+  padding: 4px 0;
   scroll-behavior: smooth;
 }
 
@@ -141,18 +142,12 @@ main {
   -webkit-user-select: text;
 }
 
-#ci-jobs-panel {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px 16px;
-}
-
 #camera-panel {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 8px 16px;
   overflow: hidden;
 }
 
@@ -263,12 +258,167 @@ main {
 .ci-job-queued  .ci-job-label { color: #FFD54F; }
 
 /* ── Footer ── */
-footer {
+/* ── Tabs ── */
+#tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 16px 0;
   background: #111;
-  border-top: 1px solid #2e2e2e;
-  padding: 10px 16px 12px;
+  border-bottom: 1px solid #2e2e2e;
   flex-shrink: 0;
 }
+
+.tab {
+  flex: 1;
+  height: 46px;
+  border: 1px solid #2e2e2e;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: #1c1c1c;
+  color: #9e9e9e;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tab.active { background: #131313; color: #fff; border-color: #444; }
+
+.tab-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 16px;
+}
+
+/* Higher specificity than .tab-panel so [hidden] wins over display:flex. */
+.tab-panel[hidden] { display: none; }
+
+.placeholder { color: #666; font-size: 13px; padding: 12px 0; }
+
+/* ── Test results ── */
+#results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.result-head { font-size: 15px; font-weight: 700; padding: 4px 0 8px; }
+.result-head.st-pass { color: #7ec87e; }
+.result-head.st-fail { color: #ef9a9a; }
+
+.result-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid #222;
+  font-size: 13px;
+}
+
+.result-name { flex: 0 1 auto; color: #e0e0e0; }
+.result-note { flex: 1; color: #888; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.chip {
+  flex: 0 0 52px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 2px 0;
+  border-radius: 4px;
+  background: #333;
+  color: #ddd;
+}
+
+.chip.st-pass  { background: #1B4D1B; color: #a5d6a7; }
+.chip.st-fail  { background: #7B1212; color: #ffcdd2; }
+.chip.st-skip  { background: #37474F; color: #cfd8dc; }
+.chip.st-xfail { background: #4a3a00; color: #ffe082; }
+.chip.st-xpass { background: #4a2800; color: #ffcc80; }
+
+/* ── Hardware cards ── */
+.hw-cards { display: flex; gap: 12px; }
+
+.hw-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: #1a1a1a;
+  border: 1px solid #2e2e2e;
+  border-radius: 10px;
+}
+
+.hw-card h2 { font-size: 15px; color: #fff; }
+.hw-role { font-size: 12px; color: #888; font-weight: 400; margin-left: 6px; }
+.hw-card .btn { flex: 0 0 auto; }
+
+/* ── Camera tab ── */
+#tab-camera { flex-direction: row; }
+
+#phase-panel {
+  flex: 0 0 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+#phase-panel h2 { font-size: 14px; color: #fff; }
+#phase-last { flex: 0 0 auto; }
+.phase-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
+.phase-offset { font-size: 30px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; padding: 4px 0; }
+.phase-detail { font-size: 11px; color: #888; line-height: 1.4; max-height: 64px; overflow: hidden; }
+
+#phase-chart { width: 100%; height: 90px; background: #0e0e0e; border: 1px solid #2a2a2a; border-radius: 6px; }
+#phase-chart[hidden], .chart-legend[hidden] { display: none; }
+.chart-legend { font-size: 11px; color: #777; }
+.lg-master { color: #4FC3F7; font-weight: 700; }
+.lg-slave  { color: #FFB74D; font-weight: 700; }
+
+.phase-measure { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+.phase-measure select {
+  height: 38px;
+  background: #222;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-size: 13px;
+  padding: 0 8px;
+}
+.phase-measure .btn { flex: 0 0 auto; }
+
+.camera-buttons { margin-top: 6px; }
+.camera-buttons .btn { flex: 0 0 120px; }
+.chk.chk-sm { height: 42px; font-size: 13px; }
+.chk.chk-sm input { width: 18px; height: 18px; }
+
+/* ── Runner tab ── */
+#ci-jobs-list { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* ── Log tab and the newest-line strip ── */
+#log-strip {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  background: #111;
+  border-top: 1px solid #2e2e2e;
+  font-family: 'Courier New', 'Lucida Console', monospace;
+  font-size: 12px;
+  color: #7ec87e;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+#log-last { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .firmware-row {
   display: flex;
@@ -382,8 +532,6 @@ footer {
 .btn-reset[data-state="released"]:hover:not(:disabled) { background: #455A64; }
 .btn-reset[data-state="asserted"]:hover:not(:disabled) { background: #5c1a1a; }
 
-.more-nav { margin-top: 8px; }
-
 .btn-red { background: #7B1212; }
 .btn-red:hover:not(:disabled) { background: #9C2020; }
 
@@ -399,6 +547,7 @@ footer {
 body[data-status="idle"]           .status-dot { background: #4CAF50; }
 body[data-status="flashing-left"]  .status-dot,
 body[data-status="flashing-right"] .status-dot { background: #FF9800; animation: pulse 1s infinite; }
+body[data-status="measuring"]      .status-dot { background: #00897B; animation: pulse 1s infinite; }
 body[data-status="testing"]        .status-dot { background: #2196F3; animation: pulse 1s infinite; }
 body[data-status="registering"]    .status-dot { background: #E65100; animation: pulse 1s infinite; }
 body[data-status="error"]          .status-dot { background: #f44336; }
@@ -433,8 +582,9 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 
 /* ── Scrollbar ── */
 #log-panel::-webkit-scrollbar,
-#ci-jobs-panel::-webkit-scrollbar { width: 4px; }
+#results::-webkit-scrollbar,
+#ci-jobs-list::-webkit-scrollbar { width: 4px; }
 #log-panel::-webkit-scrollbar-track,
-#ci-jobs-panel::-webkit-scrollbar-track { background: transparent; }
+#ci-jobs-list::-webkit-scrollbar-track { background: transparent; }
 #log-panel::-webkit-scrollbar-thumb,
-#ci-jobs-panel::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+#ci-jobs-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }

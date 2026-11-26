@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=5">
+  <link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body data-status="idle">
   <header>
@@ -23,26 +23,19 @@
     <span class="clock" id="clock"></span>
   </header>
 
-  <main>
-    <div id="log-panel">
-      <div id="log-output"></div>
-    </div>
-    <div id="ci-jobs-panel" hidden>
-      <div id="ci-jobs-list"><p class="no-jobs">Loading CI jobs…</p></div>
-    </div>
-    <div id="camera-panel" hidden>
-      <div id="camera-frame">
-        <img id="camera-img" alt="rig camera">
-        <div id="camera-split"></div>
-        <span class="camera-tag" id="camera-tag-left"></span>
-        <span class="camera-tag" id="camera-tag-right"></span>
-      </div>
-      <p id="camera-msg">Loading camera…</p>
-    </div>
-  </main>
+  <!-- One tab per mode. showTab() in app.js switches the sections below and
+       remembers the last tab in localStorage. -->
+  <nav id="tabs">
+    <button class="tab" data-tab="test"     onclick="showTab('test')">Test</button>
+    <button class="tab" data-tab="hardware" onclick="showTab('hardware')">Hardware</button>
+    <button class="tab" data-tab="camera"   onclick="showTab('camera')">Camera</button>
+    <button class="tab" data-tab="runner"   onclick="showTab('runner')">Runner</button>
+    <button class="tab" data-tab="log"      onclick="showTab('log')">Log</button>
+  </nav>
 
-  <footer>
-    <div id="main-controls">
+  <main>
+    <!-- ── Test: firmware, flash, run, results ── -->
+    <section class="tab-panel" id="tab-test" hidden>
       <div class="firmware-row">
         <label>Left</label>
         <select id="left-fw"><option value="">— select firmware —</option></select>
@@ -58,51 +51,91 @@
           <input type="checkbox" id="extended-tests"> Extended
         </label>
         <button class="btn btn-teal"  id="btn-perf"        onclick="runPerf()" title="Flash the selected PROFILING firmware pair and measure main-loop timing, overlay cost and HID latency">Measure Perf</button>
-        <button class="btn btn-gray"  id="btn-copy"        onclick="copyLog()">Copy Log</button>
-        <button class="btn btn-gray"                       onclick="clearLog()">Clear Log</button>
-        <button class="btn btn-gray"                       onclick="openRunner()">Runner ···</button>
-        <button class="btn btn-gray"                       onclick="openMore()">More ···</button>
       </div>
-    </div>
+      <div id="results"><p class="placeholder">No test run yet. Results appear here, one row per test.</p></div>
+    </section>
 
-    <div id="runner-panel" hidden>
+    <!-- ── Hardware: one card per half ── -->
+    <section class="tab-panel" id="tab-hardware" hidden>
+      <div class="hw-cards">
+        <div class="hw-card">
+          <h2>Left half <span class="hw-role">master (USB)</span></h2>
+          <button class="btn btn-usb"     id="btn-usb-left"     data-state="unknown"  onclick="toggleUsb('left')">L: USB ?</button>
+          <button class="btn btn-bootsel" id="btn-bootsel-left" data-state="released" onclick="toggleBootsel('left')">L: BOOTSEL</button>
+          <button class="btn btn-reset"   id="btn-reset-left"   data-state="released" onclick="toggleRun('left')">L: Reset</button>
+        </div>
+        <div class="hw-card">
+          <h2>Right half <span class="hw-role">slave</span></h2>
+          <button class="btn btn-usb"     id="btn-usb-right"     data-state="unknown"  onclick="toggleUsb('right')">R: USB ?</button>
+          <button class="btn btn-bootsel" id="btn-bootsel-right" data-state="released" onclick="toggleBootsel('right')">R: BOOTSEL</button>
+          <button class="btn btn-reset"   id="btn-reset-right"   data-state="released" onclick="toggleRun('right')">R: Reset</button>
+        </div>
+      </div>
+      <div class="button-row">
+        <button class="btn btn-gray" id="btn-hand-left"  onclick="setHandedness(true)"  title="Tell the USB/master half it is the LEFT half (slave = right); keyboard reboots">Handedness: USB = Left</button>
+        <button class="btn btn-gray" id="btn-hand-right" onclick="setHandedness(false)" title="Tell the USB/master half it is the RIGHT half (slave = left); keyboard reboots">Handedness: USB = Right</button>
+      </div>
+    </section>
+
+    <!-- ── Camera: live view, last phase result, measure now ── -->
+    <section class="tab-panel" id="tab-camera" hidden>
+      <div id="camera-panel">
+        <div id="camera-frame">
+          <img id="camera-img" alt="rig camera">
+          <div id="camera-split" hidden></div>
+          <span class="camera-tag" id="camera-tag-left" hidden></span>
+          <span class="camera-tag" id="camera-tag-right" hidden></span>
+        </div>
+        <p id="camera-msg">Loading camera…</p>
+        <div class="button-row camera-buttons">
+          <button class="btn btn-gray btn-sm" onclick="refreshCamera()">&#x21BB; Refresh</button>
+          <label class="chk chk-sm"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (2 s)</label>
+        </div>
+      </div>
+      <aside id="phase-panel">
+        <h2>RGB phase between the halves</h2>
+        <div id="phase-last"><p class="placeholder">No measurement yet.</p></div>
+        <svg id="phase-chart" viewBox="0 0 300 90" preserveAspectRatio="none" hidden>
+          <polyline id="phase-line-master" fill="none" stroke="#4FC3F7" stroke-width="1.5"></polyline>
+          <polyline id="phase-line-slave"  fill="none" stroke="#FFB74D" stroke-width="1.5"></polyline>
+        </svg>
+        <p class="chart-legend" id="phase-legend" hidden>
+          <span class="lg-master">master</span> <span class="lg-slave">slave</span> brightness over the recording
+        </p>
+        <div class="phase-measure">
+          <select id="phase-bin" title="The .bin of the build the rig runs; staging it shows the flash cue"><option value="">— .bin of the running build —</option></select>
+          <button class="btn btn-teal btn-sm" id="btn-measure-phase" onclick="measurePhase()"
+                  title="Stage the selected .bin over HID (non-destructive, no apply) and record the flash cue on both halves">Measure phase now</button>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ── Runner: CI jobs and runner service ── -->
+    <section class="tab-panel" id="tab-runner" hidden>
+      <div id="ci-jobs-list"><p class="no-jobs">Loading CI jobs…</p></div>
       <div class="button-row">
         <button class="btn btn-blue"  id="btn-diagnose"   onclick="runDiagnostics()">⌕ Diagnose</button>
         <button class="btn btn-teal"  id="btn-restart"    onclick="restartRunner()">&#x27F3; Restart</button>
         <button class="btn btn-amber" id="btn-reregister" data-armed="false" onclick="reregisterRunner()">&#x21BB; Re-register</button>
+        <button class="btn btn-red"   onclick="quitApp()" title="Close the kiosk browser">Quit ✕</button>
       </div>
-      <div class="button-row more-nav">
-        <button class="btn btn-gray" onclick="closeRunner()">&#8592; Back</button>
-      </div>
-    </div>
+    </section>
 
-    <div id="camera-controls" hidden>
-      <div class="button-row more-nav">
-        <button class="btn btn-gray" onclick="closeCamera()">&#8592; Back</button>
-        <button class="btn btn-gray" onclick="refreshCamera()">&#x21BB; Refresh</button>
-        <label class="chk"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (every 2 s)</label>
-      </div>
-    </div>
-
-    <div id="more-panel" hidden>
-      <div class="button-row">
-        <button class="btn btn-sm btn-usb"     id="btn-usb-left"      data-state="unknown"  onclick="toggleUsb('left')">L: USB ?</button>
-        <button class="btn btn-sm btn-bootsel" id="btn-bootsel-left"  data-state="released" onclick="toggleBootsel('left')">L: BOOTSEL</button>
-        <button class="btn btn-sm btn-reset"   id="btn-reset-left"   data-state="released" onclick="toggleRun('left')">L: Reset</button>
-        <button class="btn btn-sm btn-usb"     id="btn-usb-right"     data-state="unknown"  onclick="toggleUsb('right')">R: USB ?</button>
-        <button class="btn btn-sm btn-bootsel" id="btn-bootsel-right" data-state="released" onclick="toggleBootsel('right')">R: BOOTSEL</button>
-        <button class="btn btn-sm btn-reset"   id="btn-reset-right"  data-state="released" onclick="toggleRun('right')">R: Reset</button>
+    <!-- ── Log ── -->
+    <section class="tab-panel" id="tab-log" hidden>
+      <div id="log-panel">
+        <div id="log-output"></div>
       </div>
       <div class="button-row">
-        <button class="btn btn-sm btn-teal" onclick="openCamera()" title="Show what the rig camera sees, with the left/right split the RGB phase check uses">Camera</button>
-        <button class="btn btn-sm btn-gray" id="btn-hand-left"  onclick="setHandedness(true)"  title="Tell the USB/master half it is the LEFT half (slave = right); keyboard reboots">Hand: USB=Left</button>
-        <button class="btn btn-sm btn-gray" id="btn-hand-right" onclick="setHandedness(false)" title="Tell the USB/master half it is the RIGHT half (slave = left); keyboard reboots">Hand: USB=Right</button>
+        <button class="btn btn-gray" id="btn-copy" onclick="copyLog()">Copy Log</button>
+        <button class="btn btn-gray" onclick="clearLog()">Clear Log</button>
       </div>
-      <div class="button-row more-nav">
-        <button class="btn btn-gray" onclick="closeMore()">&#8592; Back</button>
-        <button class="btn btn-red"  onclick="quitApp()">Quit ✕</button>
-      </div>
-    </div>
+    </section>
+  </main>
+
+  <!-- The newest log line on every tab; tap it to open the Log tab. -->
+  <footer id="log-strip" onclick="showTab('log')" title="Newest log line — tap to open the log">
+    <span id="log-last">—</span>
   </footer>
 
   <!-- Full-screen catch layer for the idle screen-blank (see app.js). It rises
@@ -111,6 +144,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

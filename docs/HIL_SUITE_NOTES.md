@@ -662,7 +662,14 @@ cross-correlation within one period. A positive offset means the slave lags the 
   below 3 luma units, a trace that does not repeat after one 2048 ms period
   (periodicity below 0.6, for example a one-off room-light change), or correlation
   below 0.6. Check the framing in the UI:
-  More ··· → Camera shows the image with the `split_x` line and the master/slave labels.
+  the Camera tab shows the image with the `split_x` line and the master/slave labels.
+
+The Camera tab also shows the last measurement, from a CI run or from its **Measure phase
+now** button: status, offset, and the two brightness traces as a chart. The runner writes
+it to `var/camera_phase_last.json` (gitignored), because the CI runner is a separate
+process from the UI. **Measure phase now** stages the selected `.bin` over HID, which turns
+on the flash cue, and records meanwhile: stage + verify only, no APPLY, like the CI step.
+The `.bin` must be the build the rig runs, or the version cross-check refuses it.
 
 Capture uses `rpicam-vid` raw YUV into `/dev/shm`, with fixed exposure, gain and white
 balance from `config.yaml` (`camera:` block in `config/config.yaml.example`). It needs no

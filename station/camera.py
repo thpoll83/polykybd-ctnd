@@ -16,6 +16,7 @@ finds the lag with the highest circular cross-correlation within one period.
 Everything after the capture is plain Python with no camera, so
 ``tests/camera_test.py`` runs it on synthetic frames.
 """
+import json
 import logging
 import math
 import os
@@ -24,6 +25,8 @@ import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import CAMERA
 
@@ -66,6 +69,7 @@ class CameraSettings:
     gain: float = 4.0
     awb_gains: str = "1.5,1.5"     # fixed red,blue gains: no auto white balance
     record_s: float = 8.0
+    roi: str = ""                  # digital crop "x,y,w,h" as fractions of the full view; "" = none
 
     @classmethod
     def from_config(cls, c: dict | None) -> "CameraSettings":
@@ -95,6 +99,13 @@ class CameraSettings:
             raise ValueError(f"camera.rotation must be 0 or 180, not {s.rotation}")
         if s.width % 64:
             raise ValueError(f"camera.width must be a multiple of 64, not {s.width}")
+        if s.roi:
+            try:
+                x, y, w, h = (float(v) for v in s.roi.split(","))
+            except ValueError:
+                raise ValueError(f"camera.roi must be 'x,y,w,h' (four fractions), not {s.roi!r}") from None
+            if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 - x + 1e-9 and 0 < h <= 1 - y + 1e-9):
+                raise ValueError(f"camera.roi {s.roi!r} must lie inside 0..1 with w, h > 0")
         if not 0.05 < s.split_x < 0.95:
             raise ValueError(f"camera.split_x must be between 0.05 and 0.95, not {s.split_x}")
         return s
@@ -107,6 +118,8 @@ class CameraSettings:
             args.append("--hflip")
         if self.vflip:
             args.append("--vflip")
+        if self.roi:
+            args += ["--roi", self.roi]
         return args
 
 
@@ -334,6 +347,21 @@ class PhaseResult:
     periodicity_right: float = 1.0
 
 
+def periodic_pearson(x: list[float], y: list[float]) -> float:
+    """Pearson correlation of two equally long sequences; 0 when either is flat."""
+    m = len(x)
+    if m < 2:
+        return 0.0
+    mx, my = sum(x) / m, sum(y) / m
+    sxy = sxx = syy = 0.0
+    for p, q in zip(x, y):
+        dp, dq = p - mx, q - my
+        sxy += dp * dq
+        sxx += dp * dp
+        syy += dq * dq
+    return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
+
+
 def periodicity(x: list[float], lag: int) -> float:
     """Pearson correlation of ``x`` with itself ``lag`` samples later.
 
@@ -364,17 +392,15 @@ def phase_offset(ts: list[float], left: list[float], right: list[float],
     ma, mb = sum(a) / n, sum(b) / n
     a = [x - ma for x in a]
     b = [x - mb for x in b]
-    na = math.sqrt(sum(x * x for x in a)) or 1.0
-    nb = math.sqrt(sum(x * x for x in b)) or 1.0
     half = int(period_ms / dt / 2)
 
     def corr(k: int) -> float:
         # Positive k: b is a delayed copy of a, so compare a[i] with b[i + k].
-        if k >= 0:
-            s = sum(a[i] * b[i + k] for i in range(n - k))
-        else:
-            s = sum(a[i - k] * b[i] for i in range(n + k))
-        return s / (na * nb) * n / (n - abs(k))
+        # Pearson correlation of the overlapping parts only, each with its own
+        # mean and norm. Means and norms of the whole trace bias the peak once
+        # the overlap stops covering whole periods (-22 ms at an 800 ms offset).
+        x, y = (a[:n - k], b[k:]) if k >= 0 else (a[-k:], b[:n + k])
+        return periodic_pearson(x, y)
 
     lags = range(-half, half)
     cs = [corr(k) for k in lags]
@@ -392,11 +418,17 @@ def phase_offset(ts: list[float], left: list[float], right: list[float],
                        periodicity_left=per_a, periodicity_right=per_b)
 
 
-def analyse(rec: Recording, settings: CameraSettings = SETTINGS) -> PhaseResult:
+def analyse_traces(rec: Recording, settings: CameraSettings = SETTINGS
+                   ) -> tuple[PhaseResult, list[float], list[float]]:
+    """analyse() plus the two traces (master first), for the UI chart."""
     left, right = side_traces(rec, settings.split_x)
     if not settings.master_on_left:
         left, right = right, left
-    return phase_offset(rec.timestamps_ms, left, right)
+    return phase_offset(rec.timestamps_ms, left, right), left, right
+
+
+def analyse(rec: Recording, settings: CameraSettings = SETTINGS) -> PhaseResult:
+    return analyse_traces(rec, settings)[0]
 
 
 # ── The rig check ────────────────────────────────────────────────────────────
@@ -438,3 +470,82 @@ def judge(res: PhaseResult) -> dict:
     return {**rec, "status": "xfail",
             "reason": "flash cue phase differs between halves (keys_com/rgb.c uses "
                       "timer_read32(), not sync_timer_read32()) — " + info}
+
+
+# ── The last measurement, for the UI ─────────────────────────────────────────
+# The CI runner is a separate process from the UI, so the runner writes its last
+# result here and the UI's Camera tab reads it. var/ is gitignored, and the CI
+# force-sync (git checkout -f) leaves untracked files in place.
+
+LAST_RESULT_PATH = Path(__file__).resolve().parent.parent / "var" / "camera_phase_last.json"
+CHART_POINTS = 300   # samples per trace kept for the chart
+
+
+def _downsample(ts: list[float], values: list[float], n: int = CHART_POINTS):
+    if len(ts) <= n:
+        idx = range(len(ts))
+    else:
+        idx = [round(i * (len(ts) - 1) / (n - 1)) for i in range(n)]
+    t0 = ts[0] if ts else 0.0
+    return [round(ts[i] - t0, 1) for i in idx], [round(values[i], 2) for i in idx]
+
+
+def save_last(record: dict, source: str, ts: list[float] | None = None,
+              master: list[float] | None = None, slave: list[float] | None = None,
+              path: Path | None = None) -> None:
+    """Write the result record (and the traces, when there are any) atomically.
+
+    Never raises: the UI view is a convenience, and a write failure must not
+    change a test result.
+    """
+    path = LAST_RESULT_PATH if path is None else path
+    data = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": source, **record}
+    if ts and master and slave:
+        t, m = _downsample(ts, master)
+        _, sl = _downsample(ts, slave)
+        data["traces"] = {"t_ms": t, "master": m, "slave": sl}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, path)
+    except OSError as exc:
+        logging.getLogger("polykybd-ctnd").warning("could not save the camera result: %s", exc)
+
+
+def load_last(path: Path | None = None) -> dict | None:
+    path = LAST_RESULT_PATH if path is None else path
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict:
+    """The UI's "Measure phase now": stage ``bin_path`` over HID (which shows the
+    flash cue), record meanwhile, judge, save and return the record.
+
+    Non-destructive like the CI step: stage + verify only, no APPLY. The image
+    must be the build the rig runs (stage_and_verify checks the version).
+    """
+    from .fw_update import stage_and_verify   # needs hid; keep the import lazy
+
+    ok, why = availability(settings)
+    if not ok:
+        return {"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}
+    rec = BackgroundRecording(settings)
+    staged = stage_and_verify(bin_path, log, on_begin=rec.start)
+    try:
+        recording = rec.result()
+        res, master, slave = analyse_traces(recording, settings)
+    except Exception as exc:
+        why = f"camera recording failed: {exc}"
+        if not staged:
+            why += " (the HID staging failed too, see the log)"
+        out = {"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}
+        save_last(out, "ui")
+        return out
+    out = judge(res)
+    save_last(out, "ui", recording.timestamps_ms, master, slave)
+    return out
