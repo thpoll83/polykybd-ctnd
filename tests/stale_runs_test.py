@@ -113,29 +113,70 @@ class StaleRunTest(unittest.TestCase):
 @unittest.skipIf(app is None, "Flask not installed")
 class CancelRunTest(unittest.TestCase):
     def setUp(self):
-        self._orig = app._gh_api
+        self._orig = (app._gh_api, app._is_stale)
 
     def tearDown(self):
-        app._gh_api = self._orig
+        app._gh_api, app._is_stale = self._orig
 
-    def _fake(self, answers):
+    def _fake(self, answers, run=None):
+        """answers: step name ("cancel", "force-cancel", "delete") -> status.
+        run: what GET of the run returns before the delete (None: a failure)."""
         calls = []
+        app._is_stale = lambda r, now=None: bool(r.get("stale"))
 
         def fake(path, timeout=10, method="GET"):
-            calls.append(path.rsplit("/", 1)[1])
-            return answers[path.rsplit("/", 1)[1]], {}
+            last = path.rsplit("/", 1)[1]
+            if method == "GET":
+                calls.append("get")
+                return (200, run) if run is not None else (502, None)
+            step = "delete" if method == "DELETE" else last
+            calls.append(step)
+            return answers[step], {}
         app._gh_api = fake
         return calls
 
     def test_cancel(self):
         calls = self._fake({"cancel": 202})
-        self.assertEqual(app._cancel_run(7), "cancelled")
+        self.assertTrue(app._cancel_run(7).startswith("cancelled"))
         self.assertEqual(calls, ["cancel"])
 
     def test_409_falls_back_to_force_cancel(self):
         calls = self._fake({"cancel": 409, "force-cancel": 202})
-        self.assertEqual(app._cancel_run(8), "cancelled")
+        self.assertTrue(app._cancel_run(8).startswith("cancelled"))
         self.assertEqual(calls, ["cancel", "force-cancel"])
+
+    def test_409_twice_deletes_the_run(self):
+        # What GitHub answered for all nine stale runs on 2026-11-26.
+        calls = self._fake({"cancel": 409, "force-cancel": 409, "delete": 204},
+                           run={"status": "queued", "stale": True})
+        out = app._cancel_run(10)
+        self.assertTrue(out.startswith("deleted"))
+        self.assertIn("cancel 409, force-cancel 409, delete 204", out)
+        self.assertEqual(calls, ["cancel", "force-cancel", "get", "delete"])
+
+    def test_run_that_finished_meanwhile_is_not_deleted(self):
+        calls = self._fake({"cancel": 409, "force-cancel": 409, "delete": 204},
+                           run={"status": "completed", "stale": False})
+        out = app._cancel_run(13)
+        self.assertTrue(out.startswith("not deleted"))
+        self.assertIn("completed", out)
+        self.assertNotIn("delete", calls)
+
+    def test_unknown_state_is_not_deleted(self):
+        calls = self._fake({"cancel": 409, "force-cancel": 409, "delete": 204})
+        self.assertTrue(app._cancel_run(14).startswith("not deleted"))
+        self.assertNotIn("delete", calls)
+
+    def test_refused_delete_names_every_step(self):
+        self._fake({"cancel": 409, "force-cancel": 409, "delete": 409},
+                   run={"status": "queued", "stale": True})
+        self.assertEqual(app._cancel_run(11),
+                         "failed (cancel 409, force-cancel 409, delete 409)")
+
+    def test_other_error_stops_without_delete(self):
+        calls = self._fake({"cancel": 500})
+        self.assertEqual(app._cancel_run(12), "failed (cancel 500)")
+        self.assertEqual(calls, ["cancel"])
 
     def test_missing_permission_is_named(self):
         self._fake({"cancel": 403})
@@ -214,6 +255,55 @@ class CiBadgeTest(unittest.TestCase):
         calls = self._poll([[{"id": 1, "stale": True}]])
         self.assertEqual(calls, [1])
         self.assertFalse(app._ci_state["running"])
+
+
+@unittest.skipIf(app is None, "Flask not installed")
+class RigJobsTest(unittest.TestCase):
+    """The Runner tab's tags: the run's rig jobs, with "cam" on the HIL suite."""
+
+    def setUp(self):
+        self._orig = app._gh_api
+        app._RIG_JOBS_CACHE.clear()
+        self.calls = 0
+
+        def fake(path, timeout=10, method="GET"):
+            self.calls += 1
+            return 200, {"jobs": [
+                {"name": "Build firmware", "labels": ["ubuntu-latest"],
+                 "status": "completed", "conclusion": "success"},
+                {"name": "HIL test (split72)", "labels": ["self-hosted", "polykybd-ctnd"],
+                 "status": "in_progress", "conclusion": None},
+                {"name": "Firmware apply round-trip (split72)",
+                 "labels": ["self-hosted", "polykybd-ctnd"], "status": "queued",
+                 "conclusion": None},
+                {"name": "Debug probe (split72)", "labels": ["self-hosted", "polykybd-ctnd"],
+                 "status": "completed", "conclusion": "skipped"},
+            ]}
+        app._gh_api = fake
+
+    def tearDown(self):
+        app._gh_api = self._orig
+        app._RIG_JOBS_CACHE.clear()
+
+    def test_tags(self):
+        tags = app._rig_jobs({"id": 1, "run_attempt": 1, "updated_at": "t"})
+        self.assertEqual([t["tag"] for t in tags], ["HIL suite", "cam", "fw apply"])
+        self.assertEqual(tags[0]["status"], "in_progress")
+
+    def test_finished_run_cached_for_the_same_state(self):
+        run = {"id": 1, "run_attempt": 1, "updated_at": "t", "status": "completed"}
+        app._rig_jobs(run)
+        app._rig_jobs(run)
+        self.assertEqual(self.calls, 1)
+        app._rig_jobs(dict(run, updated_at="t2"))
+        self.assertEqual(self.calls, 2)
+
+    def test_running_run_is_asked_every_time(self):
+        # Its jobs move from queued to running without its updated_at changing.
+        run = {"id": 2, "run_attempt": 1, "updated_at": "t", "status": "in_progress"}
+        app._rig_jobs(run)
+        app._rig_jobs(run)
+        self.assertEqual(self.calls, 2)
 
 
 if __name__ == "__main__":

@@ -357,10 +357,11 @@ caller can do is crop the camera badly, which makes the phase check SKIP. Same e
 the rest of HIL-4: loopback only unless `allow_lan` is set.
 
 The Runner tab's `cancel_stale_runs` handler (2026-11-26) cancels workflow runs on GitHub
-with the PAT. It takes no input: it lists the queued and running runs itself and cancels
-only those `_is_stale` accepts (queued with no jobs, or in progress with every job
-completed, unchanged for an hour). A caller can at most cancel runs GitHub would never
-finish. It needs `Actions: Read and write` on the PAT; without it GitHub refuses and the
+with the PAT, and deletes a run when GitHub answers 409 to both cancel and force-cancel.
+It takes no input: it lists the queued and running runs itself and acts only on those
+`_is_stale` accepts (queued with no jobs, or in progress with every job completed,
+unchanged for an hour). A caller can at most cancel or delete runs GitHub would never
+finish; a deleted run loses its logs. It needs `Actions: Read and write` on the PAT; without it GitHub refuses and the
 log says so.
 
 If `allow_lan` ever becomes a routine deployment mode, revisit this — a shared-secret

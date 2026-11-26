@@ -621,11 +621,17 @@ def _ci_job(run: dict) -> dict:
         "status":         run.get("status"),
         "conclusion":     run.get("conclusion"),
         "head_branch":    run.get("head_branch"),
+        # What the run tests: the PR title, or the commit's first line.
+        "title":          run.get("display_title"),
+        "head_sha":       (run.get("head_sha") or "")[:7],
+        "pr":             next((p.get("number") for p in run.get("pull_requests") or []
+                                if isinstance(p, dict)), None),
         "event":          run.get("event"),
         "html_url":       run.get("html_url"),
         "created_at":     run.get("created_at"),
         "run_started_at": run.get("run_started_at"),
         "updated_at":     run.get("updated_at"),
+        "run_attempt":    run.get("run_attempt"),
     }
 
 
@@ -690,6 +696,45 @@ def _is_stale(run: dict, now: float | None = None) -> bool:
     return verdict
 
 
+# The rig jobs of qmk-test.yml by name prefix, as short tags for the Runner tab.
+# Only "HIL test" stages a .bin, so only it runs the camera's RGB phase check.
+RIG_JOB_TAGS = (
+    ("HIL test", ("HIL suite", "cam")),
+    ("Firmware apply", ("fw apply",)),
+    ("Performance", ("perf",)),
+    ("First-run tutorial", ("tutorial",)),
+    ("Debug probe", ("probe",)),
+    ("DOOM", ("DOOM",)),
+)
+_RIG_JOBS_CACHE: dict = {}   # (id, run_attempt, updated_at) -> tags, finished runs only
+
+
+def _rig_jobs(run: dict) -> list[dict]:
+    """The run's jobs on the rig (self-hosted), skipped ones left out, as
+    [{"tag", "status", "conclusion"}]. Cached only for a finished run, keyed
+    by its exact state: a running run's jobs change without its updated_at
+    changing. A failed query gives [] and is not cached."""
+    key = (run.get("id"), run.get("run_attempt"), run.get("updated_at"))
+    cached = _RIG_JOBS_CACHE.get(key)   # get: another request may prune meanwhile
+    if cached is not None:
+        return cached
+    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run.get('id')}/jobs?per_page=100")
+    if data is None:
+        return []
+    tags = []
+    for job in data.get("jobs", []):
+        if "self-hosted" not in (job.get("labels") or []) or job.get("conclusion") == "skipped":
+            continue
+        name = job.get("name") or ""
+        labels = next((t for prefix, t in RIG_JOB_TAGS if name.startswith(prefix)), (name,))
+        for tag in labels:
+            tags.append({"tag": tag, "status": job.get("status"),
+                         "conclusion": job.get("conclusion")})
+    if run.get("status") == "completed":
+        _RIG_JOBS_CACHE[key] = tags
+    return tags
+
+
 @app.route("/ci-jobs")
 def list_ci_jobs():
     """Queued and running workflow runs, then the last CI_FINISHED_SHOWN finished ones.
@@ -704,7 +749,13 @@ def list_ci_jobs():
         for run in data.get("workflow_runs", []):
             job = _ci_job(run)
             job["stale"] = _is_stale(run)
+            job["rig"] = [] if job["stale"] else _rig_jobs(run)
             jobs.append(job)
+    # Keep only the cache entries of the runs listed now.
+    shown = {(j["id"], j.get("run_attempt"), j.get("updated_at")) for j in jobs}
+    for k in list(_RIG_JOBS_CACHE):
+        if k not in shown:
+            _RIG_JOBS_CACHE.pop(k, None)   # another request may have removed it
     return jsonify(jobs)
 
 
@@ -712,17 +763,33 @@ _CANCEL_LOCK = threading.Lock()
 
 
 def _cancel_run(run_id) -> str:
-    """Cancel one run; a run GitHub refuses to cancel (409, it never got as
-    far as queuing its jobs) is force-cancelled. Returns a short outcome."""
-    code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/cancel", method="POST")
-    if code == 409:
-        code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/force-cancel",
-                          method="POST")
-    if code == 202:
-        return "cancelled"
-    if code in (401, 403, 404):
-        return f"refused ({code}): the token needs Actions: Read and write"
-    return f"failed ({code if code is not None else 'no answer from GitHub'})"
+    """End one stale run: cancel it, force-cancel it on a 409, and delete it
+    when GitHub refuses both with 409. On 2026-11-26 GitHub answered 409 to
+    cancel and force-cancel for all nine stale runs (no jobs, or every job
+    done). Deleting removes the run and its logs; a stale run has none worth
+    keeping. Returns a short outcome with each step's status code."""
+    base = f"/repos/{GITHUB_REPO}/actions/runs/{run_id}"
+    steps = []
+    for what, path, method, ok in (("cancel", "/cancel", "POST", 202),
+                                   ("force-cancel", "/force-cancel", "POST", 202),
+                                   ("delete", "", "DELETE", 204)):
+        if method == "DELETE":
+            # The run may have finished since it was listed; a finished run's
+            # logs are worth keeping. Delete only what is still stale now.
+            _, cur = _gh_api(base)
+            if cur is None or not _is_stale(cur):
+                state = cur.get("status") if cur else "unknown"
+                return f"not deleted ({', '.join(steps)}; the run is {state} and not stale now)"
+        code, _ = _gh_api(base + path, method=method)
+        steps.append(f"{what} {code if code is not None else 'no answer'}")
+        if code == ok:
+            return ("cancelled" if method == "POST" else "deleted") + f" ({', '.join(steps)})"
+        if code in (401, 403, 404):
+            return (f"refused ({', '.join(steps)}): the token needs "
+                    "Actions: Read and write")
+        if code != 409:
+            break
+    return f"failed ({', '.join(steps)})"
 
 
 @socketio.on("cancel_stale_runs")
@@ -752,16 +819,16 @@ def on_cancel_stale_runs(_data=None):
             if not stale:
                 emit_log("[ui] no stale runs to cancel")
                 return
-            emit_log(f"[ui] cancelling {len(stale)} stale run(s)…")
+            emit_log(f"[ui] ending {len(stale)} stale run(s) (cancel, else delete)…")
             done = 0
             for run in stale:
                 outcome = _cancel_run(run.get("id"))
-                done += outcome == "cancelled"
+                done += outcome.startswith(("cancelled", "deleted"))
                 emit_log(f"  #{run.get('run_number')} {run.get('name')} "
                          f"({run.get('head_branch')}, {run.get('created_at')}): {outcome}")
                 if outcome.startswith("refused"):
                     break   # the same token fails for every run
-            emit_log(f"[ui] stale runs cancelled: {done} of {len(stale)}")
+            emit_log(f"[ui] stale runs ended: {done} of {len(stale)}")
         finally:
             _CANCEL_LOCK.release()
             socketio.emit("ci_jobs_changed")
