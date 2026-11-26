@@ -335,6 +335,10 @@ class BackgroundRecording:
         self._rec = None
         self._err = None
 
+    @property
+    def started(self) -> bool:
+        return self._thread is not None
+
     def start(self) -> None:
         if self._thread is None:
             self._thread = threading.Thread(target=self._body, daemon=True)
@@ -707,7 +711,20 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
     # changes SETTINGS in place) must not split frames captured with the old crop.
     settings = snapshot_settings(settings)
     rec = BackgroundRecording(settings)
-    staged = stage_and_verify(bin_path, log, on_begin=rec.start, require_identity=True)
+    fails = []   # the staging's FAIL lines, for the saved reason
+
+    def _log(line):
+        if "FAIL:" in line:
+            fails.append(line.split("FAIL:", 1)[1].strip())
+        log(line)
+
+    staged = stage_and_verify(bin_path, _log, on_begin=rec.start, require_identity=True)
+    if not staged and not rec.started:
+        # BEGIN never succeeded, so the camera never ran: report the staging.
+        why = fails[0] if fails else "see the log"
+        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip",
+                          "reason": f"the HID staging failed before the flash cue: {why}"},
+                         "ui", fw=image_fw(bin_path))
     try:
         recording = rec.result()
         res, master, slave = analyse_traces(recording, settings)

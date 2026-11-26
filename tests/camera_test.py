@@ -439,6 +439,28 @@ class MeasureNowStagingFailedTest(unittest.TestCase):
         self.assertIn("HID staging failed", out["reason"])
         self.assertIn("traces", out)
 
+    def test_staging_failed_before_begin_names_the_failure(self):
+        import tempfile
+        from pathlib import Path
+        import station.fw_update as fw
+        orig = (fw.stage_and_verify, camera.availability, camera.LAST_RESULT_PATH)
+
+        def fake_stage(path, log, on_begin=None, **k):
+            log("  FAIL: Raw HID interface not found")
+            return False   # BEGIN never sent, so on_begin never ran
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fw.stage_and_verify = fake_stage
+            camera.availability = lambda s=None: (True, "fake camera")
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            try:
+                out = camera.measure_now("fw.bin", lambda m: None, CameraSettings.from_config({}))
+            finally:
+                fw.stage_and_verify, camera.availability, camera.LAST_RESULT_PATH = orig
+        self.assertEqual(out["status"], "skip")
+        self.assertIn("before the flash cue: Raw HID interface not found", out["reason"])
+        self.assertNotIn("camera recording failed", out["reason"])
+
 
 class ViewOverrideTest(unittest.TestCase):
     """The crop and split line set in the UI's "Adjust view"."""

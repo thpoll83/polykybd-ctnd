@@ -265,6 +265,8 @@ main {
 
 .ci-job-running .ci-job-label { color: #7ec87e; }
 .ci-job-queued  .ci-job-label { color: #FFD54F; }
+.ci-job-stale   { background: #1e1e1e; border-color: #444; }
+.ci-job-stale .ci-job-label { color: #9e9e9e; }
 
 .ci-job-times {
   font-size: 11px;

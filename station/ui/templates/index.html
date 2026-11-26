@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=14">
+  <link rel="stylesheet" href="/static/style.css?v=15">
 </head>
 <body data-status="idle">
   <header>
@@ -133,6 +133,8 @@
         <button class="btn btn-blue"  id="btn-diagnose"   onclick="runDiagnostics()">⌕ Diagnose</button>
         <button class="btn btn-teal"  id="btn-restart"    onclick="restartRunner()">&#x27F3; Restart</button>
         <button class="btn btn-amber" id="btn-reregister" data-armed="false" onclick="reregisterRunner()">&#x21BB; Re-register</button>
+        <button class="btn btn-gray"  id="btn-cancel-stale" data-armed="false" onclick="cancelStaleRuns()" disabled
+                title="Cancel runs GitHub will never finish: queued with no jobs, or in progress with every job ended, for over an hour">⊘ No stale runs</button>
         <button class="btn btn-red"   onclick="quitApp()" title="Close the kiosk browser">Quit ✕</button>
       </div>
     </section>
@@ -159,6 +161,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=19"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>

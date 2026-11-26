@@ -106,5 +106,37 @@ class RequireIdentityTest(unittest.TestCase):
         self.assertTrue(any("skipping the version cross-check" in line for line in logs))
 
 
+class MissingKeyboardHintTest(unittest.TestCase):
+    """The reason logged when no Raw HID interface shows up."""
+
+    def _tree(self, devices):
+        import os
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for i, (vid, pid) in enumerate(devices):
+            d = os.path.join(tmp.name, f"1-1.{i}")
+            os.makedirs(d)
+            for name, value in (("idVendor", vid), ("idProduct", pid)):
+                with open(os.path.join(d, name), "w") as f:
+                    f.write(value + "\n")
+        return tmp.name
+
+    def test_bootsel_half_is_named(self):
+        from station.fw_update import missing_keyboard_hint
+        hint = missing_keyboard_hint(0x2021, 0x2007, self._tree([("2e8a", "0003")]))
+        self.assertIn("BOOTSEL", hint)
+
+    def test_keyboard_without_raw_hid(self):
+        from station.fw_update import missing_keyboard_hint
+        hint = missing_keyboard_hint(0x2021, 0x2007, self._tree([("2021", "2007")]))
+        self.assertIn("no Raw HID interface", hint)
+
+    def test_nothing_on_usb(self):
+        from station.fw_update import missing_keyboard_hint
+        hint = missing_keyboard_hint(0x2021, 0x2007, self._tree([("1d6b", "0002")]))
+        self.assertIn("no PolyKybd on USB", hint)
+
+
 if __name__ == "__main__":
     unittest.main()

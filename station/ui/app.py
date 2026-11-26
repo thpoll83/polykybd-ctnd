@@ -6,8 +6,10 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, Response, render_template, jsonify, request
@@ -59,14 +61,17 @@ def set_status(s: str) -> None:
 
 # ── GitHub API helper ─────────────────────────────────────────────────────────
 
-def _gh_api(path: str, timeout: int = 10):
-    """GET https://api.github.com{path}. Returns (status_code|None, parsed_json|None).
+def _gh_api(path: str, timeout: int = 10, method: str = "GET"):
+    """Call https://api.github.com{path}. Returns (status_code|None, parsed_json|None).
 
     Never raises: on a transport error returns (None, None); on an HTTP error
     returns (code, None) so callers can distinguish 401/403/404 from a dead network.
+    A success with an empty body (a 202 from a cancel) returns (code, {}).
     """
     req = urllib.request.Request(
         f"https://api.github.com{path}",
+        data=b"" if method != "GET" else None,
+        method=method,
         headers={
             "User-Agent": "polykybd-ctnd/1.0",
             "Accept": "application/vnd.github+json",
@@ -76,7 +81,8 @@ def _gh_api(path: str, timeout: int = 10):
         req.add_header("Authorization", f"Bearer {GITHUB_TOKEN}")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read())
+            body = resp.read()
+            return resp.status, (json.loads(body) if body else {})
     except urllib.error.HTTPError as exc:
         return exc.code, None
     except Exception:
@@ -86,11 +92,14 @@ def _gh_api(path: str, timeout: int = 10):
 # ── CI status poller ──────────────────────────────────────────────────────────
 
 def _ci_poll_once():
-    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=in_progress&per_page=1")
+    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=in_progress&per_page=10")
     if data is None:
         return
-    running = data.get("total_count", 0) > 0
-    run_url = data["workflow_runs"][0]["html_url"] if running and data.get("workflow_runs") else None
+    # A stale run (all its jobs ended, the run never did) kept the badge on
+    # "running" from 2026-08-09 to 2026-11-26.
+    live = [r for r in data.get("workflow_runs", []) if not _is_stale(r)]
+    running = bool(live)
+    run_url = live[0].get("html_url") if live else None
     _ci_state.update({"running": running, "url": run_url})
     socketio.emit("ci_status", dict(_ci_state))
 
@@ -589,9 +598,63 @@ def _ci_job(run: dict) -> dict:
     }
 
 
+# A run GitHub will never finish, judged this long after its last change:
+#  - "queued" with no jobs: GitHub creates a run's jobs within seconds. Nine
+#    such runs from 6 and 11 Nov 2026 stayed queued for weeks.
+#  - "in_progress" with every job completed: #57230 (Automatic Approve) ran
+#    its one job on 2026-08-09 and still read "in progress" in November.
+# Agreed with the maintainer 2026-11-26.
+STALE_RUN_MIN_AGE_S = 3600
+_STALE_VERDICT: dict = {}   # run id -> True/False; both verdicts never change
+
+
+def _gh_time(value) -> float | None:
+    """A GitHub timestamp ('2026-11-11T20:55:18Z') as epoch seconds, or None."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_stale(run: dict, now: float | None = None) -> bool:
+    """True for a run GitHub will never finish (see STALE_RUN_MIN_AGE_S): a
+    queued run with no jobs, or a run in progress whose jobs have all
+    completed, unchanged for STALE_RUN_MIN_AGE_S.
+
+    A True verdict is cached per run id (the run stays that way until it is
+    cancelled). A False one is cached only for a queued run with jobs, which
+    does not lose them; a running run is asked again, since its jobs end. A
+    failed jobs query gives False and is not cached."""
+    status = run.get("status")
+    if status not in ("queued", "in_progress"):
+        return False
+    run_id = run.get("id")
+    if run_id in _STALE_VERDICT:
+        return _STALE_VERDICT[run_id]
+    changed = _gh_time(run.get("updated_at") or run.get("created_at"))
+    now = time.time() if now is None else now
+    if changed is None or now - changed < STALE_RUN_MIN_AGE_S:
+        return False
+    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/jobs?per_page=100")
+    if data is None:
+        return False
+    jobs = data.get("jobs", [])
+    if status == "queued":
+        verdict = data.get("total_count", 0) == 0
+        _STALE_VERDICT[run_id] = verdict
+        return verdict
+    verdict = bool(jobs) and data.get("total_count", 0) == len(jobs) and all(
+        j.get("status") == "completed" for j in jobs)
+    if verdict:
+        _STALE_VERDICT[run_id] = True
+    return verdict
+
+
 @app.route("/ci-jobs")
 def list_ci_jobs():
-    """Queued and running workflow runs, then the last CI_FINISHED_SHOWN finished ones."""
+    """Queued and running workflow runs, then the last CI_FINISHED_SHOWN finished ones.
+    A queued run that will never start has "stale": true."""
     if not GITHUB_REPO:
         return jsonify([])
     jobs = []
@@ -599,8 +662,72 @@ def list_ci_jobs():
         code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page={count}")
         if data is None:
             return jsonify({"error": "GitHub API failure", "status": code}), 502
-        jobs.extend(_ci_job(run) for run in data.get("workflow_runs", []))
+        for run in data.get("workflow_runs", []):
+            job = _ci_job(run)
+            job["stale"] = _is_stale(run)
+            jobs.append(job)
     return jsonify(jobs)
+
+
+_CANCEL_LOCK = threading.Lock()
+
+
+def _cancel_run(run_id) -> str:
+    """Cancel one run; a run GitHub refuses to cancel (409, it never got as
+    far as queuing its jobs) is force-cancelled. Returns a short outcome."""
+    code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/cancel", method="POST")
+    if code == 409:
+        code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/force-cancel",
+                          method="POST")
+    if code == 202:
+        return "cancelled"
+    if code in (401, 403, 404):
+        return f"refused ({code}): the token needs Actions: Read and write"
+    return f"failed ({code if code is not None else 'no answer from GitHub'})"
+
+
+@socketio.on("cancel_stale_runs")
+def on_cancel_stale_runs(_data=None):
+    """Cancel every run GitHub will never finish (see _is_stale).
+
+    Lists the queued and running runs again instead of trusting the UI's copy,
+    so only runs that are stale now are touched. Does not use the rig lock: it changes
+    GitHub only, not the rig."""
+    if not GITHUB_REPO:
+        emit_log("[ui] no github.repo set in config.yaml")
+        return
+    if not _CANCEL_LOCK.acquire(blocking=False):
+        emit_log("[ui] already cancelling stale runs")
+        return
+
+    def _do():
+        try:
+            now, stale = time.time(), []
+            for status in ("queued", "in_progress"):
+                code, data = _gh_api(
+                    f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page=100")
+                if data is None:
+                    emit_log(f"[ui] could not list {status} runs (status {code})")
+                    return
+                stale += [r for r in data.get("workflow_runs", []) if _is_stale(r, now)]
+            if not stale:
+                emit_log("[ui] no stale runs to cancel")
+                return
+            emit_log(f"[ui] cancelling {len(stale)} stale run(s)…")
+            done = 0
+            for run in stale:
+                outcome = _cancel_run(run.get("id"))
+                done += outcome == "cancelled"
+                emit_log(f"  #{run.get('run_number')} {run.get('name')} "
+                         f"({run.get('head_branch')}, {run.get('created_at')}): {outcome}")
+                if outcome.startswith("refused"):
+                    break   # the same token fails for every run
+            emit_log(f"[ui] stale runs cancelled: {done} of {len(stale)}")
+        finally:
+            _CANCEL_LOCK.release()
+            socketio.emit("ci_jobs_changed")
+
+    threading.Thread(target=_do, daemon=True).start()
 
 
 @app.route("/firmware")
