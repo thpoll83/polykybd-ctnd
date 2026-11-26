@@ -68,6 +68,11 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(CameraSettings.from_config({"enabled": False}).enabled, "no")
         self.assertEqual(CameraSettings.from_config({"enabled": "Auto"}).enabled, "auto")
 
+    def test_bool_typo_is_an_error(self):
+        for bad in ({"hflip": "flase"}, {"master_on_left": "ture"}, {"vflip": 2}):
+            with self.assertRaises(ValueError, msg=bad):
+                CameraSettings.from_config(bad)
+
     def test_bool_strings(self):
         s = CameraSettings.from_config({"hflip": "false", "vflip": "yes"})
         self.assertFalse(s.hflip)
@@ -97,11 +102,15 @@ class LoadSettingsTest(unittest.TestCase):
         self.assertIn("rotation", err)
 
     def test_non_mapping_block_disables_the_camera(self):
-        for bad in ("disabled", [1, 2], 5):
+        for bad in ("disabled", [1, 2], 5, [], False):
             with self.assertLogs("polykybd-ctnd", level="WARNING"):
                 s, err = camera._load_settings(bad)
             self.assertEqual(s.enabled, "no", msg=repr(bad))
             self.assertIn("mapping", err)
+
+    def test_missing_block_uses_defaults(self):
+        s, err = camera._load_settings(None)
+        self.assertEqual((s.enabled, err), ("auto", ""))
 
     def test_good_block_has_no_error(self):
         s, err = camera._load_settings({"rotation": 180})

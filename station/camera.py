@@ -33,6 +33,23 @@ FLASH_CUE_PERIOD_MS = 2048.0
 _lock = threading.Lock()   # one capture at a time inside this process
 
 
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off")
+
+
+def _parse_bool(key: str, v) -> bool:
+    """A real bool or an explicit spelling. A typo (ture, flase) is an error,
+    so it disables the camera with the reason instead of reading as false."""
+    if isinstance(v, bool):
+        return v
+    t = str(v).strip().lower()
+    if t in _TRUE:
+        return True
+    if t in _FALSE:
+        return False
+    raise ValueError(f"camera.{key} must be true or false, not {v!r}")
+
+
 @dataclass
 class CameraSettings:
     enabled: str = "auto"          # auto | yes | no
@@ -60,7 +77,7 @@ class CameraSettings:
                 continue
             default = getattr(s, k)
             if isinstance(default, bool):
-                v = v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on")
+                v = _parse_bool(k, v)
             elif k != "enabled":
                 v = type(default)(v)
             setattr(s, k, v)

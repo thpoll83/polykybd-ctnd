@@ -102,5 +102,7 @@ FIRMWARE_DIR = str(_root / "firmware")
 # (see scripts/self-update.sh); the UI "Update" badge/button reflect the same.
 UPDATE_BRANCH = _c.get("update", {}).get("branch") or "main"
 
-# Rig camera (optional): station/camera.py reads and validates the block.
-CAMERA = _c.get("camera") or {}
+# Rig camera (optional): station/camera.py reads and validates the block. Passed
+# unchanged, so a wrong value (camera: false, camera: []) reaches the validation
+# and disables the camera with the reason; a missing or empty block is None.
+CAMERA = _c.get("camera")
