@@ -52,6 +52,8 @@ class CameraSettings:
 
     @classmethod
     def from_config(cls, c: dict | None) -> "CameraSettings":
+        if c is not None and not isinstance(c, dict):
+            raise TypeError(f"camera must be a mapping of settings, not {type(c).__name__} {c!r}")
         s = cls()
         for k, v in (c or {}).items():
             if not hasattr(s, k) or v is None:

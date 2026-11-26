@@ -96,6 +96,13 @@ class LoadSettingsTest(unittest.TestCase):
         self.assertEqual(s.enabled, "no")
         self.assertIn("rotation", err)
 
+    def test_non_mapping_block_disables_the_camera(self):
+        for bad in ("disabled", [1, 2], 5):
+            with self.assertLogs("polykybd-ctnd", level="WARNING"):
+                s, err = camera._load_settings(bad)
+            self.assertEqual(s.enabled, "no", msg=repr(bad))
+            self.assertIn("mapping", err)
+
     def test_good_block_has_no_error(self):
         s, err = camera._load_settings({"rotation": 180})
         self.assertEqual((s.rotation, err), (180, ""))
