@@ -93,14 +93,22 @@ def _gh_api(path: str, timeout: int = 10, method: str = "GET"):
 # ── CI status poller ──────────────────────────────────────────────────────────
 
 def _ci_poll_once():
-    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=in_progress&per_page=100")
-    if data is None:
-        return
     # A stale run (all its jobs ended, the run never did) kept the badge on
-    # "running" from 2026-08-09 to 2026-11-26.
-    live = [r for r in data.get("workflow_runs", []) if not _is_stale(r)]
-    running = bool(live)
-    run_url = live[0].get("html_url") if live else None
+    # "running" from 2026-08-09 to 2026-11-26. Page on until a live run shows
+    # up or the runs end, so stale runs on page 1 cannot hide a live one.
+    live, page = None, 1
+    while live is None:
+        _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs"
+                          f"?status=in_progress&per_page=100&page={page}")
+        if data is None:
+            return
+        runs = data.get("workflow_runs", [])
+        live = next((r for r in runs if not _is_stale(r)), None)
+        if live is None and len(runs) < 100:
+            break
+        page += 1
+    running = live is not None
+    run_url = live.get("html_url") if live else None
     _ci_state.update({"running": running, "url": run_url})
     socketio.emit("ci_status", dict(_ci_state))
 

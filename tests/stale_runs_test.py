@@ -179,5 +179,42 @@ class CiJobOnRigTest(unittest.TestCase):
         self.assertTrue(app._ci_job_on_rig(self._proc({})))
 
 
+@unittest.skipIf(app is None, "Flask not installed")
+class CiBadgeTest(unittest.TestCase):
+    """The CI badge pages past stale runs to find a live one."""
+
+    def setUp(self):
+        self._orig = (app._gh_api, app._is_stale, app.socketio.emit, dict(app._ci_state))
+
+    def tearDown(self):
+        app._gh_api, app._is_stale, app.socketio.emit, state = self._orig
+        app._ci_state.clear()
+        app._ci_state.update(state)
+
+    def _poll(self, pages):
+        calls = []
+
+        def fake(path, timeout=10, method="GET"):
+            page = int(path.rsplit("page=", 1)[1])
+            calls.append(page)
+            return 200, {"workflow_runs": pages[page - 1] if page <= len(pages) else []}
+        app._gh_api = fake
+        app._is_stale = lambda run, now=None: run.get("stale", False)
+        app.socketio.emit = lambda *a, **k: None
+        app._ci_poll_once()
+        return calls
+
+    def test_live_run_on_page_two_is_found(self):
+        stale = [{"id": i, "stale": True} for i in range(100)]
+        calls = self._poll([stale, [{"id": 200, "html_url": "u"}]])
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(app._ci_state, {"running": True, "url": "u"})
+
+    def test_only_stale_runs_mean_not_running(self):
+        calls = self._poll([[{"id": 1, "stale": True}]])
+        self.assertEqual(calls, [1])
+        self.assertFalse(app._ci_state["running"])
+
+
 if __name__ == "__main__":
     unittest.main()
