@@ -872,3 +872,36 @@ class ReflashSlaveDefaultsOffTest(unittest.TestCase):
         args = self._parse()
         self.assertTrue(args.extended)
         self.assertFalse(args.reflash_slave)
+
+
+class RestoreSlaveImageTest(_ApplyFixture):
+    """After a passed apply that left two masters, the slave's own image is put
+    back, ungraded, so the rig is not left with the right half running the
+    master's image (2026-11-26: right half dark, no split link, the UI's phase
+    measurement timing out at BEGIN)."""
+
+    def test_only_a_passed_apply_with_two_masters_is_restored(self):
+        f = self.tr.should_restore_slave
+        self.assertTrue(f({"status": "pass"}, True))
+        self.assertFalse(f({"status": "pass"}, False))
+        self.assertFalse(f({"status": "fail"}, True))
+        self.assertFalse(f({"status": "skip"}, True))
+
+    def test_the_right_half_is_flashed_and_one_master_is_reported(self):
+        runner, seen, _fc = self._runner(masters=1)
+        runner._two_masters_after_apply = True
+        self.assertTrue(runner.restore_slave_image("right.uf2"))
+        self.assertEqual(seen["flash"].calls, [("right", "right.uf2")])
+        # Left alone: the restore runs after every graded check and must not
+        # change what a later one asserts.
+        self.assertTrue(runner._two_masters_after_apply)
+
+    def test_a_failed_flash_is_reported_not_raised(self):
+        runner, seen, _fc = self._runner(flash_raises=True)
+        self.assertFalse(runner.restore_slave_image("right.uf2"))
+        self.assertTrue(any("could not restore" in line for line in seen["log"]))
+
+    def test_still_two_masters_is_reported_not_raised(self):
+        runner, seen, _fc = self._runner(masters=2)
+        self.assertFalse(runner.restore_slave_image("right.uf2"))
+        self.assertTrue(any("2 masters" in line for line in seen["log"]))
