@@ -808,8 +808,9 @@ def list_firmware_bins():
     elif not _RIG_LOCK.acquire(blocking=False):
         note = "rig busy"
     else:
-        rig_fd = rig_lock.try_acquire()
+        rig_fd = None
         try:
+            rig_fd = rig_lock.try_acquire()
             if rig_fd is None:
                 note = "a CI job is running on the rig"
             else:
@@ -865,7 +866,10 @@ def camera_snapshot():
         return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     # ?full=1: the whole field of view, without the ROI, for "Adjust view".
     crop = request.args.get("full") != "1"
-    rig_fd = rig_lock.try_acquire()
+    try:
+        rig_fd = rig_lock.try_acquire()
+    except OSError as exc:
+        return Response(f"cannot open the rig lock: {exc}", status=503, mimetype="text/plain")
     if rig_fd is None:
         return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     try:
@@ -1121,7 +1125,12 @@ def _run_exclusive(what: str, busy_status: str, body) -> bool:
                  "(a flash / test / perf run is already active)")
         return False
     # The cross-process lock: a CI job that starts now waits for it.
-    rig_fd = rig_lock.try_acquire()
+    try:
+        rig_fd = rig_lock.try_acquire()
+    except OSError as exc:
+        _RIG_LOCK.release()
+        emit_log(f"[ui] cannot open the rig lock ({exc}) — {what} ignored")
+        return False
     if rig_fd is None:
         _RIG_LOCK.release()
         emit_log(f"[ui] a CI job holds the rig — {what} ignored")
