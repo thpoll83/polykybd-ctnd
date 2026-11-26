@@ -621,11 +621,17 @@ def _ci_job(run: dict) -> dict:
         "status":         run.get("status"),
         "conclusion":     run.get("conclusion"),
         "head_branch":    run.get("head_branch"),
+        # What the run tests: the PR title, or the commit's first line.
+        "title":          run.get("display_title"),
+        "head_sha":       (run.get("head_sha") or "")[:7],
+        "pr":             next((p.get("number") for p in run.get("pull_requests") or []
+                                if isinstance(p, dict)), None),
         "event":          run.get("event"),
         "html_url":       run.get("html_url"),
         "created_at":     run.get("created_at"),
         "run_started_at": run.get("run_started_at"),
         "updated_at":     run.get("updated_at"),
+        "run_attempt":    run.get("run_attempt"),
     }
 
 
@@ -690,6 +696,42 @@ def _is_stale(run: dict, now: float | None = None) -> bool:
     return verdict
 
 
+# The rig jobs of qmk-test.yml by name prefix, as short tags for the Runner tab.
+# Only "HIL test" stages a .bin, so only it runs the camera's RGB phase check.
+RIG_JOB_TAGS = (
+    ("HIL test", ("HIL suite", "cam")),
+    ("Firmware apply", ("fw apply",)),
+    ("Performance", ("perf",)),
+    ("First-run tutorial", ("tutorial",)),
+    ("Debug probe", ("probe",)),
+    ("DOOM", ("DOOM",)),
+)
+_RIG_JOBS_CACHE: dict = {}   # (id, run_attempt, updated_at) -> tags
+
+
+def _rig_jobs(run: dict) -> list[dict]:
+    """The run's jobs on the rig (self-hosted), skipped ones left out, as
+    [{"tag", "status", "conclusion"}]. Cached for the run's exact state; a
+    failed query gives [] and is not cached."""
+    key = (run.get("id"), run.get("run_attempt"), run.get("updated_at"))
+    if key in _RIG_JOBS_CACHE:
+        return _RIG_JOBS_CACHE[key]
+    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run.get('id')}/jobs?per_page=100")
+    if data is None:
+        return []
+    tags = []
+    for job in data.get("jobs", []):
+        if "self-hosted" not in (job.get("labels") or []) or job.get("conclusion") == "skipped":
+            continue
+        name = job.get("name") or ""
+        labels = next((t for prefix, t in RIG_JOB_TAGS if name.startswith(prefix)), (name,))
+        for tag in labels:
+            tags.append({"tag": tag, "status": job.get("status"),
+                         "conclusion": job.get("conclusion")})
+    _RIG_JOBS_CACHE[key] = tags
+    return tags
+
+
 @app.route("/ci-jobs")
 def list_ci_jobs():
     """Queued and running workflow runs, then the last CI_FINISHED_SHOWN finished ones.
@@ -704,7 +746,13 @@ def list_ci_jobs():
         for run in data.get("workflow_runs", []):
             job = _ci_job(run)
             job["stale"] = _is_stale(run)
+            job["rig"] = [] if job["stale"] else _rig_jobs(run)
             jobs.append(job)
+    # Keep only the cache entries of the runs listed now.
+    shown = {(j["id"], j.get("run_attempt"), j.get("updated_at")) for j in jobs}
+    for k in list(_RIG_JOBS_CACHE):
+        if k not in shown:
+            del _RIG_JOBS_CACHE[k]
     return jsonify(jobs)
 
 
@@ -722,6 +770,13 @@ def _cancel_run(run_id) -> str:
     for what, path, method, ok in (("cancel", "/cancel", "POST", 202),
                                    ("force-cancel", "/force-cancel", "POST", 202),
                                    ("delete", "", "DELETE", 204)):
+        if method == "DELETE":
+            # The run may have finished since it was listed; a finished run's
+            # logs are worth keeping. Delete only what is still stale now.
+            _, cur = _gh_api(base)
+            if cur is None or not _is_stale(cur):
+                state = cur.get("status") if cur else "unknown"
+                return f"not deleted ({', '.join(steps)}; the run is {state} and not stale now)"
         code, _ = _gh_api(base + path, method=method)
         steps.append(f"{what} {code if code is not None else 'no answer'}")
         if code == ok:

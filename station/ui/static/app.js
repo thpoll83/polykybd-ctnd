@@ -516,9 +516,16 @@ function renderCiJobs(jobs) {
     nameEl.className = 'ci-job-name';
     nameEl.textContent = `#${j.run_number} ${j.name ?? ''}`;
 
+    // What the run tests: the PR title or the commit's first line.
+    const titleEl = document.createElement('span');
+    titleEl.className = 'ci-job-title';
+    titleEl.textContent = j.title ?? '';
+    titleEl.hidden = !j.title;
+
     const metaEl = document.createElement('span');
     metaEl.className = 'ci-job-meta';
-    metaEl.textContent = `${j.event ?? ''} · ${j.head_branch ?? ''}`;
+    metaEl.textContent = [j.pr ? `PR #${j.pr}` : null, j.event, j.head_branch, j.head_sha]
+      .filter(Boolean).join(' · ');
 
     const timeEl = document.createElement('span');
     timeEl.className = 'ci-job-times';
@@ -529,7 +536,18 @@ function renderCiJobs(jobs) {
     labelEl.textContent = running ? 'Running' : finished ? (CI_RESULT[result] || result)
       : j.stale ? 'Stale' : 'Queued';
 
-    bodyEl.append(nameEl, metaEl, timeEl);
+    // The run's jobs on the rig, one tag each, coloured by state.
+    const rigEl = document.createElement('span');
+    rigEl.className = 'ci-job-rig';
+    (j.rig || []).forEach(r => {
+      const t = document.createElement('span');
+      t.className = 'ci-rig-tag ci-rig-' + (r.status === 'completed' ? (r.conclusion || 'done') : r.status);
+      t.textContent = r.tag;
+      rigEl.appendChild(t);
+    });
+    rigEl.hidden = !rigEl.childElementCount;
+
+    bodyEl.append(nameEl, titleEl, metaEl, rigEl, timeEl);
     card.append(iconEl, bodyEl, labelEl);
     frag.appendChild(card);
   });
