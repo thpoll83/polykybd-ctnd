@@ -90,6 +90,75 @@ class StepIntervalTest(unittest.TestCase):
         self.assertIn("LED steps L 97 / R 32 ms", camera.judge(res)["info"])
 
 
+class FramesTest(unittest.TestCase):
+    """The frames the UI shows: the recording in progress and the last one."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_png_gray_is_a_valid_png(self):
+        import struct
+        import zlib
+        png = camera.png_gray(3, 2, bytes([0, 128, 255, 10, 20, 30]))
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+        w, h = struct.unpack(">II", png[16:24])
+        self.assertEqual((w, h), (3, 2))
+        idat = png.index(b"IDAT")
+        n = struct.unpack(">I", png[idat - 4:idat])[0]
+        rows = zlib.decompress(png[idat + 4:idat + 4 + n])
+        self.assertEqual(rows, b"\x00\x00\x80\xff\x00\x0a\x14\x1e")
+
+    def test_label_of_a_ci_pr_run(self):
+        lab = camera.recording_label({
+            "GITHUB_ACTIONS": "true", "GITHUB_RUN_NUMBER": "1870", "GITHUB_RUN_ID": "9",
+            "GITHUB_JOB": "hil-test", "GITHUB_REF": "refs/pull/485/merge",
+            "GITHUB_SHA": "317d3111fa68"})
+        self.assertEqual(lab["text"], "CI run #1870 · hil-test · PR #485 · 317d311")
+
+    def test_label_of_a_ci_branch_run(self):
+        lab = camera.recording_label({
+            "GITHUB_ACTIONS": "true", "GITHUB_RUN_NUMBER": "7", "GITHUB_JOB": "fwapply-test",
+            "GITHUB_REF": "refs/heads/PolyKybd", "GITHUB_REF_NAME": "PolyKybd",
+            "GITHUB_SHA": "5d9b041000"})
+        self.assertEqual(lab["text"], "CI run #7 · fwapply-test · PolyKybd · 5d9b041")
+
+    def test_label_outside_ci(self):
+        self.assertEqual(camera.recording_label({})["source"], "ui")
+
+    def test_three_frames_kept_with_their_times(self):
+        rec = Recording(2, 2, [100.0 + 16 * i for i in range(9)],
+                        [bytes([i] * 4) for i in range(9)])
+        meta = camera.save_frames(rec, {"text": "x"}, 1700000000.0, self.dir)
+        self.assertEqual([f["t_ms"] for f in meta["frames"]], [0.0, 64.0, 128.0])
+        self.assertEqual(camera.load_frames(self.dir)["label"]["text"], "x")
+        for k in range(3):
+            self.assertTrue((self.dir / f"frame{k}.png").read_bytes().startswith(b"\x89PNG"))
+
+    def test_live_frame_is_the_newest_complete_one(self):
+        import json
+        import time
+        w, h = 4, 2
+        frame = w * h * 3 // 2
+        (self.dir / "rec.json").write_text(json.dumps(
+            {"width": w, "height": h, "started": time.time(), "label": {"text": "CI run #1"}}))
+        # Two complete frames and half of a third (still being written).
+        data = bytes([1] * frame) + bytes([2] * frame) + bytes([3] * (frame // 2))
+        (self.dir / "rec.yuv").write_bytes(data)
+        png, meta = camera.live_frame(self.dir)
+        self.assertEqual(meta["frame"], 2)
+        self.assertEqual(meta["label"]["text"], "CI run #1")
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+    def test_no_live_frame_without_a_recording(self):
+        self.assertIsNone(camera.live_frame(self.dir))
+
+
 class SettingsTest(unittest.TestCase):
     def test_defaults(self):
         s = CameraSettings.from_config({})

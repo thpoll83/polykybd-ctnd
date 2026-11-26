@@ -10,6 +10,7 @@ The kernel drops the lock when the holding process exits, also on a crash.
 """
 import fcntl
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -21,6 +22,27 @@ def _open(path: Path) -> int:
     return os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
 
 
+def _mark_holder(fd: int) -> None:
+    """Write who holds the lock into the file, for holder() (best effort)."""
+    try:
+        name = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else "python"
+        if name == "__main__.py" or name.endswith(".py"):
+            name = " ".join(sys.argv[:3])
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, f"{os.getpid()} {name}\n".encode(), 0)
+    except OSError:
+        pass
+
+
+def holder(path: Path = LOCK_PATH) -> str:
+    """"pid program" of the process that holds the lock, as it wrote it, or ""."""
+    try:
+        with open(path) as f:
+            return f.readline().strip()[:120]
+    except OSError:
+        return ""
+
+
 def try_acquire(path: Path = LOCK_PATH) -> int | None:
     """The lock's file descriptor, or None when another process holds it.
     Pass the descriptor to release()."""
@@ -30,6 +52,7 @@ def try_acquire(path: Path = LOCK_PATH) -> int | None:
     except BlockingIOError:
         os.close(fd)
         return None
+    _mark_holder(fd)
     return fd
 
 
@@ -39,10 +62,13 @@ def acquire_waiting(log=print, path: Path = LOCK_PATH) -> int:
     fd = try_acquire(path)
     if fd is not None:
         return fd
-    log("[runner] the station UI is using the rig; waiting for it to finish…")
+    who = holder(path)
+    log("[runner] the station UI is using the rig"
+        + (f" ({who})" if who else "") + "; waiting for it to finish…")
     start = time.monotonic()
     fd = _open(path)
     fcntl.flock(fd, fcntl.LOCK_EX)
+    _mark_holder(fd)
     log(f"[runner] rig free after {time.monotonic() - start:.0f} s")
     return fd
 

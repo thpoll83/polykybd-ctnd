@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=17">
+  <link rel="stylesheet" href="/static/style.css?v=18">
 </head>
 <body data-status="idle">
   <header>
@@ -113,6 +113,11 @@
         <p class="chart-legend" id="phase-legend" hidden>
           <span class="lg-master">master</span> <span class="lg-slave">slave</span> brightness over the recording
         </p>
+        <div id="phase-frames-box" hidden>
+          <h3>Last recording</h3>
+          <p id="phase-frames-label"></p>
+          <div id="phase-frames"></div>
+        </div>
         <div id="phase-history-box" hidden>
           <h3>History</h3>
           <div id="phase-history"></div>
@@ -161,6 +166,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=24"></script>
+  <script src="/static/app.js?v=25"></script>
 </body>
 </html>

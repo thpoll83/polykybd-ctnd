@@ -60,6 +60,11 @@ class RigLockTest(unittest.TestCase):
         self._hold()
         self.assertIsNone(rig_lock.try_acquire(self.path))
 
+    def test_holder_is_named(self):
+        holder = self._hold()
+        who = rig_lock.holder(self.path)
+        self.assertTrue(who.startswith(str(holder.pid) + " "), who)
+
     def test_runner_waits_for_the_holder(self):
         holder = self._hold()
         lines = []

@@ -356,6 +356,12 @@ values reach `rpicam` as one `--roi` argument in an argv list, never a shell. Th
 caller can do is crop the camera badly, which makes the phase check SKIP. Same exposure as
 the rest of HIL-4: loopback only unless `allow_lan` is set.
 
+The camera snapshot (2026-11-26, later) needs only the camera lock, so it also answers
+during a CI job, and during a recording it serves the recording's newest frame. Two GET
+routes serve the three saved frames: `/camera/frames` (JSON) and `/camera/frames/<n>.png`,
+where `n` is an integer route parameter checked against 0..2, so no request data reaches a
+path. Same exposure as the other camera routes: loopback only unless `allow_lan` is set.
+
 The Runner tab's `cancel_stale_runs` handler (2026-11-26) cancels workflow runs on GitHub
 with the PAT, and deletes a run when GitHub answers 409 to both cancel and force-cancel.
 It takes no input: it lists the queued and running runs itself and acts only on those

@@ -20,20 +20,41 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import threading
+import time
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import rig_lock
 from .config import CAMERA
 
 # The flash cue's period: 256 phase steps of 8 ms (timer_read32() >> 3, as uint8).
 FLASH_CUE_PERIOD_MS = 2048.0
 
 _lock = threading.Lock()   # one capture at a time inside this process
+
+_VAR = Path(__file__).resolve().parent.parent / "var"
+# One capture at a time across processes: the CI runner records the phase check,
+# the UI takes snapshots. Only the camera, not the rig: the UI may show the camera
+# while a CI job runs, except during the CI's recording.
+CAMERA_LOCK_PATH = _VAR / "camera.lock"
+# The recording in progress, in RAM: rec.yuv grows frame by frame and rec.json
+# says what records it, so the UI can show its newest frame meanwhile.
+LIVE_DIR = Path("/dev/shm/polykybd-cam") if os.path.isdir("/dev/shm") else _VAR / "camera-live"
+# Three frames of the last recording (start, middle, end) with the same label.
+FRAMES_DIR = _VAR / "camera_frames"
+FRAMES_KEPT = 3
+
+
+class CameraBusy(RuntimeError):
+    """Another process (or thread) holds the camera."""
 
 
 _TRUE = ("1", "true", "yes", "on")
@@ -254,8 +275,12 @@ def snapshot_jpeg(settings: CameraSettings = SETTINGS,
     if settings.enabled == "no":
         raise RuntimeError("camera.enabled is no in config.yaml")
     if not _lock.acquire(blocking=False):
-        raise RuntimeError("camera busy (a capture is running)")
+        raise CameraBusy("camera busy (a capture is running)")
+    cam_fd = None
     try:
+        cam_fd = rig_lock.try_acquire(CAMERA_LOCK_PATH)
+        if cam_fd is None:
+            raise CameraBusy("camera busy (a recording is running)")
         r = _run(["rpicam-still", "-n", "-t", "300", "--immediate",
                   "--width", str(width), "--height", str(height),
                   "-e", "jpg", "-o", "-", *settings.orient_args(crop)], timeout=20)
@@ -264,6 +289,7 @@ def snapshot_jpeg(settings: CameraSettings = SETTINGS,
             raise RuntimeError(err[-1] if err else f"rpicam-still exit {r.returncode}")
         return r.stdout
     finally:
+        rig_lock.release(cam_fd)
         _lock.release()
 
 
@@ -294,15 +320,40 @@ def split_yuv420(data: bytes, width: int, height: int) -> list[bytes]:
     return [data[i:i + y] for i in range(0, len(data) - frame + 1, frame)]
 
 
-def record(settings: CameraSettings = SETTINGS, seconds: float | None = None) -> Recording:
-    """Record raw frames to RAM (/dev/shm) and return their Y planes and timestamps."""
+def _acquire_camera(timeout_s: float):
+    """The cross-process camera lock, waiting up to timeout_s for a snapshot to end."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        fd = rig_lock.try_acquire(CAMERA_LOCK_PATH)
+        if fd is not None or time.monotonic() >= deadline:
+            return fd
+        time.sleep(0.05)
+
+
+def record(settings: CameraSettings = SETTINGS, seconds: float | None = None,
+           label: dict | None = None) -> Recording:
+    """Record raw frames to RAM (/dev/shm) and return their Y planes and timestamps.
+
+    While it records, LIVE_DIR holds the growing raw file and its label, for
+    live_frame(). Afterwards three frames are kept in FRAMES_DIR (save_frames())."""
     seconds = settings.record_s if seconds is None else seconds
+    label = recording_label() if label is None else label
     if not _lock.acquire(timeout=30):
-        raise RuntimeError("camera busy (a snapshot did not finish)")
-    shm = "/dev/shm" if os.path.isdir("/dev/shm") else None
+        raise CameraBusy("camera busy (a snapshot did not finish)")
+    cam_fd = None
+    started = time.time()
     try:
-        with tempfile.TemporaryDirectory(prefix="polykybd-cam-", dir=shm) as tmp:
-            raw, pts = os.path.join(tmp, "v.yuv"), os.path.join(tmp, "pts.txt")
+        cam_fd = _acquire_camera(30)
+        if cam_fd is None:
+            raise CameraBusy("camera busy (another process holds it)")
+        LIVE_DIR.mkdir(parents=True, exist_ok=True)
+        raw, pts = str(LIVE_DIR / "rec.yuv"), str(LIVE_DIR / "rec.pts")
+        for stale in (raw, pts):
+            if os.path.exists(stale):
+                os.unlink(stale)
+        _write_json(LIVE_DIR / "rec.json", {"width": settings.width, "height": settings.height,
+                                            "started": started, "label": label})
+        try:
             argv = ["rpicam-vid", "-n", "-t", str(int(seconds * 1000)),
                     "--codec", "yuv420", "-o", raw, "--save-pts", pts,
                     "--width", str(settings.width), "--height", str(settings.height),
@@ -320,10 +371,121 @@ def record(settings: CameraSettings = SETTINGS, seconds: float | None = None) ->
                 lumas = split_yuv420(f.read(), settings.width, settings.height)
             with open(pts) as f:
                 ts = parse_pts(f.read())
+        finally:
+            for name in ("rec.json", "rec.yuv", "rec.pts"):
+                try:
+                    (LIVE_DIR / name).unlink()
+                except OSError:
+                    pass
     finally:
+        rig_lock.release(cam_fd)
         _lock.release()
     n = min(len(lumas), len(ts))
-    return Recording(settings.width, settings.height, ts[:n], lumas[:n])
+    rec = Recording(settings.width, settings.height, ts[:n], lumas[:n])
+    try:
+        save_frames(rec, label, started)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("camera: could not save frames: %s", exc)
+    return rec
+
+
+# ── Frames for the UI: the recording in progress and the last one ────────────
+
+def recording_label(env: dict | None = None) -> dict:
+    """What records: a CI job (run number, job, PR or branch, commit) or the UI.
+    ``text`` is the caption the UI shows."""
+    env = os.environ if env is None else env
+    if env.get("GITHUB_ACTIONS") == "true":
+        m = re.match(r"refs/pull/(\d+)/", env.get("GITHUB_REF", ""))
+        where = (f"PR #{m.group(1)}" if m else
+                 env.get("GITHUB_HEAD_REF") or env.get("GITHUB_REF_NAME") or "")
+        lab = {"source": "ci", "run": env.get("GITHUB_RUN_NUMBER", ""),
+               "run_id": env.get("GITHUB_RUN_ID", ""), "job": env.get("GITHUB_JOB", ""),
+               "where": where, "commit": env.get("GITHUB_SHA", "")[:7]}
+        parts = [f"CI run #{lab['run']}" if lab["run"] else "CI run", lab["job"],
+                 lab["where"], lab["commit"]]
+        lab["text"] = " · ".join(p for p in parts if p)
+        return lab
+    return {"source": "ui", "text": "UI · Measure phase now"}
+
+
+def png_gray(width: int, height: int, data: bytes) -> bytes:
+    """An 8-bit greyscale PNG of one Y plane (no library needed)."""
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (struct.pack(">I", len(body)) + kind + body
+                + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+    rows = b"".join(b"\x00" + data[y * width:(y + 1) * width] for y in range(height))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, 6)) + chunk(b"IEND", b""))
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def save_frames(rec: Recording, label: dict, started: float,
+                directory: Path | None = None) -> dict | None:
+    """Keep FRAMES_KEPT frames of a recording (start, middle, end) as PNG files
+    plus frames.json (label, time of each frame). Returns the metadata."""
+    directory = FRAMES_DIR if directory is None else directory
+    n = len(rec.lumas)
+    if not n:
+        return None
+    picks = sorted({0, n // 2, n - 1})
+    directory.mkdir(parents=True, exist_ok=True)
+    t0 = rec.timestamps_ms[0] if rec.timestamps_ms else 0.0
+    frames = []
+    for k, i in enumerate(picks):
+        t_ms = (rec.timestamps_ms[i] - t0) if i < len(rec.timestamps_ms) else 0.0
+        name = f"frame{k}.png"
+        tmp = directory / (name + ".tmp")
+        tmp.write_bytes(png_gray(rec.width, rec.height, rec.lumas[i]))
+        os.replace(tmp, directory / name)
+        frames.append({"file": name, "t_ms": round(t_ms, 1),
+                       "at": datetime.fromtimestamp(started + t_ms / 1000, timezone.utc)
+                                     .isoformat(timespec="seconds")})
+    meta = {"label": label, "frames": frames, "count": n,
+            "started": datetime.fromtimestamp(started, timezone.utc).isoformat(timespec="seconds")}
+    _write_json(directory / "frames.json", meta)
+    return meta
+
+
+def load_frames(directory: Path | None = None) -> dict | None:
+    directory = FRAMES_DIR if directory is None else directory
+    try:
+        with open(directory / "frames.json") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def live_frame(directory: Path | None = None) -> tuple[bytes, dict] | None:
+    """The newest complete frame of the recording in progress as PNG, with its
+    label, or None when nothing records."""
+    directory = LIVE_DIR if directory is None else directory
+    try:
+        with open(directory / "rec.json") as f:
+            meta = json.load(f)
+        w, h = int(meta["width"]), int(meta["height"])
+        size = os.path.getsize(directory / "rec.yuv")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    frame = w * h * 3 // 2
+    count = size // frame
+    if count < 1:
+        return None
+    with open(directory / "rec.yuv", "rb") as f:
+        f.seek((count - 1) * frame)
+        y = f.read(w * h)
+    if len(y) < w * h:
+        return None
+    meta["frame"] = count
+    meta["elapsed_s"] = round(time.time() - float(meta.get("started", time.time())), 1)
+    return png_gray(w, h, y), meta
 
 
 class BackgroundRecording:
