@@ -221,10 +221,17 @@ main {
   border-radius: 8px;
   margin-bottom: 8px;
   border: 1px solid transparent;
+  border-left-width: 5px;   /* the state colour, as a stripe */
 }
 
-.ci-job-running { background: #1a2a1a; border-color: #2E7D32; }
-.ci-job-queued  { background: #1e1e00; border-color: #5a5000; }
+/* One colour per state: tinted card, stripe and label in the same hue.
+   Queued amber, running blue (pulsing), passed green, failed red,
+   cancelled/skipped grey, stale dark grey with a dashed stripe. */
+.ci-job-queued  { background: #262000; border-color: #5a4d00; border-left-color: #FFC107; }
+.ci-job-running { background: #0d2033; border-color: #1e4a73; border-left-color: #42A5F5;
+                  animation: ci-running 2s ease-in-out infinite; }
+@keyframes ci-running { 50% { border-left-color: #0d47a1; } }
+@media (prefers-reduced-motion: reduce) { .ci-job-running { animation: none; } }
 
 .ci-job-icon {
   font-size: 18px;
@@ -286,9 +293,9 @@ main {
   flex-shrink: 0;
 }
 
-.ci-job-running .ci-job-label { color: #7ec87e; }
+.ci-job-running .ci-job-label { color: #90CAF9; }
 .ci-job-queued  .ci-job-label { color: #FFD54F; }
-.ci-job-stale   { background: #1e1e1e; border-color: #444; }
+.ci-job-stale   { background: #1a1a1a; border-color: #333; border-left: 5px dashed #555; opacity: 0.8; }
 .ci-job-stale .ci-job-label { color: #9e9e9e; }
 
 .ci-job-times {
@@ -305,12 +312,16 @@ main {
   letter-spacing: 0.5px;
 }
 
-.ci-job-done                      { background: #161616; border-color: #2e2e2e; }
+.ci-job-done                      { background: #1c1c1c; border-color: #333; border-left-color: #777; }
 .ci-job-done .ci-job-label        { color: #9e9e9e; }
+.ci-result-success                { background: #10241a; border-color: #1f4d2c; border-left-color: #43A047; }
 .ci-result-success .ci-job-label  { color: #7ec87e; }
+.ci-result-failure,
+.ci-result-timed_out              { background: #2a1212; border-color: #5c1a1a; border-left-color: #E53935; }
 .ci-result-failure .ci-job-label,
 .ci-result-timed_out .ci-job-label { color: #ef9a9a; }
-.ci-result-failure                { border-color: #5c1a1a; }
+.ci-result-cancelled,
+.ci-result-skipped                { background: #1f1f24; border-color: #33333d; border-left-color: #8e8ea0; }
 
 /* ── Footer ── */
 /* ── Tabs ── */
@@ -704,6 +715,13 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 .phase-measure select option.bin-other { color: #777; }
 
 /* ── Phase history ── */
+#phase-frames-box[hidden] { display: none; }
+#phase-frames-box h3 { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+#phase-frames-label { font-size: 11px; color: #aaa; margin-bottom: 4px; }
+#phase-frames { display: flex; gap: 4px; }
+#phase-frames figure { flex: 1; margin: 0; min-width: 0; }
+#phase-frames img { width: 100%; display: block; border: 1px solid #333; border-radius: 3px; image-rendering: pixelated; }
+#phase-frames figcaption { font-size: 10px; color: #888; text-align: center; }
 #phase-history-box[hidden] { display: none; }
 #phase-history-box h3 { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
 #phase-history { max-height: 120px; overflow-y: auto; }

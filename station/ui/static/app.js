@@ -512,7 +512,8 @@ function renderCiJobs(jobs) {
 
     const iconEl = document.createElement('span');
     iconEl.className = 'ci-job-icon';
-    iconEl.textContent = running ? '▶' : finished ? (result === 'success' ? '✓' : result === 'failure' ? '✗' : '•')
+    iconEl.textContent = running ? '▶' : finished ? (result === 'success' ? '✓' : result === 'failure' ? '✗'
+                                                   : result === 'cancelled' ? '⊘' : '•')
       : j.stale ? '⊘' : '⏳';
 
     const bodyEl = document.createElement('span');
@@ -595,6 +596,7 @@ function openCamera() {
   clearCameraImage();
   loadPhaseLast();
   loadPhaseHistory();
+  loadPhaseFrames();
   loadPhaseBins();
   _sharpPeak = 0;
   document.getElementById('camera-sharp').textContent = '';
@@ -663,8 +665,14 @@ function refreshCamera() {
   const msg = document.getElementById('camera-msg');
   const adjusting = _adjust;   // the adjust session this request belongs to, or null
   const full = adjusting ? '&full=1' : '';
+  let recording = null;   // set when the answer is a frame of a recording in progress
   fetch('/camera/snapshot.jpg?t=' + Date.now() + full)
-    .then(r => r.ok ? r.blob() : r.text().then(t => { throw new Error(t); }))
+    .then(r => {
+      if (!r.ok) return r.text().then(t => { throw new Error(t); });
+      const lab = r.headers.get('X-Camera-Label');
+      if (lab) recording = decodeURIComponent(lab);
+      return r.blob();
+    })
     .then(b => {
       if (gen !== _cameraGen || adjusting !== _adjust) return;
       if (img.src) URL.revokeObjectURL(img.src);
@@ -673,6 +681,8 @@ function refreshCamera() {
         // Only now is the full-frame image on screen: drawing may start.
         adjusting.ready = true;
         msg.textContent = adjustHint();
+      } else if (recording) {
+        msg.textContent = 'Recording in progress: ' + recording;
       } else if (_cameraText) msg.textContent = _cameraText;   // clear an earlier "busy" error
     })
     .catch(e => {
@@ -718,7 +728,40 @@ function loadPhaseLast() {
     .catch(() => {});
 }
 
-socket.on('phase_result', d => { _phaseSeq++; renderPhase(d); loadPhaseHistory(); });
+socket.on('phase_result', d => { _phaseSeq++; renderPhase(d); loadPhaseHistory(); loadPhaseFrames(); });
+
+/* Three frames of the last recording (start, middle, end) with what recorded
+   them: a CI job (run, job, PR or branch, commit) or this UI. */
+let _framesSeq = 0;
+function loadPhaseFrames() {
+  const seq = ++_framesSeq;
+  fetch('/camera/frames')
+    .then(r => r.json())
+    .then(meta => { if (seq === _framesSeq) renderPhaseFrames(meta); })
+    .catch(() => {});
+}
+
+function renderPhaseFrames(meta) {
+  const box = document.getElementById('phase-frames-box');
+  const strip = document.getElementById('phase-frames');
+  const label = document.getElementById('phase-frames-label');
+  strip.replaceChildren();
+  const frames = (meta && meta.frames) || [];
+  box.hidden = !frames.length;
+  if (!frames.length) return;
+  label.textContent = `${(meta.label && meta.label.text) || 'Recording'} · ${fmtTime(meta.started)}`;
+  const stamp = encodeURIComponent(meta.started || '');
+  frames.forEach((f, i) => {
+    const fig = document.createElement('figure');
+    const img = document.createElement('img');
+    img.src = `/camera/frames/${i}.png?t=${stamp}`;
+    img.alt = `Recording frame ${i + 1} of ${frames.length}`;
+    const cap = document.createElement('figcaption');
+    cap.textContent = `${i + 1}/${frames.length} · ${(f.t_ms / 1000).toFixed(1)} s`;
+    fig.append(img, cap);
+    strip.appendChild(fig);
+  });
+}
 
 /* The last measurements (newest first): when, from where, which firmware,
    result and offset, to compare builds, e.g. a release before and after a fix. */

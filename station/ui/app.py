@@ -7,6 +7,7 @@ import signal
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -947,29 +948,49 @@ def camera_history():
 def camera_snapshot():
     """One JPEG from the rig camera, rotated and flipped as config.yaml says.
 
-    Refused while the UI flashes or tests and while a CI job runs: the camera
-    serves one client at a time, and the CI phase check records with it.
+    It needs only the camera (camera.CAMERA_LOCK_PATH), not the rig, so it works
+    while a CI job runs. While a recording holds the camera (the phase check, from
+    CI or the UI), it answers with the recording's newest frame as PNG instead,
+    and the X-Camera-Label header names what records (URL-encoded).
     """
     from station import camera
-    if _status["value"] not in ("idle", "error"):
-        return Response(f"rig busy ({_status['value']})", status=503, mimetype="text/plain")
-    if _ci_job_on_rig():
-        return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     # ?full=1: the whole field of view, without the ROI, for "Adjust view".
-    crop = request.args.get("full") != "1"
+    full = request.args.get("full") == "1"
     try:
-        rig_fd = rig_lock.try_acquire()
-    except OSError as exc:
-        return Response(f"cannot open the rig lock: {exc}", status=503, mimetype="text/plain")
-    if rig_fd is None:
-        return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
-    try:
-        jpg = camera.snapshot_jpeg(crop=crop)
+        jpg = camera.snapshot_jpeg(crop=not full)
+    except camera.CameraBusy as exc:
+        live = None if full else camera.live_frame()
+        if live is None:
+            return Response(str(exc), status=503, mimetype="text/plain")
+        png, meta = live
+        text = (meta.get("label") or {}).get("text") or "a recording"
+        caption = f"{text} · frame {meta.get('frame')} · {meta.get('elapsed_s')} s"
+        return Response(png, mimetype="image/png", headers={
+            "Cache-Control": "no-store",
+            "X-Camera-Label": urllib.parse.quote(caption)})
     except Exception as exc:
         return Response(str(exc), status=503, mimetype="text/plain")
-    finally:
-        rig_lock.release(rig_fd)
     return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.route("/camera/frames")
+def camera_frames():
+    """The three frames kept from the last recording: label and time of each."""
+    from station import camera
+    return jsonify(camera.load_frames() or {})
+
+
+@app.route("/camera/frames/<int:index>.png")
+def camera_frame(index: int):
+    from station import camera
+    if not 0 <= index < camera.FRAMES_KEPT:
+        return Response("no such frame", status=404, mimetype="text/plain")
+    path = camera.FRAMES_DIR / f"frame{index}.png"
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return Response("no such frame", status=404, mimetype="text/plain")
+    return Response(data, mimetype="image/png", headers={"Cache-Control": "no-store"})
 
 
 # ── SocketIO events ───────────────────────────────────────────────────────────
@@ -1224,7 +1245,10 @@ def _run_exclusive(what: str, busy_status: str, body) -> bool:
         return False
     if rig_fd is None:
         _RIG_LOCK.release()
-        emit_log(f"[ui] a CI job holds the rig — {what} ignored")
+        who = rig_lock.holder()
+        emit_log(f"[ui] the rig is held by another process"
+                 f"{f' (pid {who})' if who else ''} — {what} ignored. If no CI job runs: "
+                 f"sudo fuser -v {rig_lock.LOCK_PATH}")
         return False
     set_status(busy_status)
 

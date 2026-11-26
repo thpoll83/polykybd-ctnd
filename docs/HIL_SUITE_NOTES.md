@@ -682,6 +682,19 @@ firmware also moves between stagings: two measurements without a reset gave −7
 −346 ms (2026-11-26), the second after the master's USB dropped three times during the
 BEGIN erase. So only a pass after the fix proves it, not the exact number before.
 
+The camera has its own flock, `var/camera.lock`, held by a recording (`camera.record()`)
+and by a snapshot. A snapshot therefore works while a CI job runs, except during its 8 s
+recording. Meanwhile the recording writes its raw frames to `/dev/shm/polykybd-cam/rec.yuv`
+with `rec.json` (size, start time, label), and the snapshot route answers with the newest
+complete frame as greyscale PNG; the `X-Camera-Label` header names what records, e.g.
+`CI run #1870 · hil-test · PR #485 · 317d311` (from the job's `GITHUB_*` variables) or
+`UI · Measure phase now`. After each recording three frames (start, middle, end) stay in
+`var/camera_frames/` with `frames.json`, and the Camera tab shows them under "Last
+recording" (`/camera/frames`, `/camera/frames/<0-2>.png`).
+
+The rig lock file holds the holder's PID and program; a refusal names it. If no CI job runs
+and the UI still reports the rig held, `sudo fuser -v var/rig.lock` shows the process.
+
 The UI and the CI runners share one lock on the rig, an flock on `var/rig.lock`
 (`station/rig_lock.py`). `python -m station.test_runner` and `python -m station.perf_runner`
 take it at start and wait while the UI holds it. The UI asks without waiting: while a CI
