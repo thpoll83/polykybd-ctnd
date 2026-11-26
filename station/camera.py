@@ -507,9 +507,19 @@ def save_last(record: dict, source: str, ts: list[float] | None = None,
         data["traces"] = {"t_ms": t, "master": m, "slave": sl}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, path)
+        # A unique temp file per writer: the CI runner and the UI are separate
+        # processes and can finish at the same moment.
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data))
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError as exc:
         logging.getLogger("polykybd-ctnd").warning("could not save the camera result: %s", exc)
 

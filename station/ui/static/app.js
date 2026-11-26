@@ -27,6 +27,7 @@ socket.on('status', ({ value }) => {
   statusEl.textContent = value;
   const busy = value !== 'idle' && value !== 'error';
   actionBtns.forEach(b => b.disabled = busy);
+  if (!busy) resultsEnded();
 });
 
 socket.on('log', ({ msg }) => appendLog(msg));
@@ -99,6 +100,7 @@ socket.on('test_result', result => {
 /* One row per test in the Test tab, with a status chip, so the outcome is
    visible without scrolling the log. */
 function renderResults(result) {
+  _resultsPending = false;
   const box = document.getElementById('results');
   box.replaceChildren();
   const head = document.createElement('div');
@@ -127,7 +129,24 @@ function renderResults(result) {
   });
 }
 
+// Set while a test run's results are expected. A run that ends without a
+// test_result (an exception, a lost connection) would otherwise leave the
+// "Running…" text up for good, so the status handler replaces it.
+let _resultsPending = false;
+
+function resultsEnded() {
+  if (!_resultsPending) return;
+  _resultsPending = false;
+  const box = document.getElementById('results');
+  box.replaceChildren();
+  const p = document.createElement('p');
+  p.className = 'placeholder';
+  p.textContent = 'The run ended without a result. The Log tab shows why.';
+  box.appendChild(p);
+}
+
 function resultsRunning(what) {
+  _resultsPending = true;
   const box = document.getElementById('results');
   box.replaceChildren();
   const p = document.createElement('p');
@@ -165,7 +184,6 @@ function runPerf() {
   const right = document.getElementById('right-fw').value;
   if (!left || !right) { appendLog('[ui] select both left and right firmware files first'); return; }
   appendLog('[ui] running performance measurement (needs a POLYKYBD_LOOP_PROFILE build)…');
-  resultsRunning('Measuring performance');
   socket.emit('run_perf', { left_uf2: left, right_uf2: right });
 }
 

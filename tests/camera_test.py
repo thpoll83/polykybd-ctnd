@@ -278,6 +278,12 @@ class LastResultTest(unittest.TestCase):
         self.path.write_text("{not json")
         self.assertIsNone(camera.load_last(self.path))
 
+    def test_no_temp_files_left(self):
+        for i in range(3):
+            camera.save_last({"status": "pass", "n": i}, "ci", path=self.path)
+        self.assertEqual(camera.load_last(self.path)["n"], 2)
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ["last.json"])
+
     def test_write_failure_does_not_raise(self):
         # A path under a file cannot be created: save_last logs and returns.
         blocker = self.path.parent
