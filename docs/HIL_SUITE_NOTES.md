@@ -671,6 +671,11 @@ process from the UI. **Measure phase now** stages the selected `.bin` over HID, 
 on the flash cue, and records meanwhile: stage + verify only, no APPLY, like the CI step.
 The `.bin` must be the build the rig runs, or the version cross-check refuses it.
 
+For focusing the lens (the OV5647 module has a manual, fixed-focus lens), the Camera tab
+shows the sharpness of each snapshot: the variance of the 4-neighbour Laplacian of its grey
+values, computed in the browser. It only compares snapshots of the same scene and light,
+so the tab shows the peak since it opened; turn the lens until the value peaks, then lock it.
+
 Capture uses `rpicam-vid` raw YUV into `/dev/shm`, with fixed exposure, gain and white
 balance from `config.yaml` (`camera:` block in `config/config.yaml.example`). It needs no
 new Python package and no sudo grant (the station user is in the `video` group).

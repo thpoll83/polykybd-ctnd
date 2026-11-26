@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=8">
+  <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body data-status="idle">
   <header>
@@ -87,6 +87,7 @@
           <span class="camera-tag" id="camera-tag-right" hidden></span>
         </div>
         <p id="camera-msg">Loading camera…</p>
+        <p id="camera-sharp" title="Variance of the Laplacian of the snapshot. Turn the lens until the number peaks; keep the camera and the scene still meanwhile."></p>
         <div class="button-row camera-buttons">
           <button class="btn btn-gray btn-sm" onclick="refreshCamera()">&#x21BB; Refresh</button>
           <label class="chk chk-sm"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (2 s)</label>
@@ -144,6 +145,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=8"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 </html>

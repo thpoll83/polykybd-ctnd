@@ -342,7 +342,7 @@ action button is disabled.
 |---|---|
 | **Test** | Left / Right firmware selection from `/opt/polykybd-ctnd/firmware/` (⟳ refreshes the list), **Flash Left / Flash Right**, **Run Tests** (flash both halves, then run the suite; **Extended** adds the slow tier), **Measure Perf**. The results of the last run are listed, one row per test with its status. |
 | **Hardware** | One card per half: USB power, BOOTSEL and Reset toggles. **Handedness: USB = Left / Right**. |
-| **Camera** | The rig camera's live view with the `split_x` line and MASTER/SLAVE labels, the last RGB phase measurement with its brightness traces, and **Measure phase now** (stages the selected `.bin` over HID and records the flash cue). See `docs/HIL_SUITE_NOTES.md` → *The RGB phase check*. |
+| **Camera** | The rig camera's live view with the `split_x` line and MASTER/SLAVE labels, a sharpness number for focusing the lens (turn it until the number peaks; it turns green at the peak), the last RGB phase measurement with its brightness traces, and **Measure phase now** (stages the selected `.bin` over HID and records the flash cue). See `docs/HIL_SUITE_NOTES.md` → *The RGB phase check*. |
 | **Runner** | Queued and running CI jobs, **⌕ Diagnose** (full runner diagnostic in the log), **⟳ Restart** (`systemctl restart` the runner service, for a configured-but-wedged runner), **↻ Re-register** (stop → reconfigure → restart, two-tap confirm, for a broken or `Not configured` registration), **Quit**. |
 | **Log** | The full log, **Copy Log**, **Clear Log**. |
 

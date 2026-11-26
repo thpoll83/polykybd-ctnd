@@ -191,6 +191,15 @@ main {
 #camera-tag-left  { left: 6px; }
 #camera-tag-right { right: 6px; }
 
+#camera-sharp {
+  font-size: 13px;
+  color: #aaa;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+#camera-sharp.at-peak { color: #7ec87e; font-weight: 700; }
+
 #camera-msg {
   color: #888;
   font-size: 12px;

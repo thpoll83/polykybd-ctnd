@@ -430,6 +430,8 @@ function openCamera() {
   _cameraInfo = null;
   clearCameraImage();
   loadPhaseLast();
+  _sharpPeak = 0;
+  document.getElementById('camera-sharp').textContent = '';
   const msg = document.getElementById('camera-msg');
   msg.textContent = 'Loading camera…';
   fetch('/camera/info')
@@ -577,7 +579,52 @@ function measurePhase() {
   socket.emit('measure_phase', { bin: sel.value });
 }
 
+/* ── Focus aid ──
+   Sharpness of each snapshot as the variance of the 4-neighbour Laplacian of
+   its grey values, computed here on a canvas (the server has no image
+   library). A sharper image has stronger edges and a larger value. The
+   number only compares snapshots of the same scene and lighting, so it shows
+   the peak since the tab opened next to the current value. */
+let _sharpPeak = 0;
+const _sharpCanvas = document.createElement('canvas');
+
+function sharpness(img) {
+  const w = Math.min(img.naturalWidth, 640);
+  const h = Math.round(img.naturalHeight * w / img.naturalWidth);
+  if (w < 3 || h < 3) return 0;
+  _sharpCanvas.width = w;
+  _sharpCanvas.height = h;
+  const ctx = _sharpCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0, j = 0; i < g.length; i++, j += 4) {
+    g[i] = 0.299 * px[j] + 0.587 * px[j + 1] + 0.114 * px[j + 2];
+  }
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const lap = g[i - 1] + g[i + 1] + g[i - w] + g[i + w] - 4 * g[i];
+      sum += lap; sum2 += lap * lap; n++;
+    }
+  }
+  const mean = sum / n;
+  return sum2 / n - mean * mean;
+}
+
+function showSharpness() {
+  const img = document.getElementById('camera-img');
+  const el = document.getElementById('camera-sharp');
+  if (!_cameraInfo || !img.naturalWidth) { el.textContent = ''; return; }
+  const v = sharpness(img);
+  _sharpPeak = Math.max(_sharpPeak, v);
+  el.textContent = `Sharpness ${v.toFixed(0)} (peak ${_sharpPeak.toFixed(0)} since this tab opened)`;
+  el.classList.toggle('at-peak', v >= 0.97 * _sharpPeak);
+}
+
 document.getElementById('camera-img').addEventListener('load', placeCameraOverlay);
+document.getElementById('camera-img').addEventListener('load', showSharpness);
 window.addEventListener('resize', placeCameraOverlay);
 
 function quitApp() { window.close(); }
