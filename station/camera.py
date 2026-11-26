@@ -53,6 +53,11 @@ FRAMES_DIR = _VAR / "camera_frames"
 FRAMES_KEPT = 3
 
 
+class PrepareRefused(RuntimeError):
+    """measure_now()'s prepare step found the rig not fit to measure; the
+    message is the SKIP reason."""
+
+
 class CameraBusy(RuntimeError):
     """Another process (or thread) holds the camera."""
 
@@ -1228,7 +1233,11 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS,
     # changes SETTINGS in place) must not split frames captured with the old crop.
     settings = snapshot_settings(settings)
     if prepare is not None:
-        prepare()
+        try:
+            prepare()
+        except PrepareRefused as exc:
+            return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": str(exc)},
+                             "ui", fw=image_fw(bin_path))
     rec = BackgroundRecording(settings)
     fails = []   # the staging's FAIL lines, for the saved reason
 

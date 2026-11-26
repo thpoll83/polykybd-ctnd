@@ -1543,7 +1543,13 @@ def on_measure_phase(data):
         try:
             def _prepare():
                 if not _staggered_reset(emit_log):
-                    emit_log("[ui] the master did not settle after the reset; measuring anyway")
+                    # Staging would only run into the 90 s BEGIN timeout: a master
+                    # that stays slow after a reset means the split link is down,
+                    # and a reset does not clear that (2026-11-26, after a
+                    # firmware-apply run; a fresh flash of both halves did).
+                    raise camera.PrepareRefused(
+                        "the master did not settle after the reset, so the split link is "
+                        "likely down: flash both halves (BOOTSEL), then measure again")
                 emit_log(f"[ui] measuring the RGB phase while staging {Path(path).name}…")
 
             rec = camera.measure_now(str(path), emit_log, prepare=_prepare)

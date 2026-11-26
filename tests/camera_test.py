@@ -606,6 +606,31 @@ class MeasureNowStagingFailedTest(unittest.TestCase):
                 fw.stage_and_verify, camera.availability, camera.LAST_RESULT_PATH = orig
         self.assertEqual(order, ["prepare", "stage"])
 
+    def test_a_refused_prepare_skips_without_staging(self):
+        import station.fw_update as fw
+        import tempfile
+        from pathlib import Path
+        staged = []
+        orig = (fw.stage_and_verify, camera.availability, camera.LAST_RESULT_PATH)
+
+        def refuse():
+            raise camera.PrepareRefused("the master did not settle after the reset")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fw.stage_and_verify = lambda *a, **k: staged.append(1) or True
+            camera.availability = lambda s=None: (True, "fake camera")
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            try:
+                out = camera.measure_now("fw.bin", lambda m: None, CameraSettings.from_config({}),
+                                         prepare=refuse)
+                saved = camera.load_last()
+            finally:
+                fw.stage_and_verify, camera.availability, camera.LAST_RESULT_PATH = orig
+        self.assertEqual(staged, [])
+        self.assertEqual((out["status"], out["reason"]),
+                         ("skip", "the master did not settle after the reset"))
+        self.assertEqual(saved["status"], "skip")
+
 
 class ViewOverrideTest(unittest.TestCase):
     """The crop and split line set in the UI's "Adjust view"."""
