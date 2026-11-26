@@ -171,16 +171,34 @@ class CancelRunTest(unittest.TestCase):
         self._fake({"cancel": 409, "force-cancel": 409, "delete": 409},
                    run={"status": "queued", "stale": True})
         self.assertEqual(app._cancel_run(11),
-                         "failed (cancel 409, force-cancel 409, delete 409)")
+                         "refused (cancel 409, force-cancel 409, delete 409)")
 
     def test_other_error_stops_without_delete(self):
         calls = self._fake({"cancel": 500})
-        self.assertEqual(app._cancel_run(12), "failed (cancel 500)")
+        self.assertEqual(app._cancel_run(12), "refused (cancel 500)")
         self.assertEqual(calls, ["cancel"])
 
     def test_missing_permission_is_named(self):
         self._fake({"cancel": 403})
         self.assertIn("Actions: Read and write", app._cancel_run(9))
+
+    def test_refused_delete_does_not_blame_the_token(self):
+        # On the rig: cancel 409, force-cancel 409, delete 403 with a token that
+        # can cancel. The 409s show the token passed; GitHub's text is the reason.
+        self._fake({"cancel": 409, "force-cancel": 409, "delete": 403},
+                   run={"status": "queued", "stale": True})
+        app._GH_LAST_ERROR.message = ""
+        orig = app._gh_api
+
+        def with_message(path, timeout=10, method="GET"):
+            out = orig(path, timeout, method)
+            if method == "DELETE":
+                app._GH_LAST_ERROR.message = "Cannot delete a run that is not completed"
+            return out
+        app._gh_api = with_message
+        out = app._cancel_run(15)
+        self.assertEqual(out, 'refused (cancel 409, force-cancel 409, delete 403): '
+                              'GitHub says "Cannot delete a run that is not completed"')
 
 
 @unittest.skipIf(app is None, "Flask not installed")
