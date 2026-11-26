@@ -67,7 +67,8 @@ QUAD_SIDES = ("left", "right")   # the board halves, as named in var/camera_view
 def parse_quads(v) -> tuple:
     """{"left": [[x, y] * 4], "right": [...]} (or the tuple form) to
     ((left corners), (right corners)). Each corner lies in 0..1 and each quad is
-    convex, so the outline can be warped into it and its inside tested."""
+    convex, so the outline can be warped into it and its inside tested. None or
+    an empty mapping means no quads (a saved view writes {} for that)."""
     if not v:
         return ()
     if isinstance(v, dict):
@@ -288,16 +289,20 @@ def save_view_override(roi: str, split_x: float, path: Path | None = None,
     """
     path = VIEW_OVERRIDE_PATH if path is None else path
     try:
-        if quads:
-            q = parse_quads(quads)
+        if quads is not None:
+            # Supplied quads must be two outlines; an empty value would clear them.
+            q = parse_quads(quads) if quads else ()
+            if not q:
+                raise ValueError("camera quads must be two four-corner outlines")
             roi, split_x = view_from_quads(q, CameraSettings.from_config(CAMERA))
         v = CameraSettings.from_config({**(CAMERA or {}), "roi": roi, "split_x": split_x,
-                                        "quads": quads or None})
+                                        "quads": quads if quads is not None else {}})
     except (TypeError, ValueError) as exc:
         return str(exc)
-    data = {"roi": v.roi, "split_x": v.split_x}
-    if v.quads:
-        data["quads"] = {k: [list(p) for p in q] for k, q in zip(QUAD_SIDES, v.quads)}
+    # Always written, {} for none, so quads in config.yaml cannot come back on
+    # reload under a crop that was saved without them.
+    data = {"roi": v.roi, "split_x": v.split_x,
+            "quads": {k: [list(p) for p in q] for k, q in zip(QUAD_SIDES, v.quads)}}
     with _view_lock:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -659,10 +664,14 @@ def side_traces(rec: Recording, split_x: float, step: int = 4,
     rows = list(range(0, h, step))
     if quads_px:
         a, b = sorted(quads_px, key=lambda q: sum(x for x, _ in q))
-        idx_l = [r * w + c for r in rows for c in cols if inside_quad(a, c, r)]
-        idx_r = [r * w + c for r in rows for c in cols if inside_quad(b, c, r)]
+        in_a = {r * w + c for r in rows for c in cols if inside_quad(a, c, r)}
+        in_b = {r * w + c for r in rows for c in cols if inside_quad(b, c, r)}
+        # A pixel inside both quads belongs to neither half: shared samples would
+        # pull the two traces together (identical quads read as offset 0).
+        idx_l, idx_r = sorted(in_a - in_b), sorted(in_b - in_a)
         if not idx_l or not idx_r:
-            raise ValueError("a camera quad covers no pixel of the recording; adjust the view again")
+            raise ValueError("a camera quad covers no pixel of the recording that the other "
+                             "quad does not also cover; adjust the view again")
     else:
         idx_l = [r * w + c for r in rows for c in cols if c < cut]
         idx_r = [r * w + c for r in rows for c in cols if c >= cut]

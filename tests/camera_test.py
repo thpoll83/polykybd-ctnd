@@ -785,6 +785,38 @@ class QuadTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "covers no pixel"):
             camera.analyse(synth(0.0), s)
 
+    def test_overlapping_quads_share_no_samples(self):
+        # The same outline twice: no pixel belongs to only one half.
+        s = CameraSettings.from_config({"quads": {"left": LEFT_Q, "right": LEFT_Q}})
+        with self.assertRaisesRegex(ValueError, "does not also cover"):
+            camera.analyse(synth(300.0), s)
+        # Overlapping by a strip in the middle: the strip is dropped, the rest measures.
+        wide_l = [[0.05, 0.1], [0.6, 0.1], [0.6, 0.9], [0.05, 0.9]]
+        wide_r = [[0.4, 0.1], [0.95, 0.1], [0.95, 0.9], [0.4, 0.9]]
+        s = CameraSettings.from_config({"quads": {"left": wide_l, "right": wide_r}})
+        res = camera.analyse(synth(300.0), s)
+        self.assertAlmostEqual(res.offset_ms, 300.0, delta=6.0)
+
+    def test_empty_quads_are_refused_and_a_crop_save_stores_none(self):
+        import tempfile
+        from pathlib import Path
+        orig = (camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "camera_view.json"
+            try:
+                for empty in ({}, []):
+                    self.assertIn("two four-corner outlines",
+                                  camera.save_view_override("", 0.5, path, quads=empty))
+                self.assertFalse(path.exists())
+                # A crop saved without quads must not get config.yaml's quads back on reload.
+                self.assertEqual(camera.save_view_override("0,0,0.5,1", 0.5, path), "")
+                stored = camera.load_view_override(path)
+                self.assertEqual(stored["quads"], {})
+                s, err = camera._load_settings({"quads": {"left": LEFT_Q, "right": RIGHT_Q}}, stored)
+                self.assertEqual((s.roi, s.quads, err), ("0,0,0.5,1", (), ""))
+            finally:
+                camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads = orig
+
     BOARD = {"width_mm": 100.0, "height_mm": 50.0, "leds": [{"ref": "LED1", "x": 25.0, "y": 25.0}]}
 
     def test_homography_maps_the_corners_and_the_leds(self):

@@ -1147,8 +1147,6 @@ function pickTarget(e) {
   return null;
 }
 
-const _r3 = n => Math.round(n * 1000) / 1000;
-
 const _frame = document.getElementById('camera-frame');
 _frame.addEventListener('pointerdown', e => {
   if (!_adjust || !_adjust.ready || !document.getElementById('camera-img').naturalWidth) return;
@@ -1185,7 +1183,9 @@ function saveAdjust() {
   if (!['left', 'right'].every(s => isConvex(_adjust.quads[s]))) return;
   const quads = {};
   for (const side of ['left', 'right']) {
-    quads[side] = _adjust.quads[side].map(p => flipPoint(p, _cameraInfo).map(_r3));
+    // Full precision: rounding can line up three corners, which the server
+    // rejects as not convex. The server rounds the derived crop.
+    quads[side] = _adjust.quads[side].map(p => flipPoint(p, _cameraInfo));
   }
   openLog();
   socket.emit('camera_set_view', { quads });
