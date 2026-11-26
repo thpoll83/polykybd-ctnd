@@ -3,7 +3,7 @@
 Extracted from `CLAUDE.md` 2026-09-14. The prose is unchanged; only heading levels
 and relative links were adjusted to suit a standalone file.
 
-- [x] Write concrete test cases — `station/hil_tests.py` covers every Raw HID command testable without side effects on the unattended rig (identity/fresh-boot, language get/list/list-packed/round-trip, default layer, ACK/NACK error+bounds paths, idle-style / OS / glyph-script round-trips, overlay-flags round-trip, every overlay upload shape — plain, core1 RLE, the two-packet cmd-17 continuation, ROI + its bounds clamp, and both mapping commands — the animation and idle-screensaver paths, GET_ID stress, a bridged split-link soak, and the font-pack/doom flash transport), wired into the `test_runner.py` CLI, plus runner-level checks that need hardware control (the firmware-update stage+verify, the USB suspend/wake rounds and the reboot-persistence power cycle). ⚠️ Count the entries in `TESTS` rather than trusting a number written here — this line has been stale before. Remaining infra-dependent / camera-needing / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
+- [x] Write concrete test cases — `station/hil_tests.py` covers every Raw HID command testable without side effects on the unattended rig (identity/fresh-boot, language get/list/list-packed/round-trip, default layer, ACK/NACK error+bounds paths, idle-style / OS / glyph-script round-trips, overlay-flags round-trip, every overlay upload shape — plain, core1 RLE, the two-packet cmd-17 continuation, ROI + its bounds clamp, and both mapping commands — the animation and idle-screensaver paths, GET_ID stress, a bridged split-link soak, and the font-pack/doom flash transport), wired into the `test_runner.py` CLI, plus runner-level checks that need hardware control (the firmware-update stage+verify, the USB suspend/wake rounds and the reboot-persistence power cycle). ⚠️ Count the entries in `TESTS` rather than trusting a number written here — this line has been stale before. Remaining infra-dependent / deliberately-excluded items are in `docs/FUTURE_TESTS.md`.
   - The **packed language-list** test (cmd 27, protocol v2+) decodes the 2-byte ISO index pairs via `station/iso_lang_country.py` and validates the list **standalone** — staple locales present, every code well-formed `llCC`, decoded count matches the count byte, current language present. (It no longer cross-checks against the ASCII `GET_LANG_LIST`: that command is **retired** — a separate test asserts cmd 8 now NACKs.) ⚠️ `station/iso_lang_country.py` is the **frozen index table**, byte-identical to the copies in `qmk_firmware` (`keyboards/polykybd/lang/`) and `PolyKybdHost` (`polyhost/services/`); keep all three in sync (`cmp`) or the rig decodes wrong languages. cmd 27 is the only language-list command on v2+ firmware; on a pre-v2 board it NACKs — but the packed/legacy/round-trip tests now carry `"min_protocol": 2`, so a pre-v2 board **skips** them rather than failing (see "Tolerating not-yet-deployed changes" below).
   - The **`GET_ID stress`** test (`test_get_id_stress`) deliberately **tolerates isolated no-answers** and fails only on a *freeze signature* — decided by the pure `classify_get_id_stress(oks, n)`: FAIL if total misses `> max(2, n//10)` or there is a run of `>= STRESS_FREEZE_RUN` (3) consecutive misses; otherwise PASS. ⚠️ **Do not re-tighten it to fail on the first miss** — it runs right after the overlay-upload tests, which leave the master in its transient post-overlay **deaf window** (EEPROM write + full keycap refresh; `send_repeated` already retried the host-side USB hiccups internally). The qmk **split-sync re-fire fix** (#80, `sync_succeeded()`) can *lengthen* that window on the rig, where master→slave sync is flaky, so an occasional GET_ID times out and then recovers — that is not the core1 hang this test guards (a permanent hang answers nothing from the hang point on → a long consecutive run, which still fails). A retried `_master_alive` settle runs before the burst to drain the carried-over window and still catch a real hang.
     - ⚠️ **The `max` in that test's `min/avg/max` line is NOT a device latency once
@@ -116,8 +116,8 @@ and relative links were adjusted to suit a standalone file.
       provokes `ai: refused card segment`, so a console that does not show the `ai:`
       lines fails instead of passing.
   - The **key attention** test (`test_key_attention`, cmd 47, `min_protocol: 32`;
-    packer `station/key_attention.py`). The rig camera does not check the ripple yet;
-    this checks the command. A START on split72 key (1, 1) is ACKed, the
+    packer `station/key_attention.py`). It checks the command, not the ripple
+    on the LEDs. A START on split72 key (1, 1) is ACKed, the
     period is ACKed at 23 and 100 and NACKed at 22 and 101, op 2, row 255, col 8 and
     the key without a display (3, 7) are NACKed, and a START until cancelled and
     CANCEL are ACKed. GET_ID must answer afterwards. Ends with CANCEL in a `finally`.
@@ -643,131 +643,18 @@ and relative links were adjusted to suit a standalone file.
   check becomes flaky and then ignored. Read the logged medians across a few runs,
   then promote it (tracked in `docs/FUTURE_TESTS.md`).
 
-## The RGB phase check (camera, report-only)
-
-`station/camera.py`, run by `TestRunner.rgb_phase_check()` right after the HID stage+verify.
-While the firmware stages an image, both halves show the breathing flash cue
-(`keys_com/rgb.c`, a 2048 ms triangle). `stage_and_verify(on_begin=…)` starts an 8 s
-recording once BEGIN succeeds. The analysis finds the pixels that breathe on each side of
-`camera.split_x`, builds one brightness trace per half, and reports the lag with the highest
-cross-correlation within one period. A positive offset means the slave lags the master.
-
-- `pass`: offset within 35 ms (two frames at 58 fps).
-- `xfail`: a larger offset. The cue takes its phase from `timer_read32()`, the local clock
-  of each half, so the halves differ by their boot-time difference mod 2048 ms. Promote
-  this to `fail` once the firmware uses `sync_timer_read32()` there.
-- `skip`: no camera (`camera.enabled: auto` and `rpicam-hello --list-cameras` finds none),
-  staging failed before BEGIN, the `camera:` block in `config.yaml` is invalid (the
-  reason names the value), or the camera saw too little breathing on one half: swing
-  below 3 luma units, a trace that does not repeat after one 2048 ms period
-  (periodicity below 0.6, for example a one-off room-light change), or correlation
-  below 0.6. Check the framing in the UI:
-  the Camera tab shows the image with the `split_x` line and the master/slave labels.
-
-The Camera tab also shows the last measurement, from a CI run or from its **Measure phase
-now** button: status, offset, and the two brightness traces as a chart. The runner writes
-it to `var/camera_phase_last.json` (gitignored), because the CI runner is a separate
-process from the UI. **Measure phase now** first resets both halves and releases the left
-(master) 1 s after the right (`PHASE_RESET_STAGGER_S` in `station/ui/app.py`), then waits
-until the master answers and the split link has settled. It then stages the selected `.bin`
-over HID, which turns on the flash cue, and records meanwhile: stage + verify only, no
-APPLY, like the CI step. The `.bin` must be the build the rig runs, or the version
-cross-check refuses it.
-
-The stagger makes the result clear. Without it the halves boot a random time apart, and
-firmware with the bug can show an offset near 0 by chance. With it, firmware whose cue
-uses each half's own timer shows an offset far from 0, near ±1000 ms (half the 2048 ms
-cue period), and firmware on the shared timer shows about 0 ms. The offset of the buggy
-firmware also moves between stagings: two measurements without a reset gave −744 and
-−346 ms (2026-11-26), the second after the master's USB dropped three times during the
-BEGIN erase. So only a pass after the fix proves it, not the exact number before.
-
-The camera has its own flock, `var/camera.lock`, held by a recording (`camera.record()`)
-and by a snapshot. A snapshot therefore works while a CI job runs, except during its 8 s
-recording. Meanwhile the recording writes its raw frames to `/dev/shm/polykybd-cam/rec.yuv`
-with `rec.json` (size, start time, label), and the snapshot route answers with the newest
-complete frame as greyscale PNG; the `X-Camera-Label` header names what records, e.g.
-`CI run #1870 · hil-test · PR #485 · 317d311` (from the job's `GITHUB_*` variables) or
-`UI · Measure phase now`. After each recording three frames (start, middle, end) stay in
-`var/camera_frames/` with `frames.json`, and the Camera tab shows them in the main view
-under **Last run** (`/camera/frames`, `/camera/frames/<0-2>.png`).
-
-The rig lock file holds the holder's PID and program; a refusal names it. If no CI job runs
-and the UI still reports the rig held, `sudo fuser -v var/rig.lock` shows the process.
+## The rig lock
 
 The UI and the CI runners share one lock on the rig, an flock on `var/rig.lock`
 (`station/rig_lock.py`). `python -m station.test_runner` and `python -m station.perf_runner`
 take it at start and wait while the UI holds it. The UI asks without waiting: while a CI
-job holds it (or a `Runner.Worker` process exists, or GitHub reports the runner busy),
-the UI refuses Flash, Run Tests, Measure Perf and Measure phase now, skips the running
-version query, and the camera snapshot answers 503. The UI's rig lock does not cover the CI runner: on
-2026-11-26 a UI measurement during a HIL job left a staging session open, which failed
-the combos and FW_CHUNK tests, and took the camera from the CI phase check.
+job holds it (or a `Runner.Worker` process exists, or GitHub reports the runner busy), the
+UI refuses its rig actions (Flash, Run Tests, Measure Perf) and skips the running version
+query. On 2026-11-26 a UI action during a HIL job left a staging session open, which failed
+the combos and FW_CHUNK tests.
 
-Every saved measurement is also appended to `var/camera_phase_history.json` (the last 10,
-without traces): time, source, the firmware version from the staged image, for CI runs the
-commit and branch (`GITHUB_SHA`, `GITHUB_HEAD_REF`/`GITHUB_REF_NAME`), status and offset.
-The CI runner and the UI append under an flock on `camera_phase_history.lock`. The Camera
-tab lists it, so a release build and a fix can be compared: run the HIL workflow on the
-release tag, then on the fix.
-
-**Adjust view** in the Camera tab fits one outline per half. It shows the full image
-(`/camera/snapshot.jpg?full=1`) with each board's PCB outline, keycaps and LEDs drawn
-semi-transparent and warped (CSS `matrix3d`) into four corners. Drag each corner until the
-outline lies on its board, or drag inside an outline to move it. Save is off while an
-outline is twisted (not convex). The server validates the corners
-(`camera.parse_quads`), derives the crop (the bounding box of both quads, rounded outwards
-to 0.001) and `split_x` (between the quads), and writes `roi`, `split_x` and `quads` to
-`var/camera_view.json`, which overrides `config.yaml` for them. The CI runner reads the
-file on its next run. An invalid file is ignored with a warning; `config.yaml` then applies.
-
-The quads are stored in sensor fractions, before rotation and flips, like `--roi`, so they
-stay right when `rotation`, `hflip` or `vflip` change. Corners are in the order of the
-outline's top-left, top-right, bottom-right, bottom-left. With quads, the phase check reads
-only the pixels inside each quad (`camera.side_traces`), and the image-left trace is the
-quad whose centre lies further left; `split_x` is not used. A quad that covers no pixel of
-the recording makes the check SKIP with that reason. Without quads, the check splits the
-image at `split_x` as before.
-
-A wide-angle lens bends straight edges. The **Lens** slider in Adjust view sets
-`lens_k` of a one-parameter radial model (`camera.distort`): a point at radius r from the
-image centre (r = 1 in the corners, measured in the 4:3 sensor proportions) is seen at
-r · (1 + lens_k · r²). Barrel distortion is negative. The slider straightens the editor
-image live; move it until the board edges look straight, then fit the corners. The quads
-are stored in the straightened view, and `lens_k` is saved with them (limited to ±0.3:
-the model folds back at −1/3). The crop is the bounding box of the curved quad edges.
-The analysis straightens each sampled pixel (`camera.undistort`, Newton's method on the
-radius) before it tests which quad holds it. On the live view the saved edges are drawn
-curved; the PCB picture is drawn only without a correction (a CSS warp has straight edges).
-
-Each quad maps the board's view box (millimetres) to the straightened view with a
-homography (`camera.board_to_view`); `camera.board_mapper` adds the lens model, the crop
-and the flips. `camera.led_pixels` finds each LED of the board in a recording, and
-`camera.rectify` cuts a half out as a straight, top-down image, for checks per LED.
-The Camera tab's main view switches between **Camera** (the live image), **Flat halves**
-and **Last run** (the three frames above). Flat halves does what `rectify` does, in the
-browser on the live image: each half straightened to the board's millimetres, image-left
-half first, PCB outline on top. It is offered once outlines are saved; Last run once a
-recording left frames.
-
-The outlines come from the KiCad boards. Regenerate them after a board change:
-
-    pip install kiutils
-    for s in left right; do python scripts/pcb_outline.py \
-        ../PolyKybd/poly_kybd/poly_kybd_split72_$s.kicad_pcb station/ui/static/pcb/split72_$s.svg; done
-
-This writes `split72_<side>.svg` (outline, 18 mm keycap squares at the `Kailh_socket_MX*`
-footprints, dots at the `*WS2812*` LEDs) and `split72_<side>.json` (view box size and LED
-centres in the same millimetres). `tests/camera_test.py` checks that the two files agree.
-
-For focusing the lens (the OV5647 module has a manual, fixed-focus lens), the Camera tab
-shows the sharpness of each snapshot: the variance of the 4-neighbour Laplacian of its grey
-values, computed in the browser. It only compares snapshots of the same scene and light,
-so the tab shows the peak since it opened; turn the lens until the value peaks, then lock it.
-
-Capture uses `rpicam-vid` raw YUV into `/dev/shm`, with fixed exposure, gain and white
-balance from `config.yaml` (`camera:` block in `config/config.yaml.example`). It needs no
-new Python package and no sudo grant (the station user is in the `video` group).
+The lock file holds the holder's PID and program; a refusal names it. If no CI job runs
+and the UI still reports the rig held, `sudo fuser -v var/rig.lock` shows the process.
 
 ## The bulk pipe (CDC serial next to raw HID)
 
