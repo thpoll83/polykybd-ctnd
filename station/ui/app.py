@@ -85,9 +85,21 @@ def _gh_api(path: str, timeout: int = 10, method: str = "GET"):
             body = resp.read()
             return resp.status, (json.loads(body) if body else {})
     except urllib.error.HTTPError as exc:
+        _GH_LAST_ERROR.message = _gh_error_message(exc)
         return exc.code, None
     except Exception:
         return None, None
+
+
+_GH_LAST_ERROR = threading.local()   # .message: GitHub's text for this thread's last HTTP error
+
+
+def _gh_error_message(exc) -> str:
+    """GitHub's own "message" from an error response, or "" when there is none."""
+    try:
+        return str(json.loads(exc.read() or b"{}").get("message") or "")[:200]
+    except Exception:
+        return ""
 
 
 # ── CI status poller ──────────────────────────────────────────────────────────
@@ -780,16 +792,20 @@ def _cancel_run(run_id) -> str:
             if cur is None or not _is_stale(cur):
                 state = cur.get("status") if cur else "unknown"
                 return f"not deleted ({', '.join(steps)}; the run is {state} and not stale now)"
+        _GH_LAST_ERROR.message = ""
         code, _ = _gh_api(base + path, method=method)
         steps.append(f"{what} {code if code is not None else 'no answer'}")
         if code == ok:
             return ("cancelled" if method == "POST" else "deleted") + f" ({', '.join(steps)})"
-        if code in (401, 403, 404):
-            return (f"refused ({', '.join(steps)}): the token needs "
-                    "Actions: Read and write")
         if code != 409:
             break
-    return f"failed ({', '.join(steps)})"
+    # GitHub's own reason for the last refusal. A 403 is not always the token:
+    # the cancel calls need the same permission, and a 409 from them shows it.
+    why = getattr(_GH_LAST_ERROR, "message", "")
+    # Only a refusal of the first call points at the token.
+    hint = (" — check that the token has Actions: Read and write"
+            if len(steps) == 1 and code in (401, 403, 404) else "")
+    return f"refused ({', '.join(steps)})" + (f": GitHub says \"{why}\"" if why else "") + hint
 
 
 @socketio.on("cancel_stale_runs")
@@ -826,7 +842,7 @@ def on_cancel_stale_runs(_data=None):
                 done += outcome.startswith(("cancelled", "deleted"))
                 emit_log(f"  #{run.get('run_number')} {run.get('name')} "
                          f"({run.get('head_branch')}, {run.get('created_at')}): {outcome}")
-                if outcome.startswith("refused"):
+                if "check that the token" in outcome:
                     break   # the same token fails for every run
             emit_log(f"[ui] stale runs ended: {done} of {len(stale)}")
         finally:
