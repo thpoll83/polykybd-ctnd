@@ -981,6 +981,46 @@ function distortPt([x, y], k) {
   return [0.5 + dx * f / a, 0.5 + dy * f];
 }
 
+// The radius where r + c r^3 stops growing (barrel correction), in the
+// aspect-corrected units distortPt uses; Infinity without one.
+function lensFold(k) {
+  const a = (_cameraInfo && _cameraInfo.sensor_aspect) || 4 / 3;
+  const c = k / ((a * a + 1) / 4);
+  return c < 0 ? 1 / Math.sqrt(-3 * c) : Infinity;
+}
+
+// Whether a straightened point is one the camera sees (station/camera.py visible()).
+function visiblePt(p, k) {
+  const a = (_cameraInfo && _cameraInfo.sensor_aspect) || 4 / 3;
+  if (Math.hypot((p[0] - 0.5) * a, p[1] - 0.5) > lensFold(k)) return false;
+  const [x, y] = distortPt(p, k);
+  return x >= 0 && x <= 1 && y >= 0 && y <= 1;
+}
+
+// How far the straightened view reaches past 0..1: the factor the editor
+// zooms out by. It fits the middles of the four frame edges; the frame
+// corners, stretched far out by a strong correction, may fall off screen.
+function lensZoom(k) {
+  if (!k) return 1;
+  const a = (_cameraInfo && _cameraInfo.sensor_aspect) || 4 / 3;
+  const c = k / ((a * a + 1) / 4), fold = lensFold(k);
+  let z = 1;
+  for (const [u, v] of [[0.5, 0], [0.5, 1], [0, 0.5], [1, 0.5]]) {
+    const dx = (u - 0.5) * a, dy = v - 0.5, rd = Math.hypot(dx, dy);
+    let r = rd;
+    for (let n = 0; n < 30; n++) r -= (r + c * r ** 3 - rd) / (1 + 3 * c * r * r);
+    // No inverse (or Newton found the negative root): up to the fold.
+    if (!isFinite(r) || r < 0 || r > fold || Math.abs(r + c * r ** 3 - rd) > 1e-6) r = fold;
+    r = Math.min(r, fold);
+    z = Math.max(z, Math.abs(dx * r / rd / a) / 0.5, Math.abs(dy * r / rd) / 0.5);
+  }
+  return z;
+}
+
+// Editor screen fraction (0..1 of the painted image) <-> straightened view.
+function toView([fx, fy]) { const z = _adjust.z; return [0.5 + (fx - 0.5) * z, 0.5 + (fy - 0.5) * z]; }
+function toScreen([x, y]) { const z = _adjust.z; return [0.5 + (x - 0.5) / z, 0.5 + (y - 0.5) / z]; }
+
 // A saved quad point (sensor fraction, straightened view) in the cropped live image.
 function viewToOutput(p, info) {
   return sensorToOutput(distortPt(p, info.lens_k || 0), info);
@@ -1138,9 +1178,10 @@ function drawSavedQuads() {
 function adjustHint() {
   if (!_adjust) return '';
   const bad = ['left', 'right'].filter(s => !isConvex(_adjust.quads[s]));
-  return bad.length
-    ? `The ${bad.join(' and ')} outline is twisted: drag its corners back into order.`
-    : 'Drag each corner until the outline lies on its board; drag inside an outline to move it. Then Save.';
+  const out = ['left', 'right'].filter(s => !_adjust.quads[s].every(p => visiblePt(p, _adjust.k)));
+  if (bad.length) return `The ${bad.join(' and ')} outline is twisted: drag its corners back into order.`;
+  if (out.length) return `The ${out.join(' and ')} outline has a corner outside the camera image: drag it back in.`;
+  return 'Drag each corner until the outline lies on its board; drag inside an outline to move it. Then Save.';
 }
 
 function startAdjust() {
@@ -1148,6 +1189,7 @@ function startAdjust() {
   setViewMode('live');   // the editor works on the camera image
   document.getElementById('camera-mode').style.visibility = 'hidden';   // keeps the layout
   _adjust = { quads: initialQuads(_cameraInfo), k: _cameraInfo.lens_k || 0, drag: null, ready: false };
+  _adjust.z = lensZoom(_adjust.k);
   const lens = document.getElementById('camera-lens');
   lens.min = -(_cameraInfo.lens_k_max || 0.3); lens.max = _cameraInfo.lens_k_max || 0.3;
   lens.value = _adjust.k;
@@ -1172,7 +1214,9 @@ function showLens() {
 function lensChanged() {
   if (!_adjust) return;
   _adjust.k = Number(document.getElementById('camera-lens').value);
+  _adjust.z = lensZoom(_adjust.k);
   showLens();
+  document.getElementById('camera-msg').textContent = adjustHint();
   drawAdjust();
 }
 
@@ -1184,11 +1228,18 @@ function drawStraightened() {
   if (!_adjust || !_adjust.k || !_srcPixels || !img.naturalWidth) { cv.hidden = true; return; }
   const { x0, y0, pw, ph } = paintedRect(img);
   const cw = Math.max(1, Math.round(pw)), ch = Math.max(1, Math.round(ph));
-  const k = _adjust.k;
+  const k = _adjust.k, z = _adjust.z, fold = lensFold(k);
+  const a = (_cameraInfo && _cameraInfo.sensor_aspect) || 4 / 3;
   // Dragging a corner changes none of these: repaint only when one changes.
   const key = [k, cw, ch];
   if (cv._src !== _srcPixels || String(cv._key) !== String(key)) {
-    paintFrom(cv, cw, ch, (i, j) => distortPt([(i + 0.5) / cw, (j + 0.5) / ch], k));
+    // Zoomed out by z so the whole straightened image fits; past the fold the
+    // model has no picture (black).
+    paintFrom(cv, cw, ch, (i, j) => {
+      const p = toView([(i + 0.5) / cw, (j + 0.5) / ch]);
+      if (Math.hypot((p[0] - 0.5) * a, p[1] - 0.5) > fold) return [-1, -1];
+      return distortPt(p, k);
+    });
     cv._src = _srcPixels; cv._key = key;
   }
   cv.style.left = x0 + 'px'; cv.style.top = y0 + 'px';
@@ -1219,7 +1270,7 @@ function drawAdjust() {
   drawStraightened();
   const { x0, y0, pw, ph } = paintedRect(img);
   for (const side of ['left', 'right']) {
-    const pts = _adjust.quads[side].map(([x, y]) => [x0 + x * pw, y0 + y * ph]);
+    const pts = _adjust.quads[side].map(p => toScreen(p)).map(([x, y]) => [x0 + x * pw, y0 + y * ph]);
     placeOutline(side, pts);
     pts.forEach(([x, y], i) => {
       const h = document.getElementById(`camera-handle-${side}-${i}`);
@@ -1229,7 +1280,8 @@ function drawAdjust() {
     });
   }
   document.getElementById('btn-adjust-save').disabled =
-    !['left', 'right'].every(s => isConvex(_adjust.quads[s]));
+    !['left', 'right'].every(s => isConvex(_adjust.quads[s]) &&
+                                  _adjust.quads[s].every(p => visiblePt(p, _adjust.k)));
 }
 
 // Pointer position as a fraction of the full image, clamped to it.
@@ -1249,14 +1301,14 @@ function pickTarget(e) {
   const [fx, fy] = imageFraction(e);
   let best = null, bestD = 28;
   for (const side of ['left', 'right']) {
-    _adjust.quads[side].forEach(([x, y], i) => {
+    _adjust.quads[side].map(toScreen).forEach(([x, y], i) => {
       const d = Math.hypot((x - fx) * pw, (y - fy) * ph);
       if (d < bestD) { bestD = d; best = { side, corner: i }; }
     });
   }
   if (best) return best;
   for (const side of ['left', 'right']) {
-    if (insideQuad(_adjust.quads[side], [fx, fy])) return { side, corner: -1 };
+    if (insideQuad(_adjust.quads[side], toView([fx, fy]))) return { side, corner: -1 };
   }
   return null;
 }
@@ -1268,20 +1320,19 @@ _frame.addEventListener('pointerdown', e => {
   if (!target) return;
   e.preventDefault();
   _frame.setPointerCapture(e.pointerId);
-  _adjust.drag = { ...target, start: imageFraction(e),
+  _adjust.drag = { ...target, start: toView(imageFraction(e)),
                    orig: _adjust.quads[target.side].map(p => p.slice()) };
 });
 _frame.addEventListener('pointermove', e => {
   if (!_adjust || !_adjust.drag) return;
-  const d = _adjust.drag, [x, y] = imageFraction(e);
+  const d = _adjust.drag, [x, y] = toView(imageFraction(e)), k = _adjust.k;
+  // Corners go anywhere the camera sees, which with a barrel correction
+  // reaches past 0..1; a move that would leave that area is not taken.
   if (d.corner >= 0) {
-    _adjust.quads[d.side][d.corner] = [x, y];
+    if (visiblePt([x, y], k)) _adjust.quads[d.side][d.corner] = [x, y];
   } else {
-    // Move the whole quad, but keep every corner inside the image.
-    const xs = d.orig.map(p => p[0]), ys = d.orig.map(p => p[1]);
-    const dx = Math.min(1 - Math.max(...xs), Math.max(-Math.min(...xs), x - d.start[0]));
-    const dy = Math.min(1 - Math.max(...ys), Math.max(-Math.min(...ys), y - d.start[1]));
-    _adjust.quads[d.side] = d.orig.map(([px, py]) => [px + dx, py + dy]);
+    const moved = d.orig.map(([px, py]) => [px + x - d.start[0], py + y - d.start[1]]);
+    if (moved.every(p => visiblePt(p, k))) _adjust.quads[d.side] = moved;
   }
   drawAdjust();
 });

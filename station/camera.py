@@ -100,7 +100,8 @@ def undistort(pt, k: float) -> tuple[float, float] | None:
     r = rd
     for _ in range(30):
         r -= (r + c * r ** 3 - rd) / (1 + 3 * c * r * r)
-    if not math.isfinite(r) or abs(r + c * r ** 3 - rd) > 1e-9 or (c < 0 and r > 1 / math.sqrt(-3 * c)):
+    if (not math.isfinite(r) or r < 0 or abs(r + c * r ** 3 - rd) > 1e-9
+            or (c < 0 and r > 1 / math.sqrt(-3 * c))):
         return None
     f = r / rd
     return 0.5 + dx * f / SENSOR_ASPECT, 0.5 + dy * f
@@ -127,8 +128,8 @@ def parse_quads(v) -> tuple:
             raise ValueError(f"camera quad {side} must be four [x, y] pairs") from None
         if len(pts) != 4:
             raise ValueError(f"camera quad {side} must have 4 corners, not {len(pts)}")
-        if not all(0 <= c <= 1 for p in pts for c in p):
-            raise ValueError(f"camera quad {side} must lie inside 0..1")
+        if not all(math.isfinite(c) for p in pts for c in p):
+            raise ValueError(f"camera quad {side} must have finite corners")
         if not _convex(pts):
             raise ValueError(f"camera quad {side} must be convex (corners in order, no crossing edges)")
         out.append(pts)
@@ -142,6 +143,17 @@ def _cross(o, a, b) -> float:
 def _convex(pts) -> bool:
     turns = [_cross(pts[i], pts[(i + 1) % 4], pts[(i + 2) % 4]) for i in range(4)]
     return all(t > 0 for t in turns) or all(t < 0 for t in turns)
+
+
+def visible(pt, k: float) -> bool:
+    """Whether a point of the straightened view is one the camera sees: its
+    distorted position lies in the frame, and (for barrel correction) it is
+    inside the radius where the lens model still grows, so it maps back."""
+    x, y = distort(pt, k)
+    if not (-1e-9 <= x <= 1 + 1e-9 and -1e-9 <= y <= 1 + 1e-9):
+        return False
+    back = undistort((x, y), k)
+    return back is not None and abs(back[0] - pt[0]) < 1e-6 and abs(back[1] - pt[1]) < 1e-6
 
 
 def _parse_bool(key: str, v) -> bool:
@@ -225,6 +237,11 @@ class CameraSettings:
         if not -LENS_K_MAX <= s.lens_k <= LENS_K_MAX:
             raise ValueError(f"camera.lens_k must be between {-LENS_K_MAX} and {LENS_K_MAX}, "
                              f"not {s.lens_k}")
+        # The quads are in the straightened view, which reaches past 0..1 with a
+        # barrel correction; each corner must be a point the camera sees.
+        for side, q in zip(QUAD_SIDES, s.quads):
+            if not all(visible(p, s.lens_k) for p in q):
+                raise ValueError(f"camera quad {side} has a corner outside the camera image")
         if not 0.05 < s.split_x < 0.95:
             raise ValueError(f"camera.split_x must be between 0.05 and 0.95, not {s.split_x}")
         return s
@@ -364,7 +381,9 @@ def save_view_override(roi: str, split_x: float, path: Path | None = None,
             q = parse_quads(quads) if quads else ()
             if not q:
                 raise ValueError("camera quads must be two four-corner outlines")
-            base = CameraSettings.from_config({**(CAMERA or {}), "lens_k": lens_k})
+            # Without config.yaml's quads: they are replaced, and need not be
+            # visible at the new lens value.
+            base = CameraSettings.from_config({**(CAMERA or {}), "lens_k": lens_k, "quads": None})
             roi, split_x = view_from_quads(q, base)
         v = CameraSettings.from_config({**(CAMERA or {}), "roi": roi, "split_x": split_x,
                                         "quads": quads if quads is not None else {},
