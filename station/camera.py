@@ -425,6 +425,30 @@ class PhaseResult:
     fps: float
     periodicity_left: float = 1.0    # each trace against itself one period later
     periodicity_right: float = 1.0
+    step_left_ms: float = 0.0        # median time between LED brightness changes
+    step_right_ms: float = 0.0
+
+
+# The flash cue has 32 brightness levels (keys_com/rgb.c: v = 5 + (tri >> 2), 5..36).
+CUE_LEVELS = 32
+
+
+def step_interval_ms(ts: list[float], values: list[float]) -> float:
+    """Median time between frames where the brightness changed by more than half
+    a cue level: how often the LEDs on this half were actually updated.
+
+    A half that redraws its LEDs normally changes level about every 32 ms (one
+    level per 32 ms over a 1024 ms half cycle); a half whose LED task runs only
+    now and then holds each level longer. 0.0 when fewer than two changes."""
+    if len(values) < 3:
+        return 0.0
+    level = (max(values) - min(values)) / (CUE_LEVELS - 1)
+    if level <= 0:
+        return 0.0
+    changes = [ts[i] for i in range(1, len(values))
+               if abs(values[i] - values[i - 1]) > level / 2]
+    gaps = sorted(b - a for a, b in zip(changes, changes[1:]))
+    return gaps[len(gaps) // 2] if gaps else 0.0
 
 
 def periodic_pearson(x: list[float], y: list[float]) -> float:
@@ -495,7 +519,9 @@ def phase_offset(ts: list[float], left: list[float], right: list[float],
     return PhaseResult(offset_ms=(lags[best] + shift) * dt, correlation=cs[best],
                        swing_left=max(left) - min(left), swing_right=max(right) - min(right),
                        frames=len(ts), fps=fps,
-                       periodicity_left=per_a, periodicity_right=per_b)
+                       periodicity_left=per_a, periodicity_right=per_b,
+                       step_left_ms=step_interval_ms(ts, left),
+                       step_right_ms=step_interval_ms(ts, right))
 
 
 def analyse_traces(rec: Recording, settings: CameraSettings = SETTINGS
@@ -532,6 +558,7 @@ def judge(res: PhaseResult) -> dict:
     info = (f"offset {res.offset_ms:+.1f} ms, correlation {res.correlation:.2f}, "
             f"swing L {res.swing_left:.1f} / R {res.swing_right:.1f}, "
             f"periodicity L {res.periodicity_left:.2f} / R {res.periodicity_right:.2f}, "
+            f"LED steps L {res.step_left_ms:.0f} / R {res.step_right_ms:.0f} ms, "
             f"{res.frames} frames at {res.fps:.0f} fps")
     rec = {"name": RGB_PHASE_TEST_NAME, "info": info, "offset_ms": round(res.offset_ms, 1)}
     if min(res.swing_left, res.swing_right) < MIN_SWING:
