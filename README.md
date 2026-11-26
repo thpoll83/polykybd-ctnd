@@ -335,17 +335,16 @@ than by setting `ui.allow_lan`.
 
 ### Touchscreen UI
 
-Four tabs sit under the header, and a log drawer sits at the bottom of every tab.
+Tabs sit under the header, and a log drawer sits at the bottom of every tab.
 Collapsed, the drawer shows the newest log line; tap it or **Log ▲** to open it, with
 **Copy** and **Clear**. Commands that report in the log (flash, tests, perf, Diagnose,
-Restart, Re-register, Update, handedness, Measure phase now) open it. While the rig
+Restart, Re-register, Update, handedness) open it. While the rig
 flashes, tests or measures, every action button is disabled.
 
 | Tab | Controls |
 |---|---|
 | **Test** | Left / Right firmware selection from `/opt/polykybd-ctnd/firmware/` (⟳ refreshes the list), **Flash Left / Flash Right**, **Run Tests** (flash both halves, then run the suite; **Extended** adds the slow tier), **Measure Perf**. The results of the last run are listed, one row per test with its status. |
 | **Hardware** | One card per half: USB power, BOOTSEL and Reset toggles. **Handedness: USB = Left / Right**. |
-| **Camera** | The rig camera's live view with the `split_x` line and MASTER/SLAVE labels, **Adjust view** to set the crop and split line by touch (drag a box around both halves on the full image, then tap the gap; **Save** stores it in `var/camera_view.json`, which overrides `camera.roi` and `camera.split_x` in `config.yaml`; **Use config.yaml** removes it), a sharpness number for focusing the lens (turn it until the number peaks; it turns green at the peak), the last RGB phase measurement with its brightness traces, a history of the last 10 measurements (time, firmware version, source with branch and commit for CI runs, result and offset; to compare e.g. a release build against a fix), and **Measure phase now** (resets both halves, the left 1 s after the right, then stages the selected `.bin` over HID and records the flash cue). The `.bin` list is newest first with the firmware version built into each image; when neither the UI nor CI uses the rig, the keyboard's running version is read and the matching images are marked ✓, the newest one preselected. See `docs/HIL_SUITE_NOTES.md` → *The RGB phase check*. |
 | **Runner** | Queued and running CI jobs and the last 5 finished ones, each with when it came in, when it started (and how long it waited) and how long it took, finished ones with their result; **⌕ Diagnose** (full runner diagnostic in the log), **⟳ Restart** (`systemctl restart` the runner service, for a configured-but-wedged runner), **↻ Re-register** (stop → reconfigure → restart, two-tap confirm, for a broken or `Not configured` registration), **⊘ Cancel stale runs** (two-tap confirm; cancels runs GitHub will never finish: queued with no jobs, or in progress with every job ended, unchanged for over an hour; they show as **Stale** in the list and the **CI** badge ignores them), **Quit**. |
 
 The tab you used last is opened again after a reload.
