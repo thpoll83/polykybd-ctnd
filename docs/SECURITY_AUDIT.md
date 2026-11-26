@@ -346,8 +346,15 @@ someone about to make the mistake will actually read it.
 The camera routes (`/camera/info`, `/camera/snapshot.jpg`, 2026-11-26) are plain HTTP
 GETs with the same exposure. On loopback they show the kiosk what the rig camera sees.
 With `allow_lan: true`, anyone who can reach the port can see the camera image. The
-snapshot takes no request parameters, and `rpicam-still` gets only values from
-`config.yaml`.
+snapshot takes one request parameter, `full=1` (drop the crop), and `rpicam-still` gets only
+values from `config.yaml` and the view override.
+
+The Camera tab's "Adjust view" (2026-11-26) lets the UI write `var/camera_view.json`. It
+holds only `camera.roi` and `camera.split_x`, both validated by `CameraSettings.from_config`
+before the write (four fractions inside 0..1; `split_x` between 0.05 and 0.95), and the
+values reach `rpicam` as one `--roi` argument in an argv list, never a shell. The worst a
+caller can do is crop the camera badly, which makes the phase check SKIP. Same exposure as
+the rest of HIL-4: loopback only unless `allow_lan` is set.
 
 If `allow_lan` ever becomes a routine deployment mode, revisit this — a shared-secret
 token on connect (required only when `allow_lan` is set) is the intended next step.

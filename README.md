@@ -334,17 +334,18 @@ than by setting `ui.allow_lan`.
 
 ### Touchscreen UI
 
-Five tabs sit under the header. The newest log line shows in a strip at the bottom of
-every tab; tap it to open the Log tab. While the rig flashes, tests or measures, every
-action button is disabled.
+Four tabs sit under the header, and a log drawer sits at the bottom of every tab.
+Collapsed, the drawer shows the newest log line; tap it or **Log ▲** to open it, with
+**Copy** and **Clear**. Commands that report in the log (flash, tests, perf, Diagnose,
+Restart, Re-register, Update, handedness, Measure phase now) open it. While the rig
+flashes, tests or measures, every action button is disabled.
 
 | Tab | Controls |
 |---|---|
 | **Test** | Left / Right firmware selection from `/opt/polykybd-ctnd/firmware/` (⟳ refreshes the list), **Flash Left / Flash Right**, **Run Tests** (flash both halves, then run the suite; **Extended** adds the slow tier), **Measure Perf**. The results of the last run are listed, one row per test with its status. |
 | **Hardware** | One card per half: USB power, BOOTSEL and Reset toggles. **Handedness: USB = Left / Right**. |
-| **Camera** | The rig camera's live view with the `split_x` line and MASTER/SLAVE labels, a sharpness number for focusing the lens (turn it until the number peaks; it turns green at the peak), the last RGB phase measurement with its brightness traces, and **Measure phase now** (stages the selected `.bin` over HID and records the flash cue). See `docs/HIL_SUITE_NOTES.md` → *The RGB phase check*. |
+| **Camera** | The rig camera's live view with the `split_x` line and MASTER/SLAVE labels, **Adjust view** to set the crop and split line by touch (drag a box around both halves on the full image, then tap the gap; **Save** stores it in `var/camera_view.json`, which overrides `camera.roi` and `camera.split_x` in `config.yaml`; **Use config.yaml** removes it), a sharpness number for focusing the lens (turn it until the number peaks; it turns green at the peak), the last RGB phase measurement with its brightness traces, and **Measure phase now** (stages the selected `.bin` over HID and records the flash cue). See `docs/HIL_SUITE_NOTES.md` → *The RGB phase check*. |
 | **Runner** | Queued and running CI jobs, **⌕ Diagnose** (full runner diagnostic in the log), **⟳ Restart** (`systemctl restart` the runner service, for a configured-but-wedged runner), **↻ Re-register** (stop → reconfigure → restart, two-tap confirm, for a broken or `Not configured` registration), **Quit**. |
-| **Log** | The full log, **Copy Log**, **Clear Log**. |
 
 The tab you used last is opened again after a reload.
 

@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-from flask import Flask, Response, render_template, jsonify
+from flask import Flask, Response, render_template, jsonify, request
 from flask_socketio import SocketIO
 
 from station.config import (
@@ -608,7 +608,8 @@ def camera_info():
     st = camera.SETTINGS
     return jsonify({"available": ok, "detail": why, "rotation": st.rotation,
                     "hflip": st.hflip, "vflip": st.vflip, "split_x": st.split_x,
-                    "master_on_left": st.master_on_left, "roi": st.roi})
+                    "master_on_left": st.master_on_left, "roi": st.roi,
+                    "view_override": bool(camera.load_view_override())})
 
 
 @app.route("/camera/last")
@@ -629,8 +630,10 @@ def camera_snapshot():
     from station import camera
     if _status["value"] not in ("idle", "error"):
         return Response(f"rig busy ({_status['value']})", status=503, mimetype="text/plain")
+    # ?full=1: the whole field of view, without the ROI, for "Adjust view".
+    crop = request.args.get("full") != "1"
     try:
-        jpg = camera.snapshot_jpeg()
+        jpg = camera.snapshot_jpeg(crop=crop)
     except Exception as exc:
         return Response(str(exc), status=503, mimetype="text/plain")
     return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -1036,6 +1039,44 @@ def on_run_tests(data):
     # Busy status marks the whole flash+test run — the self-update timer reads
     # it to defer a pull+restart until the rig is idle.
     _run_exclusive("run_tests", "testing", _do)
+
+
+@socketio.on("camera_set_view")
+def on_camera_set_view(data):
+    """Store the crop and split line drawn in the Camera tab ("Adjust view").
+
+    Only camera.roi and camera.split_x, validated like config.yaml, written to
+    var/camera_view.json. The CI runner reads it on its next run.
+    """
+    from station import camera
+    if not isinstance(data, dict):
+        return
+    roi, split_x = data.get("roi"), data.get("split_x")
+    if not isinstance(roi, str) or not isinstance(split_x, (int, float)) or isinstance(split_x, bool):
+        emit_log("[ui] camera view not saved: roi must be text and split_x a number")
+        socketio.emit("camera_view", {"ok": False, "error": "roi must be text and split_x a number"},
+                      to=request.sid)
+        return
+    err = camera.save_view_override(roi, float(split_x))
+    if err:
+        emit_log(f"[ui] camera view not saved: {err}")
+        socketio.emit("camera_view", {"ok": False, "error": err}, to=request.sid)
+        return
+    emit_log(f"[ui] camera view saved: roi {camera.SETTINGS.roi or '(none)'}, "
+             f"split_x {camera.SETTINGS.split_x:.3f}")
+    socketio.emit("camera_view", {"ok": True}, to=request.sid)   # the saving browser only
+    socketio.emit("camera_view_changed", {}, skip_sid=request.sid)   # others reload, unless adjusting
+
+
+@socketio.on("camera_clear_view")
+def on_camera_clear_view(_data=None):
+    from station import camera
+    err = camera.clear_view_override()
+    emit_log(f"[ui] camera view override not removed: {err}" if err
+             else "[ui] camera view override removed; config.yaml roi and split_x apply")
+    socketio.emit("camera_view", {"ok": not err, "error": err}, to=request.sid)
+    if not err:
+        socketio.emit("camera_view_changed", {}, skip_sid=request.sid)
 
 
 @socketio.on("measure_phase")

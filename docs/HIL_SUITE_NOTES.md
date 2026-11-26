@@ -671,6 +671,12 @@ process from the UI. **Measure phase now** stages the selected `.bin` over HID, 
 on the flash cue, and records meanwhile: stage + verify only, no APPLY, like the CI step.
 The `.bin` must be the build the rig runs, or the version cross-check refuses it.
 
+**Adjust view** in the Camera tab sets `camera.roi` and `camera.split_x` by touch: it shows
+the full image (`/camera/snapshot.jpg?full=1`), you drag a box around both halves, then tap
+the gap. The UI validates the values like `config.yaml` and writes only these two keys to
+`var/camera_view.json`, which overrides `config.yaml` for them. The CI runner reads the
+file on its next run. An invalid file is ignored with a warning; `config.yaml` then applies.
+
 For focusing the lens (the OV5647 module has a manual, fixed-focus lens), the Camera tab
 shows the sharpness of each snapshot: the variance of the 4-neighbour Laplacian of its grey
 values, computed in the browser. It only compares snapshots of the same scene and light,
