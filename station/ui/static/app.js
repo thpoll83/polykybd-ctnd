@@ -580,6 +580,11 @@ function clearCameraImage() {
   const img = document.getElementById('camera-img');
   if (img.src) URL.revokeObjectURL(img.src);
   img.removeAttribute('src');
+  // The pixels read from it go too: Flat halves and the straightened editor
+  // image must not be drawn from a frame of another crop.
+  _srcPixels = null;
+  document.getElementById('camera-undist').hidden = true;
+  document.getElementById('camera-flatview').hidden = true;
   setCameraLoading(true);
   placeCameraOverlay();   // _cameraInfo is null here, so this hides the line and labels
 }
@@ -617,6 +622,8 @@ function openCamera() {
                                 : `split_x ${info.split_x} — the dashed line must fall between the halves`);
       msg.textContent = _cameraText;
       if (info.quads) loadBoards().then(() => { if (gen === _cameraGen) placeCameraOverlay(); }).catch(() => {});
+      document.getElementById('mode-flat').hidden = !info.quads;
+      if (!info.quads && _viewMode === 'flat') setViewMode('live');
       placeCameraOverlay();
       refreshCamera();
       cameraLive();
@@ -747,13 +754,12 @@ function loadPhaseFrames() {
 }
 
 function renderPhaseFrames(meta) {
-  const box = document.getElementById('phase-frames-box');
   const strip = document.getElementById('phase-frames');
   const label = document.getElementById('phase-frames-label');
   strip.replaceChildren();
   const frames = (meta && meta.frames) || [];
-  box.hidden = !frames.length;
-  if (!frames.length) return;
+  document.getElementById('mode-last').hidden = !frames.length;
+  if (!frames.length) { if (_viewMode === 'last') setViewMode('live'); return; }
   label.textContent = `${(meta.label && meta.label.text) || 'Recording'} · ${fmtTime(meta.started)}`;
   const stamp = encodeURIComponent(meta.started || '');
   frames.forEach((f, i) => {
@@ -904,14 +910,18 @@ function showSharpness() {
   el.classList.toggle('at-peak', v >= 0.97 * _sharpPeak);
 }
 
+document.getElementById('camera-img').addEventListener('load', grabPixels);
 document.getElementById('camera-img').addEventListener('load', placeCameraOverlay);
+document.getElementById('camera-img').addEventListener('load', () => drawFlat());
 document.getElementById('camera-img').addEventListener('load', showSharpness);
 document.getElementById('camera-img').addEventListener('load', () => setCameraLoading(false));
 document.getElementById('camera-img').addEventListener('error', () => setCameraLoading(false));
 // The image box changes size after load (the sharpness line appears below it,
 // the log drawer opens): place the split line and labels again each time.
-if (window.ResizeObserver) new ResizeObserver(() => placeCameraOverlay()).observe(document.getElementById('camera-img'));
-window.addEventListener('resize', placeCameraOverlay);
+// Flat halves are sized to the view too: redraw them on the same changes.
+function relayoutCamera() { placeCameraOverlay(); drawFlat(); }
+if (window.ResizeObserver) new ResizeObserver(relayoutCamera).observe(document.getElementById('camera-img'));
+window.addEventListener('resize', relayoutCamera);
 
 /* ── Adjust view ──
    One four-corner outline per half. The full (uncropped) image is shown with
@@ -958,6 +968,55 @@ function sensorToOutput([x, y], info) {
     if (v.length === 4 && v.every(n => isFinite(n))) [rx, ry, rw, rh] = v;
   }
   return flipPoint([(x - rx) / rw, (y - ry) / rh], info);
+}
+
+// The lens model of station/camera.py distort(): a point of the straightened
+// view where the lens shows it. Symmetric about the centre, so it works on
+// sensor and on displayed (flipped) fractions alike.
+function distortPt([x, y], k) {
+  if (!k) return [x, y];
+  const a = (_cameraInfo && _cameraInfo.sensor_aspect) || 4 / 3;
+  const dx = (x - 0.5) * a, dy = y - 0.5;
+  const f = 1 + k * (dx * dx + dy * dy) / ((a * a + 1) / 4);
+  return [0.5 + dx * f / a, 0.5 + dy * f];
+}
+
+// A saved quad point (sensor fraction, straightened view) in the cropped live image.
+function viewToOutput(p, info) {
+  return sensorToOutput(distortPt(p, info.lens_k || 0), info);
+}
+
+// The pixels of the image on screen, read once per load: the straightened
+// editor view and the flat halves sample from them.
+let _srcPixels = null;   // { w, h, data } or null
+function grabPixels() {
+  const img = document.getElementById('camera-img');
+  _srcPixels = null;
+  if (!img.naturalWidth) return;
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0);
+  _srcPixels = { w: c.width, h: c.height, data: g.getImageData(0, 0, c.width, c.height).data };
+}
+
+// Fill canvas (cw x ch) by asking map(i, j) for a source fraction [u, v].
+function paintFrom(canvas, cw, ch, map) {
+  canvas.width = cw; canvas.height = ch;
+  const g = canvas.getContext('2d');
+  const out = g.createImageData(cw, ch);
+  const src = _srcPixels;
+  for (let j = 0; j < ch; j++) {
+    for (let i = 0; i < cw; i++) {
+      const [u, v] = map(i, j);
+      const o = (j * cw + i) * 4;
+      out.data[o + 3] = 255;
+      if (!src || !(u >= 0 && u < 1 && v >= 0 && v < 1)) continue;
+      const s = ((v * src.h | 0) * src.w + (u * src.w | 0)) * 4;
+      out.data[o] = src.data[s]; out.data[o + 1] = src.data[s + 1]; out.data[o + 2] = src.data[s + 2];
+    }
+  }
+  g.putImageData(out, 0, 0);
 }
 
 function fullViewFromInfo(info) {
@@ -1046,18 +1105,33 @@ function placeOutline(side, corners) {
 
 function hideOutlines() {
   ['left', 'right'].forEach(side => { document.getElementById('camera-pcb-' + side).hidden = true; });
+  document.getElementById('camera-curves').toggleAttribute('hidden', true);   // SVG: no .hidden
   document.querySelectorAll('.camera-handle').forEach(el => { el.hidden = true; });
 }
 
 // The saved quads on the cropped live view (no handles).
+// With a lens correction the edges are curved: the board picture cannot be
+// warped onto them (matrix3d is straight-edged), so only the edges are drawn.
 function drawSavedQuads() {
   const img = document.getElementById('camera-img');
   const { x0, y0, pw, ph } = paintedRect(img);
+  const k = _cameraInfo.lens_k || 0;
+  const svg = document.getElementById('camera-curves');
+  const paths = [];
   for (const side of ['left', 'right']) {
-    const pts = _cameraInfo.quads[side].map(p => sensorToOutput(p, _cameraInfo))
-      .map(([u, v]) => [x0 + u * pw, y0 + v * ph]);
-    placeOutline(side, pts);
+    const q = _cameraInfo.quads[side];
+    const toPx = p => { const [u, v] = viewToOutput(p, _cameraInfo); return [x0 + u * pw, y0 + v * ph]; };
+    if (k) document.getElementById('camera-pcb-' + side).hidden = true;
+    else placeOutline(side, q.map(toPx));
+    const pts = [];
+    for (let i = 0; i < 4; i++) {
+      const a = q[i], b = q[(i + 1) % 4];
+      for (let t = 0; t < 16; t++) pts.push(toPx([a[0] + (b[0] - a[0]) * t / 16, a[1] + (b[1] - a[1]) * t / 16]));
+    }
+    paths.push(`<polygon points="${pts.map(p => p.map(n => n.toFixed(1)).join(',')).join(' ')}"/>`);
   }
+  svg.innerHTML = paths.join('');
+  svg.toggleAttribute('hidden', false);   // an SVG element has no .hidden property
   document.querySelectorAll('.camera-handle').forEach(el => { el.hidden = true; });
 }
 
@@ -1071,7 +1145,13 @@ function adjustHint() {
 
 function startAdjust() {
   if (!_cameraInfo) return;
-  _adjust = { quads: initialQuads(_cameraInfo), drag: null, ready: false };
+  setViewMode('live');   // the editor works on the camera image
+  document.getElementById('camera-mode').style.visibility = 'hidden';   // keeps the layout
+  _adjust = { quads: initialQuads(_cameraInfo), k: _cameraInfo.lens_k || 0, drag: null, ready: false };
+  const lens = document.getElementById('camera-lens');
+  lens.min = -(_cameraInfo.lens_k_max || 0.3); lens.max = _cameraInfo.lens_k_max || 0.3;
+  lens.value = _adjust.k;
+  showLens();
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
   _cameraGen++;          // drop any cropped snapshot still in flight
   clearCameraImage();    // and the one on screen: the editor works on the full frame only
@@ -1085,8 +1165,41 @@ function startAdjust() {
   refreshCamera();
 }
 
+function showLens() {
+  document.getElementById('camera-lens-val').textContent = (_adjust ? _adjust.k : 0).toFixed(3);
+}
+
+function lensChanged() {
+  if (!_adjust) return;
+  _adjust.k = Number(document.getElementById('camera-lens').value);
+  showLens();
+  drawAdjust();
+}
+
+// The full image straightened with the editor's lens value, drawn over the
+// image; the quads are fitted on it.
+function drawStraightened() {
+  const img = document.getElementById('camera-img');
+  const cv = document.getElementById('camera-undist');
+  if (!_adjust || !_adjust.k || !_srcPixels || !img.naturalWidth) { cv.hidden = true; return; }
+  const { x0, y0, pw, ph } = paintedRect(img);
+  const cw = Math.max(1, Math.round(pw)), ch = Math.max(1, Math.round(ph));
+  const k = _adjust.k;
+  // Dragging a corner changes none of these: repaint only when one changes.
+  const key = [k, cw, ch];
+  if (cv._src !== _srcPixels || String(cv._key) !== String(key)) {
+    paintFrom(cv, cw, ch, (i, j) => distortPt([(i + 0.5) / cw, (j + 0.5) / ch], k));
+    cv._src = _srcPixels; cv._key = key;
+  }
+  cv.style.left = x0 + 'px'; cv.style.top = y0 + 'px';
+  cv.style.width = pw + 'px'; cv.style.height = ph + 'px';
+  cv.hidden = false;
+}
+
 function endAdjust() {
   _adjust = null;
+  document.getElementById('camera-mode').style.visibility = '';
+  document.getElementById('camera-undist').hidden = true;
   document.getElementById('camera-adjust-buttons').hidden = true;
   document.getElementById('camera-view-buttons').hidden = false;
   document.getElementById('camera-box').hidden = true;
@@ -1103,6 +1216,7 @@ function drawAdjust() {
   ['camera-tag-left', 'camera-tag-right', 'camera-split', 'camera-box']
     .forEach(id => { document.getElementById(id).hidden = true; });
   if (!img.naturalWidth || !img.clientWidth || !_adjust.ready) { hideOutlines(); return; }
+  drawStraightened();
   const { x0, y0, pw, ph } = paintedRect(img);
   for (const side of ['left', 'right']) {
     const pts = _adjust.quads[side].map(([x, y]) => [x0 + x * pw, y0 + y * ph]);
@@ -1188,7 +1302,67 @@ function saveAdjust() {
     quads[side] = _adjust.quads[side].map(p => flipPoint(p, _cameraInfo));
   }
   openLog();
-  socket.emit('camera_set_view', { quads });
+  socket.emit('camera_set_view', { quads, lens_k: _adjust.k });
+}
+
+/* ── Flat halves ──
+   Each half cut out of the live image through its saved quad and the lens
+   model, straightened to the board's millimetres (true proportions), with the
+   PCB outline on top. Image-left half first. */
+// What the main view shows: 'live' (the camera), 'flat' (the halves
+// straightened) or 'last' (the last recording's frames).
+let _viewMode = 'live';
+function setViewMode(mode) {
+  _viewMode = mode;
+  document.querySelectorAll('#camera-mode button').forEach(b => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  document.getElementById('camera-lastrun').hidden = mode !== 'last';
+  flatToggled();
+  if (mode === 'live') placeCameraOverlay();
+}
+
+function flatOn() {
+  return !!(_viewMode === 'flat' && _cameraInfo && _cameraInfo.quads && !_adjust);
+}
+
+function drawFlat() {
+  const box = document.getElementById('camera-flatview');
+  if (!flatOn() || !_srcPixels || !_boards.left || !_boards.right) { box.hidden = true; return; }
+  const info = _cameraInfo;
+  const centreU = side => viewToOutput(
+    [0, 1].map(a => info.quads[side].reduce((s, p) => s + p[a], 0) / 4), info)[0];
+  const order = ['left', 'right'].sort((a, b) => centreU(a) - centreU(b));
+  const frame = document.getElementById('camera-frame');
+  const fw = frame.clientWidth - 12, fh = frame.clientHeight - 8;
+  const wsum = _boards.left.width_mm + _boards.right.width_mm;
+  const hmax = Math.max(_boards.left.height_mm, _boards.right.height_mm);
+  const ppm = Math.max(0.5, Math.min(fw / wsum, fh / hmax, 4));
+  order.forEach((side, n) => {
+    const b = _boards[side];
+    const cw = Math.round(b.width_mm * ppm), ch = Math.round(b.height_mm * ppm);
+    const h = homography([[0, 0], [b.width_mm, 0], [b.width_mm, b.height_mm], [0, b.height_mm]],
+                         info.quads[side]);
+    const cv = document.getElementById('camera-flat-' + n);
+    if (h) paintFrom(cv, cw, ch, (i, j) => {
+      const x = (i + 0.5) / ppm, y = (j + 0.5) / ppm, d = h[6] * x + h[7] * y + h[8];
+      return viewToOutput([(h[0] * x + h[1] * y + h[2]) / d, (h[3] * x + h[4] * y + h[5]) / d], info);
+    });
+    cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
+    const ov = document.getElementById('camera-flat-pcb-' + n);
+    ov.src = `/static/pcb/${(info.boards || {})[side] || 'split72_' + side}.svg`;
+    ov.style.width = cw + 'px'; ov.style.height = ch + 'px';
+  });
+  box.hidden = false;
+  ['camera-tag-left', 'camera-tag-right', 'camera-split']
+    .forEach(id => { document.getElementById(id).hidden = true; });
+}
+
+function flatToggled() {
+  if (!flatOn()) { document.getElementById('camera-flatview').hidden = true; return; }
+  loadBoards().then(drawFlat).catch(() => {});
 }
 
 function resetAdjust() {

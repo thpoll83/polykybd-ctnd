@@ -457,7 +457,28 @@ main {
 .lg-master { color: #4FC3F7; font-weight: 700; }
 .lg-slave  { color: #FFB74D; font-weight: 700; }
 
-.phase-measure { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+#phase-panel { overflow: hidden; }
+/* Result, chart, frames and history scroll; the measure controls stay put. */
+#phase-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#phase-scroll > * { flex-shrink: 0; }   /* scroll instead of squeezing the chart */
+/* The view switch, stacked on the left of the viewport. */
+#camera-stage { flex: 1; min-height: 0; width: 100%; display: flex; gap: 8px; }
+#camera-stage #camera-frame { flex: 1; min-width: 0; justify-content: center; }
+.view-switch { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+.view-switch .btn { flex: 0 0 auto; width: 104px; padding: 0 8px; background: #333; color: #ccc; }
+/* Six controls in the camera row: size them to their text and wrap if needed. */
+#camera-view-buttons { flex-wrap: wrap; justify-content: center; }
+#camera-view-buttons .btn, #camera-view-buttons .chk { flex: 0 0 auto; width: auto; padding: 0 12px; }
+.view-switch .btn.on { background: #1565C0; color: #fff; }
+.view-switch .btn[hidden] { display: none; }
+.phase-measure { flex: 0 0 auto; margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
 .phase-measure select {
   height: 38px;
   background: #222;
@@ -540,6 +561,28 @@ main {
   pointer-events: none;
 }
 .camera-pcb[hidden], .camera-handle[hidden] { display: none; }
+
+/* The straightened full image in "Adjust view", and the saved outlines' edges. */
+#camera-undist { position: absolute; pointer-events: none; }
+#camera-curves {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  pointer-events: none; overflow: visible;
+  fill: none; stroke: #00e5ff; stroke-width: 1.5; stroke-opacity: 0.8;
+}
+#camera-undist[hidden], #camera-curves[hidden], #camera-flatview[hidden] { display: none; }
+
+/* "Flat halves": both halves side by side, PCB outline on top. */
+#camera-flatview {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  background: #000;
+}
+.flat-half { position: relative; line-height: 0; }
+.flat-half img { position: absolute; left: 0; top: 0; opacity: 0.6; pointer-events: none; }
+
+.lens-slider { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #ccc; }
+.lens-slider input { width: 140px; }
+#camera-lens-val { font-variant-numeric: tabular-nums; min-width: 3.5em; }
 #camera-frame { touch-action: none; }
 
 .firmware-row {
@@ -737,11 +780,15 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 .phase-measure select option.bin-other { color: #777; }
 
 /* ── Phase history ── */
-#phase-frames-box[hidden] { display: none; }
-#phase-frames-box h3 { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-#phase-frames-label { font-size: 11px; color: #aaa; margin-bottom: 4px; }
-#phase-frames { display: flex; gap: 4px; }
-#phase-frames figure { flex: 1; margin: 0; min-width: 0; }
+/* "Last run" in the main view: the frames as large as the view allows. */
+#camera-lastrun {
+  position: absolute; inset: 0; background: #000; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 6px;
+}
+#camera-lastrun[hidden] { display: none; }
+#phase-frames-label { font-size: 12px; color: #ccc; }
+#phase-frames { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px; }
+#phase-frames figure { margin: 0; min-width: 0; }
 #phase-frames img { width: 100%; display: block; border: 1px solid #333; border-radius: 3px; image-rendering: pixelated; }
 #phase-frames figcaption { font-size: 10px; color: #888; text-align: center; }
 #phase-history-box[hidden] { display: none; }
