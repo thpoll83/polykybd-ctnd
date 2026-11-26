@@ -1054,15 +1054,18 @@ def on_camera_set_view(data):
     roi, split_x = data.get("roi"), data.get("split_x")
     if not isinstance(roi, str) or not isinstance(split_x, (int, float)) or isinstance(split_x, bool):
         emit_log("[ui] camera view not saved: roi must be text and split_x a number")
+        socketio.emit("camera_view", {"ok": False, "error": "roi must be text and split_x a number"},
+                      to=request.sid)
         return
     err = camera.save_view_override(roi, float(split_x))
     if err:
         emit_log(f"[ui] camera view not saved: {err}")
-        socketio.emit("camera_view", {"ok": False, "error": err})
+        socketio.emit("camera_view", {"ok": False, "error": err}, to=request.sid)
         return
     emit_log(f"[ui] camera view saved: roi {camera.SETTINGS.roi or '(none)'}, "
              f"split_x {camera.SETTINGS.split_x:.3f}")
-    socketio.emit("camera_view", {"ok": True})
+    socketio.emit("camera_view", {"ok": True}, to=request.sid)   # the saving browser only
+    socketio.emit("camera_view_changed", {}, skip_sid=request.sid)   # others reload, unless adjusting
 
 
 @socketio.on("camera_clear_view")
@@ -1071,7 +1074,9 @@ def on_camera_clear_view(_data=None):
     err = camera.clear_view_override()
     emit_log(f"[ui] camera view override not removed: {err}" if err
              else "[ui] camera view override removed; config.yaml roi and split_x apply")
-    socketio.emit("camera_view", {"ok": not err, "error": err})
+    socketio.emit("camera_view", {"ok": not err, "error": err}, to=request.sid)
+    if not err:
+        socketio.emit("camera_view_changed", {}, skip_sid=request.sid)
 
 
 @socketio.on("measure_phase")

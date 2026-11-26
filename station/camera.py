@@ -24,7 +24,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -130,6 +130,7 @@ class CameraSettings:
 # run is a new process). A missing or invalid file leaves config.yaml in charge.
 VIEW_OVERRIDE_PATH = Path(__file__).resolve().parent.parent / "var" / "camera_view.json"
 VIEW_KEYS = ("roi", "split_x")
+_view_lock = threading.Lock()   # file write/unlink and the SETTINGS update, as one step
 
 
 def load_view_override(path: Path | None = None) -> dict:
@@ -177,29 +178,31 @@ def save_view_override(roi: str, split_x: float, path: Path | None = None) -> st
         v = CameraSettings.from_config({**(CAMERA or {}), "roi": roi, "split_x": split_x})
     except (TypeError, ValueError) as exc:
         return str(exc)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps({"roi": v.roi, "split_x": v.split_x}))
-        os.replace(tmp, path)
-    except OSError as exc:
-        return f"could not save the view: {exc}"
-    SETTINGS.roi, SETTINGS.split_x = v.roi, v.split_x
+    with _view_lock:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps({"roi": v.roi, "split_x": v.split_x}))
+            os.replace(tmp, path)
+        except OSError as exc:
+            return f"could not save the view: {exc}"
+        SETTINGS.roi, SETTINGS.split_x = v.roi, v.split_x
     return ""
 
 
 def clear_view_override(path: Path | None = None) -> str:
     """Remove the UI override; config.yaml's roi and split_x apply again."""
     path = VIEW_OVERRIDE_PATH if path is None else path
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        return f"could not remove the view override: {exc}"
-    s, _ = _load_settings(CAMERA)
-    SETTINGS.roi, SETTINGS.split_x = s.roi, s.split_x
+    with _view_lock:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            return f"could not remove the view override: {exc}"
+        s, _ = _load_settings(CAMERA)
+        SETTINGS.roi, SETTINGS.split_x = s.roi, s.split_x
     return ""
 
 
@@ -614,6 +617,9 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
         # Saved like any other outcome, so the panel never keeps showing an
         # older measurement after this one could not run.
         return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
+    # One copy for the whole measurement: a view saved meanwhile (Adjust view
+    # changes SETTINGS in place) must not split frames captured with the old crop.
+    settings = replace(settings)
     rec = BackgroundRecording(settings)
     staged = stage_and_verify(bin_path, log, on_begin=rec.start, require_identity=True)
     try:

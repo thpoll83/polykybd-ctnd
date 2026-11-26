@@ -346,6 +346,42 @@ class MeasureNowTest(unittest.TestCase):
         self.assertEqual(out["traces"], saved["traces"])   # returned = what was saved
 
 
+class MeasureNowSettingsCopyTest(unittest.TestCase):
+    def test_measurement_uses_its_own_copy_of_the_settings(self):
+        import tempfile
+        from pathlib import Path
+        import station.fw_update as fw
+        seen = {}
+        orig = (fw.stage_and_verify, camera.availability, camera.BackgroundRecording,
+                camera.LAST_RESULT_PATH)
+
+        class FakeRec:
+            def __init__(self, settings, seconds=None):
+                seen["settings"] = settings
+            def start(self): pass
+            def result(self, timeout=60.0): return synth(0.0)
+
+        def fake_stage(path, log, on_begin=None, **k):
+            on_begin()
+            camera.SETTINGS.split_x = 0.9   # a view saved during the measurement
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fw.stage_and_verify, camera.BackgroundRecording = fake_stage, FakeRec
+            camera.availability = lambda s=None: (True, "fake camera")
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            old_split = camera.SETTINGS.split_x
+            try:
+                out = camera.measure_now("fw.bin", lambda m: None)
+            finally:
+                (fw.stage_and_verify, camera.availability, camera.BackgroundRecording,
+                 camera.LAST_RESULT_PATH) = orig
+                camera.SETTINGS.split_x = old_split
+        self.assertIsNot(seen["settings"], camera.SETTINGS)
+        self.assertEqual(seen["settings"].split_x, old_split)
+        self.assertEqual(out["status"], "pass")   # split at the old 0.5: both halves in phase
+
+
 class MeasureNowStagingFailedTest(unittest.TestCase):
     def test_failed_staging_is_not_a_pass(self):
         import tempfile
@@ -416,6 +452,29 @@ class ViewOverrideTest(unittest.TestCase):
         self.assertIn("roi", camera.save_view_override("0.5,0,0.8,1", 0.5, self.path))
         self.assertIn("split_x", camera.save_view_override("", 0.99, self.path))
         self.assertFalse(self.path.exists())
+
+    def test_concurrent_save_and_clear_leave_file_and_settings_consistent(self):
+        import threading
+        errors = []
+
+        def worker(i):
+            for _ in range(20):
+                if i % 2:
+                    errors.append(camera.save_view_override("0.1,0.3,0.8,0.4", 0.55, self.path))
+                else:
+                    errors.append(camera.clear_view_override(self.path))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        self.assertEqual(set(errors), {""})
+        on_disk = camera.load_view_override(self.path)
+        if on_disk:
+            self.assertEqual((camera.SETTINGS.roi, camera.SETTINGS.split_x),
+                             (on_disk["roi"], on_disk["split_x"]))
+        else:
+            base, _ = camera._load_settings(camera.CAMERA)
+            self.assertEqual((camera.SETTINGS.roi, camera.SETTINGS.split_x), (base.roi, base.split_x))
 
     def test_full_view_snapshot_drops_only_the_roi(self):
         s = CameraSettings.from_config({"roi": "0.1,0.25,0.8,0.5", "hflip": True})

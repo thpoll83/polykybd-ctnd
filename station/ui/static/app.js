@@ -523,17 +523,28 @@ function refreshCamera() {
   const gen = _cameraGen;
   const img = document.getElementById('camera-img');
   const msg = document.getElementById('camera-msg');
-  const full = _adjust ? '&full=1' : '';
+  const adjusting = _adjust;   // the adjust session this request belongs to, or null
+  const full = adjusting ? '&full=1' : '';
   fetch('/camera/snapshot.jpg?t=' + Date.now() + full)
     .then(r => r.ok ? r.blob() : r.text().then(t => { throw new Error(t); }))
     .then(b => {
-      if (gen !== _cameraGen) return;
+      if (gen !== _cameraGen || adjusting !== _adjust) return;
       if (img.src) URL.revokeObjectURL(img.src);
       img.src = URL.createObjectURL(b);
-      if (_adjust) msg.textContent = adjustHint();
-      else if (_cameraText) msg.textContent = _cameraText;   // clear an earlier "busy" error
+      if (adjusting) {
+        // Only now is the full-frame image on screen: drawing may start.
+        adjusting.ready = true;
+        msg.textContent = adjustHint();
+      } else if (_cameraText) msg.textContent = _cameraText;   // clear an earlier "busy" error
     })
-    .catch(e => { if (gen === _cameraGen) msg.textContent = 'Snapshot: ' + e.message; });
+    .catch(e => {
+      if (gen !== _cameraGen || adjusting !== _adjust) return;
+      msg.textContent = 'Snapshot: ' + e.message;
+      // The editor needs the full frame; a live capture may hold the camera briefly.
+      if (adjusting && !adjusting.ready) setTimeout(() => {
+        if (gen === _cameraGen && adjusting === _adjust) refreshCamera();
+      }, 1500);
+    });
 }
 
 function cameraLive() {
@@ -702,8 +713,10 @@ function adjustHint() {
 function startAdjust() {
   if (!_cameraInfo) return;
   const v = fullViewFromInfo(_cameraInfo);
-  _adjust = { step: 'box', box: v.box, split: v.split, drag: null };
+  _adjust = { step: 'box', box: v.box, split: v.split, drag: null, ready: false };
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
+  _cameraGen++;          // drop any cropped snapshot still in flight
+  clearCameraImage();    // and the one on screen: the editor works on the full frame only
   document.getElementById('camera-view-buttons').hidden = true;
   document.getElementById('camera-adjust-buttons').hidden = false;
   document.getElementById('btn-adjust-reset').disabled = !_cameraInfo.view_override;
@@ -753,15 +766,27 @@ function imageFraction(e) {
   return [Math.min(1, Math.max(0, fx)), Math.min(1, Math.max(0, fy))];
 }
 
+// The values exactly as they are sent: each box edge rounded once to 0.001,
+// sizes derived from the rounded edges (so x + w never exceeds 1), and split_x
+// from the rounded box. splitValid() checks these same numbers.
+function roundedView() {
+  const r = n => Math.round(n * 1000) / 1000;
+  const [bx, by, bw, bh] = _adjust.box;
+  const x0 = r(bx), y0 = r(by), x1 = r(Math.min(1, bx + bw)), y1 = r(Math.min(1, by + bh));
+  const w = r(x1 - x0), h = r(y1 - y0);
+  const full = x0 <= 0.001 && y0 <= 0.001 && x1 >= 0.999 && y1 >= 0.999;
+  return { roi: full ? '' : [x0, y0, w, h].join(','),
+           split_x: full ? r(_adjust.split) : r((_adjust.split - x0) / w) };
+}
+
 function splitValid() {
-  const [bx, , bw] = _adjust.box;
-  const rel = (_adjust.split - bx) / bw;
-  return rel > 0.05 && rel < 0.95;
+  const { split_x } = roundedView();
+  return split_x > 0.05 && split_x < 0.95;
 }
 
 const _frame = document.getElementById('camera-frame');
 _frame.addEventListener('pointerdown', e => {
-  if (!_adjust || !document.getElementById('camera-img').naturalWidth) return;
+  if (!_adjust || !_adjust.ready || !document.getElementById('camera-img').naturalWidth) return;
   e.preventDefault();
   _frame.setPointerCapture(e.pointerId);
   _adjust.drag = { start: imageFraction(e), moved: false };
@@ -795,12 +820,8 @@ _frame.addEventListener('pointerup', e => {
 });
 
 function saveAdjust() {
-  if (!_adjust || _adjust.step !== 'split' || !splitValid()) return;
-  const [bx, by, bw, bh] = _adjust.box;
-  const full = bx <= 0.001 && by <= 0.001 && bw >= 0.999 && bh >= 0.999;
-  const r = n => Math.round(n * 1000) / 1000;
-  const roi = full ? '' : [r(bx), r(by), r(Math.min(bw, 1 - bx)), r(Math.min(bh, 1 - by))].join(',');
-  const split_x = r((_adjust.split - bx) / bw);
+  if (!_adjust || !_adjust.ready || _adjust.step !== 'split' || !splitValid()) return;
+  const { roi, split_x } = roundedView();
   openLog();
   socket.emit('camera_set_view', { roi, split_x });
 }
@@ -809,6 +830,11 @@ function resetAdjust() {
   openLog();
   socket.emit('camera_clear_view');
 }
+
+// Another browser saved or cleared the view: reload ours, unless it is mid-edit.
+socket.on('camera_view_changed', () => {
+  if (_currentTab === 'camera' && !_adjust) { closeCamera(); openCamera(); }
+});
 
 socket.on('camera_view', ({ ok, error }) => {
   if (!ok) {
