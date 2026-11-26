@@ -580,6 +580,11 @@ function clearCameraImage() {
   const img = document.getElementById('camera-img');
   if (img.src) URL.revokeObjectURL(img.src);
   img.removeAttribute('src');
+  // The pixels read from it go too: Flat halves and the straightened editor
+  // image must not be drawn from a frame of another crop.
+  _srcPixels = null;
+  document.getElementById('camera-undist').hidden = true;
+  document.getElementById('camera-flatview').hidden = true;
   setCameraLoading(true);
   placeCameraOverlay();   // _cameraInfo is null here, so this hides the line and labels
 }
