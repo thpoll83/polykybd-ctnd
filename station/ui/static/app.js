@@ -347,6 +347,59 @@ function closeMore() {
   document.getElementById('main-controls').hidden = false;
 }
 
+// ── Camera view ──────────────────────────────────────────────────────────────
+// Shows the rig camera with the dashed split line the RGB phase check uses, so
+// the orientation (rotation, flips, split_x, master_on_left in config.yaml) can
+// be checked by eye. The server refuses a snapshot while the rig is busy.
+let _cameraTimer = null;
+
+function openCamera() {
+  document.getElementById('more-panel').hidden = true;
+  document.getElementById('camera-controls').hidden = false;
+  document.getElementById('log-panel').hidden = true;
+  document.getElementById('camera-panel').hidden = false;
+  fetch('/camera/info')
+    .then(r => r.json())
+    .then(info => {
+      const msg = document.getElementById('camera-msg');
+      if (!info.available) { msg.textContent = 'No camera: ' + info.detail; return; }
+      const pct = (info.split_x * 100).toFixed(1) + '%';
+      document.getElementById('camera-split').style.left = pct;
+      const master = 'MASTER (USB)', slave = 'SLAVE';
+      document.getElementById('camera-tag-left').textContent  = info.master_on_left ? master : slave;
+      document.getElementById('camera-tag-right').textContent = info.master_on_left ? slave : master;
+      msg.textContent = `rotation ${info.rotation}°, hflip ${info.hflip}, vflip ${info.vflip}, ` +
+                        `split_x ${info.split_x} — the dashed line must fall between the halves`;
+      refreshCamera();
+      cameraLive();
+    })
+    .catch(e => { document.getElementById('camera-msg').textContent = 'Camera info failed: ' + e; });
+}
+
+function refreshCamera() {
+  const img = document.getElementById('camera-img');
+  fetch('/camera/snapshot.jpg?t=' + Date.now())
+    .then(r => r.ok ? r.blob() : r.text().then(t => { throw new Error(t); }))
+    .then(b => {
+      if (img.src) URL.revokeObjectURL(img.src);
+      img.src = URL.createObjectURL(b);
+    })
+    .catch(e => { document.getElementById('camera-msg').textContent = 'Snapshot: ' + e.message; });
+}
+
+function cameraLive() {
+  if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
+  if (document.getElementById('camera-live').checked) _cameraTimer = setInterval(refreshCamera, 2000);
+}
+
+function closeCamera() {
+  if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
+  document.getElementById('camera-controls').hidden = true;
+  document.getElementById('camera-panel').hidden = true;
+  document.getElementById('log-panel').hidden = false;
+  document.getElementById('main-controls').hidden = false;
+}
+
 function quitApp() { window.close(); }
 
 function refreshFirmware() {

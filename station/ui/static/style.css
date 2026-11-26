@@ -147,6 +147,59 @@ main {
   padding: 10px 16px;
 }
 
+#camera-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 16px;
+  overflow: hidden;
+}
+
+/* Higher specificity than #camera-panel so [hidden] wins over display:flex. */
+#camera-panel[hidden] { display: none; }
+
+#camera-frame {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+#camera-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+#camera-split {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  border-left: 2px dashed #f5c542;
+}
+
+.camera-tag {
+  position: absolute;
+  top: 6px;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: #000;
+  background: #f5c542;
+  border-radius: 3px;
+}
+
+#camera-tag-left  { left: 6px; }
+#camera-tag-right { right: 6px; }
+
+#camera-msg {
+  color: #888;
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
 .no-jobs {
   color: #555;
   font-size: 13px;

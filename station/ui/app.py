@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, Response, render_template, jsonify
 from flask_socketio import SocketIO
 
 from station.config import (
@@ -598,6 +598,34 @@ def list_firmware():
         return jsonify([])
     files = sorted(p.name for p in base.iterdir() if p.suffix.lower() in (".uf2", ".bin"))
     return jsonify(files)
+
+
+@app.route("/camera/info")
+def camera_info():
+    """Camera availability and the orientation settings the camera view draws."""
+    from station import camera
+    ok, why = camera.availability()
+    st = camera.SETTINGS
+    return jsonify({"available": ok, "detail": why, "rotation": st.rotation,
+                    "hflip": st.hflip, "vflip": st.vflip, "split_x": st.split_x,
+                    "master_on_left": st.master_on_left})
+
+
+@app.route("/camera/snapshot.jpg")
+def camera_snapshot():
+    """One JPEG from the rig camera, rotated and flipped as config.yaml says.
+
+    Refused while the rig is flashing or testing: a CI run may be recording, and
+    the camera serves one client at a time.
+    """
+    from station import camera
+    if _status["value"] not in ("idle", "error"):
+        return Response(f"rig busy ({_status['value']})", status=503, mimetype="text/plain")
+    try:
+        jpg = camera.snapshot_jpeg()
+    except Exception as exc:
+        return Response(str(exc), status=503, mimetype="text/plain")
+    return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 # ── SocketIO events ───────────────────────────────────────────────────────────

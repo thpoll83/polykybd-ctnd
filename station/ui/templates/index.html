@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=3">
+  <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body data-status="idle">
   <header>
@@ -29,6 +29,15 @@
     </div>
     <div id="ci-jobs-panel" hidden>
       <div id="ci-jobs-list"><p class="no-jobs">Loading CI jobs…</p></div>
+    </div>
+    <div id="camera-panel" hidden>
+      <div id="camera-frame">
+        <img id="camera-img" alt="rig camera">
+        <div id="camera-split"></div>
+        <span class="camera-tag" id="camera-tag-left"></span>
+        <span class="camera-tag" id="camera-tag-right"></span>
+      </div>
+      <p id="camera-msg">Loading camera…</p>
     </div>
   </main>
 
@@ -67,6 +76,14 @@
       </div>
     </div>
 
+    <div id="camera-controls" hidden>
+      <div class="button-row more-nav">
+        <button class="btn btn-gray" onclick="closeCamera()">&#8592; Back</button>
+        <button class="btn btn-gray" onclick="refreshCamera()">&#x21BB; Refresh</button>
+        <label class="chk"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (every 2 s)</label>
+      </div>
+    </div>
+
     <div id="more-panel" hidden>
       <div class="button-row">
         <button class="btn btn-sm btn-usb"     id="btn-usb-left"      data-state="unknown"  onclick="toggleUsb('left')">L: USB ?</button>
@@ -77,6 +94,7 @@
         <button class="btn btn-sm btn-reset"   id="btn-reset-right"  data-state="released" onclick="toggleRun('right')">R: Reset</button>
       </div>
       <div class="button-row">
+        <button class="btn btn-sm btn-teal" onclick="openCamera()" title="Show what the rig camera sees, with the left/right split the RGB phase check uses">Camera</button>
         <button class="btn btn-sm btn-gray" id="btn-hand-left"  onclick="setHandedness(true)"  title="Tell the USB/master half it is the LEFT half (slave = right); keyboard reboots">Hand: USB=Left</button>
         <button class="btn btn-sm btn-gray" id="btn-hand-right" onclick="setHandedness(false)" title="Tell the USB/master half it is the RIGHT half (slave = left); keyboard reboots">Hand: USB=Right</button>
       </div>
@@ -93,6 +111,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

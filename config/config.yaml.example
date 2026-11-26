@@ -77,3 +77,28 @@ github:
   # Labels the HIL job requires — must match `runs-on:` in qmk-test.yml.
   # The RUNNER badge turns green only when an online runner advertises all of these.
   runner_labels: [self-hosted, polykybd-ctnd]
+
+# Rig camera (optional, a Raspberry Pi CSI camera; station/camera.py).
+# Used for the RGB phase check between the halves during HID staging, and for
+# the camera view in the UI (More ··· → Camera). With enabled: auto the check
+# runs when rpicam-hello finds a camera and SKIPs otherwise.
+# Open the camera view to set the orientation: the master half must be on the
+# side that master_on_left says, and the dashed line (split_x) must fall in the
+# gap between the halves.
+camera:
+  enabled: auto          # auto | yes | no
+  rotation: 0            # 0 or 180
+  hflip: false
+  vflip: false
+  split_x: 0.5           # left/right boundary as a fraction of the image width
+  master_on_left: true   # the image's left side shows the master (USB) half
+  # Recording for the phase check. Fixed exposure, gain and white balance, so
+  # runs compare. 320x240 output from the OV5647's 640x480 90 fps mode.
+  width: 320             # a multiple of 64
+  height: 240
+  framerate: 90
+  mode: "640:480:10:P"   # sensor mode; "" lets rpicam-vid choose
+  shutter_us: 8000
+  gain: 4.0
+  awb_gains: "1.5,1.5"
+  record_s: 8

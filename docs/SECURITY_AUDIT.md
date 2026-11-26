@@ -343,6 +343,12 @@ unauthenticated rig control to every host that can reach the port *and* widens C
 `allow_lan`. This caveat is repeated in `config/config.yaml.example`, which is where
 someone about to make the mistake will actually read it.
 
+The camera routes (`/camera/info`, `/camera/snapshot.jpg`, 2026-11-26) are plain HTTP
+GETs with the same exposure. On loopback they show the kiosk what the rig camera sees.
+With `allow_lan: true`, anyone who can reach the port can see the camera image. The
+snapshot takes no request parameters, and `rpicam-still` gets only values from
+`config.yaml`.
+
 If `allow_lan` ever becomes a routine deployment mode, revisit this — a shared-secret
 token on connect (required only when `allow_lan` is set) is the intended next step.
 

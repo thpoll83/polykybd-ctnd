@@ -101,3 +101,6 @@ FIRMWARE_DIR = str(_root / "firmware")
 # timer fetches this branch and fast-forwards + restarts when it gains commits
 # (see scripts/self-update.sh); the UI "Update" badge/button reflect the same.
 UPDATE_BRANCH = _c.get("update", {}).get("branch") or "main"
+
+# Rig camera (optional): station/camera.py reads and validates the block.
+CAMERA = _c.get("camera") or {}
