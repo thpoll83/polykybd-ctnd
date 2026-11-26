@@ -155,6 +155,23 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(meta["label"]["text"], "CI run #1")
         self.assertTrue(png.startswith(b"\x89PNG"))
 
+    def test_live_frame_when_the_recording_ends_meanwhile(self):
+        import builtins
+        import json
+        import time
+        from unittest import mock
+        (self.dir / "rec.json").write_text(json.dumps(
+            {"width": 4, "height": 2, "started": time.time(), "label": {"text": "x"}}))
+        (self.dir / "rec.yuv").write_bytes(bytes(12 * 2))
+        real_open = builtins.open
+
+        def vanishing(path, *a, **k):
+            if str(path).endswith("rec.yuv"):
+                raise FileNotFoundError(path)   # record() cleaned up after getsize()
+            return real_open(path, *a, **k)
+        with mock.patch("builtins.open", vanishing):
+            self.assertIsNone(camera.live_frame(self.dir))
+
     def test_no_live_frame_without_a_recording(self):
         self.assertIsNone(camera.live_frame(self.dir))
 

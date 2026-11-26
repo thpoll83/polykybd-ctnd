@@ -341,11 +341,11 @@ def record(settings: CameraSettings = SETTINGS, seconds: float | None = None,
     if not _lock.acquire(timeout=30):
         raise CameraBusy("camera busy (a snapshot did not finish)")
     cam_fd = None
-    started = time.time()
     try:
         cam_fd = _acquire_camera(30)
         if cam_fd is None:
             raise CameraBusy("camera busy (another process holds it)")
+        started = time.time()   # after any wait for a snapshot to finish
         LIVE_DIR.mkdir(parents=True, exist_ok=True)
         raw, pts = str(LIVE_DIR / "rec.yuv"), str(LIVE_DIR / "rec.pts")
         for stale in (raw, pts):
@@ -478,9 +478,12 @@ def live_frame(directory: Path | None = None) -> tuple[bytes, dict] | None:
     count = size // frame
     if count < 1:
         return None
-    with open(directory / "rec.yuv", "rb") as f:
-        f.seek((count - 1) * frame)
-        y = f.read(w * h)
+    try:
+        with open(directory / "rec.yuv", "rb") as f:
+            f.seek((count - 1) * frame)
+            y = f.read(w * h)
+    except OSError:   # the recording ended and removed the file meanwhile
+        return None
     if len(y) < w * h:
         return None
     meta["frame"] = count
