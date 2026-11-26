@@ -346,6 +346,31 @@ class MeasureNowTest(unittest.TestCase):
         self.assertEqual(out["traces"], saved["traces"])   # returned = what was saved
 
 
+class MeasureNowStagingFailedTest(unittest.TestCase):
+    def test_failed_staging_is_not_a_pass(self):
+        import tempfile
+        from pathlib import Path
+        import station.fw_update as fw
+        orig = (fw.stage_and_verify, camera.availability, camera.record, camera.LAST_RESULT_PATH)
+
+        def fake_stage(path, log, on_begin=None, **k):
+            on_begin()
+            return False   # e.g. COMMIT refused after the recording started
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fw.stage_and_verify = fake_stage
+            camera.availability = lambda s=None: (True, "fake camera")
+            camera.record = lambda s=None, seconds=None: synth(0.0)
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            try:
+                out = camera.measure_now("fw.bin", lambda m: None, CameraSettings.from_config({}))
+            finally:
+                fw.stage_and_verify, camera.availability, camera.record, camera.LAST_RESULT_PATH = orig
+        self.assertEqual(out["status"], "skip")
+        self.assertIn("HID staging failed", out["reason"])
+        self.assertIn("traces", out)
+
+
 class RunnerHookTest(unittest.TestCase):
     def setUp(self):
         # rgb_phase_check() saves its result; keep it out of the checkout's var/.
@@ -368,6 +393,7 @@ class RunnerHookTest(unittest.TestCase):
         self.assertEqual(rec["status"], "skip")
         self.assertEqual(rec["reason"], "no camera detected")
         self.assertTrue(any("SKIP" in line for line in logs))
+        self.assertEqual(camera.load_last()["reason"], "no camera detected")
 
     def test_recording_error_skips(self):
         from station.test_runner import TestRunner

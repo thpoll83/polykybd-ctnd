@@ -559,4 +559,12 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
         if not staged:
             why += " (the HID staging failed too, see the log)"
         return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
+    if not staged:
+        # The recording may be fine, but the staging it belongs to was refused
+        # or broke off (version mismatch, transfer, COMMIT). Report that, with
+        # the traces for reference, instead of a pass or xfail.
+        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip",
+                          "reason": "the HID staging failed (see the log), so this "
+                                    "measurement is not used: " + judge(res).get("info", "")},
+                         "ui", recording.timestamps_ms, master, slave)
     return save_last(judge(res), "ui", recording.timestamps_ms, master, slave)

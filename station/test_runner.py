@@ -427,7 +427,9 @@ class TestRunner:
         name = camera.RGB_PHASE_TEST_NAME
         if cam_rec is None:
             self.log(f"[test] SKIP: {name} — {unavailable_reason}")
-            return {"name": name, "status": "skip", "reason": unavailable_reason}
+            rec = {"name": name, "status": "skip", "reason": unavailable_reason}
+            camera.save_last(rec, "ci")   # the UI must not keep showing an older result
+            return rec
         try:
             recording = cam_rec.result()
             res, master, slave = camera.analyse_traces(recording)
