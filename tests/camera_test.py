@@ -147,6 +147,35 @@ class PhaseTest(unittest.TestCase):
         self.assertAlmostEqual(res.fps, 58.0, delta=1.0)
 
 
+class PeriodicityTest(unittest.TestCase):
+    def test_shared_brightness_step_skips(self):
+        # No cue on either half, one room-light step: identical traces with zero
+        # lag and correlation 1. Without the periodicity check this read as pass.
+        rec = synth(0.0, swing=0.0)
+        w, h = rec.width, rec.height
+        rec.lumas = [bytes(min(255, v + (40 if t > 3500 else 0)) for v in y)
+                     for t, y in zip(rec.timestamps_ms, rec.lumas)]
+        res = camera.analyse(rec, CameraSettings.from_config({}))
+        self.assertLess(min(res.periodicity_left, res.periodicity_right),
+                        camera.MIN_PERIODICITY)
+        self.assertEqual(camera.judge(res)["status"], "skip")
+
+    def test_cue_is_periodic(self):
+        res = camera.analyse(synth(300.0), CameraSettings.from_config({}))
+        self.assertGreater(min(res.periodicity_left, res.periodicity_right), 0.9)
+        self.assertEqual(camera.judge(res)["status"], "xfail")
+
+    def test_short_trace_is_not_periodic(self):
+        self.assertEqual(camera.periodicity([1.0, 2.0, 3.0], 512), 0.0)
+
+
+class SnapshotTest(unittest.TestCase):
+    def test_disabled_camera_takes_no_snapshot(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            camera.snapshot_jpeg(CameraSettings.from_config({"enabled": "no"}))
+        self.assertIn("enabled", str(ctx.exception))
+
+
 class JudgeTest(unittest.TestCase):
     def res(self, **kw):
         base = dict(offset_ms=0.0, correlation=0.98, swing_left=20.0,
@@ -164,6 +193,11 @@ class JudgeTest(unittest.TestCase):
 
     def test_no_breathing_skips(self):
         self.assertEqual(camera.judge(self.res(swing_right=0.5))["status"], "skip")
+
+    def test_not_periodic_skips(self):
+        r = camera.judge(self.res(periodicity_right=0.2))
+        self.assertEqual(r["status"], "skip")
+        self.assertIn("2048 ms", r["reason"])
 
     def test_poor_match_skips(self):
         self.assertEqual(camera.judge(self.res(correlation=0.2))["status"], "skip")

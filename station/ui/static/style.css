@@ -157,7 +157,9 @@ main {
 }
 
 /* Higher specificity than #camera-panel so [hidden] wins over display:flex. */
-#camera-panel[hidden] { display: none; }
+#camera-panel[hidden],
+#camera-split[hidden],
+.camera-tag[hidden] { display: none; }
 
 #camera-frame {
   position: relative;

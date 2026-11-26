@@ -121,8 +121,11 @@ def snapshot_jpeg(settings: CameraSettings = SETTINGS,
                   width: int = 1296, height: int = 972) -> bytes:
     """One JPEG with the configured rotation and flips, for the UI's camera view.
 
-    Raises RuntimeError when the camera is busy (a CI capture holds it) or absent.
+    Raises RuntimeError when the camera is disabled in config.yaml, busy (a CI
+    capture holds it) or absent.
     """
+    if settings.enabled == "no":
+        raise RuntimeError("camera.enabled is no in config.yaml")
     if not _lock.acquire(blocking=False):
         raise RuntimeError("camera busy (a capture is running)")
     try:
@@ -289,6 +292,26 @@ class PhaseResult:
     swing_right: float
     frames: int
     fps: float
+    periodicity_left: float = 1.0    # each trace against itself one period later
+    periodicity_right: float = 1.0
+
+
+def periodicity(x: list[float], lag: int) -> float:
+    """Pearson correlation of ``x`` with itself ``lag`` samples later.
+
+    Close to 1 for the flash cue, which repeats every period. Low for a one-off
+    brightness change (room light, the kiosk display), which also varies but
+    does not repeat. 0 when the trace is shorter than one period plus a quarter.
+    """
+    n = len(x) - lag
+    if lag <= 0 or n < lag // 4:
+        return 0.0
+    a, b = x[:n], x[lag:]
+    ma, mb = sum(a) / n, sum(b) / n
+    sab = sum((p - ma) * (q - mb) for p, q in zip(a, b))
+    saa = sum((p - ma) ** 2 for p in a)
+    sbb = sum((q - mb) ** 2 for q in b)
+    return sab / math.sqrt(saa * sbb) if saa > 0 and sbb > 0 else 0.0
 
 
 def phase_offset(ts: list[float], left: list[float], right: list[float],
@@ -298,6 +321,8 @@ def phase_offset(ts: list[float], left: list[float], right: list[float],
     b = resample(ts, right, dt)
     n = min(len(a), len(b))
     a, b = a[:n], b[:n]
+    period = int(round(period_ms / dt))
+    per_a, per_b = periodicity(a, period), periodicity(b, period)
     ma, mb = sum(a) / n, sum(b) / n
     a = [x - ma for x in a]
     b = [x - mb for x in b]
@@ -325,7 +350,8 @@ def phase_offset(ts: list[float], left: list[float], right: list[float],
     fps = (len(ts) - 1) * 1000.0 / (ts[-1] - ts[0]) if len(ts) > 1 and ts[-1] > ts[0] else 0.0
     return PhaseResult(offset_ms=(lags[best] + shift) * dt, correlation=cs[best],
                        swing_left=max(left) - min(left), swing_right=max(right) - min(right),
-                       frames=len(ts), fps=fps)
+                       frames=len(ts), fps=fps,
+                       periodicity_left=per_a, periodicity_right=per_b)
 
 
 def analyse(rec: Recording, settings: CameraSettings = SETTINGS) -> PhaseResult:
@@ -342,6 +368,7 @@ RGB_PHASE_TEST_NAME = "RGB flash-cue phase between halves (camera)"
 PHASE_TOLERANCE_MS = 35.0
 MIN_SWING = 3.0          # luma units; below this the camera saw no breathing
 MIN_CORRELATION = 0.6
+MIN_PERIODICITY = 0.6    # each trace must repeat after one cue period
 
 
 def judge(res: PhaseResult) -> dict:
@@ -354,12 +381,17 @@ def judge(res: PhaseResult) -> dict:
     """
     info = (f"offset {res.offset_ms:+.1f} ms, correlation {res.correlation:.2f}, "
             f"swing L {res.swing_left:.1f} / R {res.swing_right:.1f}, "
+            f"periodicity L {res.periodicity_left:.2f} / R {res.periodicity_right:.2f}, "
             f"{res.frames} frames at {res.fps:.0f} fps")
     rec = {"name": RGB_PHASE_TEST_NAME, "info": info, "offset_ms": round(res.offset_ms, 1)}
     if min(res.swing_left, res.swing_right) < MIN_SWING:
         return {**rec, "status": "skip",
                 "reason": "the camera saw no breathing on one half — check framing, "
                           "split_x and exposure in the UI camera view (" + info + ")"}
+    if min(res.periodicity_left, res.periodicity_right) < MIN_PERIODICITY:
+        return {**rec, "status": "skip",
+                "reason": "a half does not repeat with the 2048 ms flash-cue period, so "
+                          "the camera saw another brightness change, not the cue (" + info + ")"}
     if res.correlation < MIN_CORRELATION:
         return {**rec, "status": "skip",
                 "reason": f"traces do not match well enough to measure ({info})"}

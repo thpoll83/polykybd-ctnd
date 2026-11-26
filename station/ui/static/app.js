@@ -352,53 +352,98 @@ function closeMore() {
 // the orientation (rotation, flips, split_x, master_on_left in config.yaml) can
 // be checked by eye. The server refuses a snapshot while the rig is busy.
 let _cameraTimer = null;
+let _cameraGen   = 0;      // bumped on open and close; late responses of an older view are dropped
+let _cameraInfo  = null;   // the /camera/info reply of the open view
+let _cameraText  = '';     // the orientation line, restored after a snapshot error clears
 
 function openCamera() {
+  const gen = ++_cameraGen;
+  _cameraInfo = null;
   document.getElementById('more-panel').hidden = true;
   document.getElementById('camera-controls').hidden = false;
   document.getElementById('log-panel').hidden = true;
   document.getElementById('camera-panel').hidden = false;
+  const msg = document.getElementById('camera-msg');
+  msg.textContent = 'Loading camera…';
   fetch('/camera/info')
     .then(r => r.json())
     .then(info => {
-      const msg = document.getElementById('camera-msg');
+      if (gen !== _cameraGen) return;   // the view was closed or reopened meanwhile
       if (!info.available) { msg.textContent = 'No camera: ' + info.detail; return; }
-      const pct = (info.split_x * 100).toFixed(1) + '%';
-      document.getElementById('camera-split').style.left = pct;
+      _cameraInfo = info;
       const master = 'MASTER (USB)', slave = 'SLAVE';
       document.getElementById('camera-tag-left').textContent  = info.master_on_left ? master : slave;
       document.getElementById('camera-tag-right').textContent = info.master_on_left ? slave : master;
-      msg.textContent = `rotation ${info.rotation}°, hflip ${info.hflip}, vflip ${info.vflip}, ` +
-                        `split_x ${info.split_x} — the dashed line must fall between the halves`;
+      _cameraText = `rotation ${info.rotation}°, hflip ${info.hflip}, vflip ${info.vflip}, ` +
+                    `split_x ${info.split_x} — the dashed line must fall between the halves`;
+      msg.textContent = _cameraText;
+      placeCameraOverlay();
       refreshCamera();
       cameraLive();
     })
-    .catch(e => { document.getElementById('camera-msg').textContent = 'Camera info failed: ' + e; });
+    .catch(e => { if (gen === _cameraGen) msg.textContent = 'Camera info failed: ' + e; });
+}
+
+// Put the split line and the labels on the PAINTED image. object-fit: contain
+// can leave bars at the sides or top, so split_x is a fraction of the painted
+// width, not of the img box.
+function placeCameraOverlay() {
+  const img = document.getElementById('camera-img');
+  const split = document.getElementById('camera-split');
+  const tagL = document.getElementById('camera-tag-left');
+  const tagR = document.getElementById('camera-tag-right');
+  const show = !!(_cameraInfo && img.naturalWidth && img.clientWidth);
+  [split, tagL, tagR].forEach(el => { el.hidden = !show; });
+  if (!show) return;
+  const scale = Math.min(img.clientWidth / img.naturalWidth, img.clientHeight / img.naturalHeight);
+  const pw = img.naturalWidth * scale, ph = img.naturalHeight * scale;
+  const x0 = img.offsetLeft + (img.clientWidth - pw) / 2;
+  const y0 = img.offsetTop + (img.clientHeight - ph) / 2;
+  split.style.left = (x0 + _cameraInfo.split_x * pw) + 'px';
+  split.style.top = y0 + 'px';
+  split.style.height = ph + 'px';
+  split.style.bottom = 'auto';
+  tagL.style.left = (x0 + 6) + 'px';
+  tagL.style.top = (y0 + 6) + 'px';
+  tagR.style.left = (x0 + pw - 6 - tagR.offsetWidth) + 'px';
+  tagR.style.right = 'auto';
+  tagR.style.top = (y0 + 6) + 'px';
 }
 
 function refreshCamera() {
+  const gen = _cameraGen;
   const img = document.getElementById('camera-img');
+  const msg = document.getElementById('camera-msg');
   fetch('/camera/snapshot.jpg?t=' + Date.now())
     .then(r => r.ok ? r.blob() : r.text().then(t => { throw new Error(t); }))
     .then(b => {
+      if (gen !== _cameraGen) return;
       if (img.src) URL.revokeObjectURL(img.src);
       img.src = URL.createObjectURL(b);
+      if (_cameraText) msg.textContent = _cameraText;   // clear an earlier "busy" error
     })
-    .catch(e => { document.getElementById('camera-msg').textContent = 'Snapshot: ' + e.message; });
+    .catch(e => { if (gen === _cameraGen) msg.textContent = 'Snapshot: ' + e.message; });
 }
 
 function cameraLive() {
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
-  if (document.getElementById('camera-live').checked) _cameraTimer = setInterval(refreshCamera, 2000);
+  if (_cameraInfo && document.getElementById('camera-live').checked) {
+    _cameraTimer = setInterval(refreshCamera, 2000);
+  }
 }
 
 function closeCamera() {
+  _cameraGen++;
+  _cameraInfo = null;
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
   document.getElementById('camera-controls').hidden = true;
   document.getElementById('camera-panel').hidden = true;
   document.getElementById('log-panel').hidden = false;
   document.getElementById('main-controls').hidden = false;
 }
+
+document.getElementById('camera-img').addEventListener('load', placeCameraOverlay);
+window.addEventListener('resize', placeCameraOverlay);
 
 function quitApp() { window.close(); }
 
