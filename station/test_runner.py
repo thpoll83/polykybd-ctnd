@@ -66,6 +66,22 @@ SUSPEND_STALL_WAIT_S = 12.0
 STALL_PATTERN = "core1 stalled"
 
 
+def should_restore_slave(apply_result: dict, two_masters: bool) -> bool:
+    """Whether to put the slave's own image back after the apply, UNGRADED.
+
+    An apply on this rig turns the slave into a second master (it installs the
+    master's image, see :meth:`TestRunner.firmware_apply_roundtrip`). The graded
+    follow-up, :meth:`TestRunner.post_apply_split_link`, restores it, but only
+    when the caller opts in, which a plain push to PolyKybd does not. Without
+    a restore the rig then stays with two masters until the next run's flash:
+    the right half dark, no split link, and the UI's phase measurement running
+    into a 90 s BEGIN timeout (2026-11-26, after the fwapply job of a merge).
+
+    Only after a PASSED apply: a failed one leaves state someone has to read.
+    """
+    return apply_result.get("status") == "pass" and two_masters
+
+
 def should_reflash_slave(apply_result: dict, enabled: bool) -> bool:
     """Whether to finish the link question by re-flashing the slave.
 
@@ -160,6 +176,7 @@ class TestRunner:
         """
         results = []
         self._two_masters_after_apply = False   # set again by this run's apply, if any
+        restore_slave = False   # put the slave's own image back at the end (ungraded)
         begin_session()      # the crash scan reads the console from HERE
         try:
             self.flash_halves(left_uf2, right_uf2)
@@ -364,6 +381,9 @@ class TestRunner:
                     if should_reflash_slave(applied, reflash_slave):
                         results.append(self.post_apply_split_link(
                             right_uf2, console=console_started))
+                    elif should_restore_slave(applied, self._two_masters_after_apply):
+                        # After every graded check, so the restore changes none of them.
+                        restore_slave = True
 
             # Persistence across a power cycle — LAST, because it reboots the
             # master (see reboot_persistence). Skipped when the suite already
@@ -384,6 +404,9 @@ class TestRunner:
                          "already has a failure to diagnose first")
             else:
                 results.append(self.reboot_persistence())
+
+            if restore_slave:
+                self.restore_slave_image(right_uf2)
 
             # Only a genuine FAIL fails the run; SKIP / XFAIL / XPASS do not.
             passed = not any(r.get("status") == "fail" for r in results)
@@ -795,6 +818,35 @@ class TestRunner:
                 TAP.flush()
             except Exception:
                 pass
+
+    def restore_slave_image(self, right_uf2: str) -> bool:
+        """Re-flash the slave with its own image after the apply left two masters.
+
+        Not a test: it adds no result and cannot fail the run, because the
+        fwapply job gates releases (``require_fwapply_run.py``). It only restores
+        the rig's two-image state, so the next user of the rig (a UI measurement,
+        the next CI job) finds a working split link. Returns whether one master
+        answers afterwards.
+        """
+        self.log("[runner] restoring the slave's own image (the apply left two "
+                 "masters); not graded")
+        try:
+            self._flash.flash("right", right_uf2, self.log)
+        except Exception as exc:
+            self.log(f"[runner] WARNING: could not restore the slave's image ({exc}); "
+                     "the rig keeps two masters until the next run flashes both halves")
+            return False
+        time.sleep(self.POST_APPLY_LINK_SETTLE_S)
+        masters = self._masters_after_apply(unknown=self.MASTERS_UNKNOWN)
+        # ⚠️ _two_masters_after_apply is left alone: this runs after every graded
+        # check, and clearing it would change what a later one asserts.
+        if masters == 1:
+            self.log("[runner] the slave is a slave again: one master answers")
+            return True
+        what = "could not be counted" if masters == self.MASTERS_UNKNOWN else f"{masters} masters"
+        self.log(f"[runner] WARNING: after restoring the slave's image, {what}; the "
+                 "next run flashes both halves")
+        return False
 
     def post_apply_split_link(self, right_uf2: str, console: bool = False) -> dict:
         """Re-flash the SLAVE, then measure the split link against the applied master.
