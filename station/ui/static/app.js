@@ -1009,7 +1009,8 @@ function lensZoom(k) {
     const dx = (u - 0.5) * a, dy = v - 0.5, rd = Math.hypot(dx, dy);
     let r = rd;
     for (let n = 0; n < 30; n++) r -= (r + c * r ** 3 - rd) / (1 + 3 * c * r * r);
-    if (!isFinite(r) || Math.abs(r + c * r ** 3 - rd) > 1e-6) r = fold;   // no inverse: up to the fold
+    // No inverse (or Newton found the negative root): up to the fold.
+    if (!isFinite(r) || r < 0 || r > fold || Math.abs(r + c * r ** 3 - rd) > 1e-6) r = fold;
     r = Math.min(r, fold);
     z = Math.max(z, Math.abs(dx * r / rd / a) / 0.5, Math.abs(dy * r / rd) / 0.5);
   }

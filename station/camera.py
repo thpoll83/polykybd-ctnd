@@ -100,7 +100,8 @@ def undistort(pt, k: float) -> tuple[float, float] | None:
     r = rd
     for _ in range(30):
         r -= (r + c * r ** 3 - rd) / (1 + 3 * c * r * r)
-    if not math.isfinite(r) or abs(r + c * r ** 3 - rd) > 1e-9 or (c < 0 and r > 1 / math.sqrt(-3 * c)):
+    if (not math.isfinite(r) or r < 0 or abs(r + c * r ** 3 - rd) > 1e-9
+            or (c < 0 and r > 1 / math.sqrt(-3 * c))):
         return None
     f = r / rd
     return 0.5 + dx * f / SENSOR_ASPECT, 0.5 + dy * f
@@ -380,7 +381,9 @@ def save_view_override(roi: str, split_x: float, path: Path | None = None,
             q = parse_quads(quads) if quads else ()
             if not q:
                 raise ValueError("camera quads must be two four-corner outlines")
-            base = CameraSettings.from_config({**(CAMERA or {}), "lens_k": lens_k})
+            # Without config.yaml's quads: they are replaced, and need not be
+            # visible at the new lens value.
+            base = CameraSettings.from_config({**(CAMERA or {}), "lens_k": lens_k, "quads": None})
             roi, split_x = view_from_quads(q, base)
         v = CameraSettings.from_config({**(CAMERA or {}), "roi": roi, "split_x": split_x,
                                         "quads": quads if quads is not None else {},

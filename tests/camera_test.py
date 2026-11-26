@@ -901,6 +901,24 @@ class QuadTest(unittest.TestCase):
         self.assertGreaterEqual(float(roi.split(",")[0]), 0.0)
         with self.assertRaisesRegex(ValueError, "outside the camera image"):
             CameraSettings.from_config({"quads": wide})
+        # config.yaml's quads are replaced on save, so they need not be visible
+        # at the new lens value.
+        import tempfile
+        from pathlib import Path
+        orig = (camera.CAMERA, camera.SETTINGS.roi, camera.SETTINGS.split_x,
+                camera.SETTINGS.quads, camera.SETTINGS.lens_k)
+        try:
+            camera.CAMERA = {"quads": {"left": [[0.0, 0.1], [0.45, 0.1], [0.45, 0.9], [0.0, 0.9]],
+                                       "right": RIGHT_Q}}
+            with tempfile.TemporaryDirectory() as d:
+                self.assertEqual(camera.save_view_override(
+                    "", 0.5, Path(d) / "v.json",
+                    quads={"left": [[0.2, 0.2], [0.45, 0.2], [0.45, 0.8], [0.2, 0.8]],
+                           "right": [[0.55, 0.2], [0.8, 0.2], [0.8, 0.8], [0.55, 0.8]]},
+                    lens_k=0.2), "")
+        finally:
+            (camera.CAMERA, camera.SETTINGS.roi, camera.SETTINGS.split_x,
+             camera.SETTINGS.quads, camera.SETTINGS.lens_k) = orig
         # Beyond the radius where the model folds back, a corner is refused too.
         self.assertFalse(camera.visible((-0.6, -0.6), -0.3))
 
