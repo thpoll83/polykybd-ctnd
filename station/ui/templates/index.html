@@ -25,17 +25,17 @@
 
   <!-- One tab per mode. showTab() in app.js switches the sections below and
        remembers the last tab in localStorage. -->
-  <nav id="tabs">
-    <button class="tab" data-tab="test"     onclick="showTab('test')">Test</button>
-    <button class="tab" data-tab="hardware" onclick="showTab('hardware')">Hardware</button>
-    <button class="tab" data-tab="camera"   onclick="showTab('camera')">Camera</button>
-    <button class="tab" data-tab="runner"   onclick="showTab('runner')">Runner</button>
-    <button class="tab" data-tab="log"      onclick="showTab('log')">Log</button>
+  <nav id="tabs" role="tablist" aria-label="Station modes">
+    <button class="tab" role="tab" id="tabbtn-test" aria-controls="tab-test" aria-selected="false" data-tab="test"     onclick="showTab('test')">Test</button>
+    <button class="tab" role="tab" id="tabbtn-hardware" aria-controls="tab-hardware" aria-selected="false" data-tab="hardware" onclick="showTab('hardware')">Hardware</button>
+    <button class="tab" role="tab" id="tabbtn-camera" aria-controls="tab-camera" aria-selected="false" data-tab="camera"   onclick="showTab('camera')">Camera</button>
+    <button class="tab" role="tab" id="tabbtn-runner" aria-controls="tab-runner" aria-selected="false" data-tab="runner"   onclick="showTab('runner')">Runner</button>
+    <button class="tab" role="tab" id="tabbtn-log" aria-controls="tab-log" aria-selected="false" data-tab="log"      onclick="showTab('log')">Log</button>
   </nav>
 
   <main>
     <!-- ── Test: firmware, flash, run, results ── -->
-    <section class="tab-panel" id="tab-test" hidden>
+    <section class="tab-panel" id="tab-test" role="tabpanel" aria-labelledby="tabbtn-test" hidden>
       <div class="firmware-row">
         <label>Left</label>
         <select id="left-fw"><option value="">— select firmware —</option></select>
@@ -56,7 +56,7 @@
     </section>
 
     <!-- ── Hardware: one card per half ── -->
-    <section class="tab-panel" id="tab-hardware" hidden>
+    <section class="tab-panel" id="tab-hardware" role="tabpanel" aria-labelledby="tabbtn-hardware" hidden>
       <div class="hw-cards">
         <div class="hw-card">
           <h2>Left half <span class="hw-role">master (USB)</span></h2>
@@ -78,7 +78,7 @@
     </section>
 
     <!-- ── Camera: live view, last phase result, measure now ── -->
-    <section class="tab-panel" id="tab-camera" hidden>
+    <section class="tab-panel" id="tab-camera" role="tabpanel" aria-labelledby="tabbtn-camera" hidden>
       <div id="camera-panel">
         <div id="camera-frame">
           <img id="camera-img" alt="rig camera">
@@ -112,7 +112,7 @@
     </section>
 
     <!-- ── Runner: CI jobs and runner service ── -->
-    <section class="tab-panel" id="tab-runner" hidden>
+    <section class="tab-panel" id="tab-runner" role="tabpanel" aria-labelledby="tabbtn-runner" hidden>
       <div id="ci-jobs-list"><p class="no-jobs">Loading CI jobs…</p></div>
       <div class="button-row">
         <button class="btn btn-blue"  id="btn-diagnose"   onclick="runDiagnostics()">⌕ Diagnose</button>
@@ -123,7 +123,7 @@
     </section>
 
     <!-- ── Log ── -->
-    <section class="tab-panel" id="tab-log" hidden>
+    <section class="tab-panel" id="tab-log" role="tabpanel" aria-labelledby="tabbtn-log" hidden>
       <div id="log-panel">
         <div id="log-output"></div>
       </div>
@@ -145,6 +145,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=10"></script>
+  <script src="/static/app.js?v=11"></script>
 </body>
 </html>

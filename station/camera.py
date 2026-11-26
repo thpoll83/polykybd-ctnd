@@ -550,7 +550,7 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
         # older measurement after this one could not run.
         return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
     rec = BackgroundRecording(settings)
-    staged = stage_and_verify(bin_path, log, on_begin=rec.start)
+    staged = stage_and_verify(bin_path, log, on_begin=rec.start, require_identity=True)
     try:
         recording = rec.result()
         res, master, slave = analyse_traces(recording, settings)

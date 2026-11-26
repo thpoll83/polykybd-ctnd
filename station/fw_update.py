@@ -179,7 +179,8 @@ def _get_version(link: _FwLink, log: Callable[[str], None]) -> dict | None:
 def stage_and_verify(bin_path: str, log: Callable[[str], None],
                      vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
                      require_signed: bool = False,
-                     on_begin: Callable[[], None] | None = None) -> bool:
+                     on_begin: Callable[[], None] | None = None,
+                     require_identity: bool = False) -> bool:
     """Run BEGIN -> CHUNK* -> COMMIT for ``bin_path`` against the live keyboard.
 
     Returns True iff COMMIT ACKs (the keyboard's accumulated CRC matched the
@@ -190,6 +191,10 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
     fully exercised by the time COMMIT answers; the apply test sets it, because
     an image the keyboard will not accept is one it will never install, and
     reporting that as success would leave the apply step testing nothing.
+
+    ``require_identity`` refuses an image without a GET_ID literal instead of
+    skipping the version cross-check (the UI's "Measure phase now" must only
+    stage the build the rig runs; CI keeps the lenient default).
 
     ``on_begin`` runs once BEGIN has succeeded, when both halves show the flash
     cue (the runner starts the camera recording there). An exception in it is
@@ -237,6 +242,10 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
         # same commit, so same FW_VERSION — do NOT compare fw_size/fw_crc, those
         # legitimately differ between the two flavours.
         image_caps = caps_from_image(fw)
+        if image_caps is None and require_identity:
+            log("  FAIL: no GET_ID literal in the image, so it cannot be checked "
+                "against the running build — refusing to stage it")
+            return False
         if image_caps is None:
             log("  (no GET_ID literal in the image — skipping the version "
                 "cross-check)")

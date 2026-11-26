@@ -345,7 +345,10 @@ function showTab(name) {
   if (_currentTab === 'runner') { clearInterval(_ciJobsTimer); _ciJobsTimer = null; }
   TABS.forEach(t => {
     document.getElementById('tab-' + t).hidden = t !== name;
-    document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle('active', t === name);
+    const btn = document.querySelector(`.tab[data-tab="${t}"]`);
+    btn.classList.toggle('active', t === name);
+    btn.setAttribute('aria-selected', t === name ? 'true' : 'false');
+    btn.tabIndex = t === name ? 0 : -1;
   });
   _currentTab = name;
   try { localStorage.setItem('ctnd-tab', name); } catch (e) { /* no storage */ }
@@ -516,14 +519,19 @@ function closeCamera() {
    The CI runner and the UI both write the last result to var/ on the rig;
    /camera/last serves it. The chart shows the two brightness traces the
    offset was computed from. */
+// Bumped by every phase_result; a /camera/last reply that started before the
+// newest phase_result arrived is older than what is shown, so it is dropped.
+let _phaseSeq = 0;
+
 function loadPhaseLast() {
+  const seq = _phaseSeq;
   fetch('/camera/last')
     .then(r => r.json())
-    .then(renderPhase)
+    .then(d => { if (seq === _phaseSeq) renderPhase(d); })
     .catch(() => {});
 }
 
-socket.on('phase_result', renderPhase);
+socket.on('phase_result', d => { _phaseSeq++; renderPhase(d); });
 
 function renderPhase(d) {
   const box = document.getElementById('phase-last');
