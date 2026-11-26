@@ -652,7 +652,7 @@ recording once BEGIN succeeds. The analysis finds the pixels that breathe on eac
 `camera.split_x`, builds one brightness trace per half, and reports the lag with the highest
 cross-correlation within one period. A positive offset means the slave lags the master.
 
-- `pass`: offset within 25 ms (two frames at 90 fps).
+- `pass`: offset within 35 ms (two frames at 58 fps).
 - `xfail`: a larger offset. The cue takes its phase from `timer_read32()`, the local clock
   of each half, so the halves differ by their boot-time difference mod 2048 ms. Promote
   this to `fail` once the firmware uses `sync_timer_read32()` there.

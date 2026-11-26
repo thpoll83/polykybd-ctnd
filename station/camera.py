@@ -42,9 +42,9 @@ class CameraSettings:
     master_on_left: bool = True    # the image's left side shows the master half
     width: int = 320               # recording size; a multiple of 64 (no row padding)
     height: int = 240
-    framerate: int = 90
-    mode: str = "640:480:10:P"     # OV5647 90 fps sensor mode; "" lets rpicam choose
-    shutter_us: int = 8000         # fixed exposure, below one frame at 90 fps
+    framerate: int = 58
+    mode: str = "640:480:10:P"     # OV5647 640x480 mode, 58.92 fps max; "" lets rpicam choose
+    shutter_us: int = 15000        # fixed exposure, below one frame (17.2 ms at 58 fps)
     gain: float = 4.0
     awb_gains: str = "1.5,1.5"     # fixed red,blue gains: no auto white balance
     record_s: float = 8.0
@@ -338,8 +338,8 @@ def analyse(rec: Recording, settings: CameraSettings = SETTINGS) -> PhaseResult:
 # ── The rig check ────────────────────────────────────────────────────────────
 
 RGB_PHASE_TEST_NAME = "RGB flash-cue phase between halves (camera)"
-# One frame at 90 fps is 11 ms; a synced cue should land within two frames.
-PHASE_TOLERANCE_MS = 25.0
+# One frame at 58 fps is 17.2 ms; a synced cue should land within two frames.
+PHASE_TOLERANCE_MS = 35.0
 MIN_SWING = 3.0          # luma units; below this the camera saw no breathing
 MIN_CORRELATION = 0.6
 

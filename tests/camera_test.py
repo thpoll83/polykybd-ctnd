@@ -33,7 +33,7 @@ def tri(t_ms: float, period: float = camera.FLASH_CUE_PERIOD_MS) -> float:
     return phase * 2 if phase < 0.5 else 2 - phase * 2
 
 
-def synth(delay_ms: float, seconds: float = 8.0, fps: float = 90.0,
+def synth(delay_ms: float, seconds: float = 8.0, fps: float = 58.0,
           width: int = 64, height: int = 16, swing: float = 30.0,
           seed: int = 1) -> Recording:
     rnd = random.Random(seed)
@@ -143,18 +143,18 @@ class PhaseTest(unittest.TestCase):
 
     def test_fps_reported(self):
         res = self.check(0.0)
-        self.assertAlmostEqual(res.fps, 90.0, delta=1.0)
+        self.assertAlmostEqual(res.fps, 58.0, delta=1.0)
 
 
 class JudgeTest(unittest.TestCase):
     def res(self, **kw):
         base = dict(offset_ms=0.0, correlation=0.98, swing_left=20.0,
-                    swing_right=20.0, frames=720, fps=90.0)
+                    swing_right=20.0, frames=464, fps=58.0)
         base.update(kw)
         return camera.PhaseResult(**base)
 
     def test_pass_within_tolerance(self):
-        self.assertEqual(camera.judge(self.res(offset_ms=-12.0))["status"], "pass")
+        self.assertEqual(camera.judge(self.res(offset_ms=-30.0))["status"], "pass")
 
     def test_offset_is_xfail_not_fail(self):
         r = camera.judge(self.res(offset_ms=640.0))
