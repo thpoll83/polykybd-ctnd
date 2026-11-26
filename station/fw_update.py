@@ -301,12 +301,19 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
         deadline = time.monotonic() + 90.0
         timeout_ms = 15000   # first send covers the master's ~6 s synchronous erase
         ready = False
+        last_busy = False   # the last reply was '~': the master waits for the slave's erase
         while not ready:
             if time.monotonic() > deadline:
-                log("  FAIL: FW_UP_BEGIN timed out (>90 s erasing)")
+                if last_busy:
+                    log("  FAIL: FW_UP_BEGIN timed out (>90 s erasing): the slave half never "
+                        "confirmed its erase. Check that the right half runs (its LEDs light) "
+                        "and the split cable.")
+                else:
+                    log("  FAIL: FW_UP_BEGIN timed out (>90 s erasing)")
                 return False
             reply = link.xfer(begin, timeout_ms)
             timeout_ms = 5000
+            last_busy = bool(reply) and len(reply) >= 3 and reply[2] == BUSY
             if reply is None or len(reply) < 3:
                 # No reply: either the master tore USB down during its synchronous
                 # staging erase (handle now dead -> reopen by path), or it's simply

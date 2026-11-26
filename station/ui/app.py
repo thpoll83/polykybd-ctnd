@@ -1483,7 +1483,9 @@ def _staggered_reset(log) -> bool:
     """Reset both halves, release the right (slave) first and the left (master)
     PHASE_RESET_STAGGER_S later, then wait until the master answers and the
     split link has settled. Returns False when the master never settled."""
+    from station.console_log import console_sink
     from station.flash import FlashController
+    from station.hid import HIDConsole
     from station.test_runner import TestRunner
     fc = FlashController()
     runner = TestRunner(log)
@@ -1498,7 +1500,23 @@ def _staggered_reset(log) -> bool:
         fc.set_run("left", False, log=log)
         _run_state.update(left=False, right=False)
         socketio.emit("run_state", dict(_run_state))
-        return runner.wait_for_master_ready() and runner.settle_master()
+        if not runner.wait_for_master_ready():
+            return False
+        # The firmware console while the split link comes up: it prints the
+        # slave's state, which a later BEGIN timeout does not show. Best-effort,
+        # and stopped before staging (BEGIN can drop USB during the master's erase).
+        console = HIDConsole()
+        try:
+            console.start(console_sink(lambda msg: log(f"[qmk] {msg}")))
+            log("[ui] firmware console recorded until staging starts")
+        except Exception as exc:
+            console = None
+            log(f"[ui] firmware console unavailable (continuing without it): {exc}")
+        try:
+            return runner.settle_master()
+        finally:
+            if console is not None:
+                console.stop()
     finally:
         runner.raw.close()
         fc.cleanup()
@@ -1525,7 +1543,13 @@ def on_measure_phase(data):
         try:
             def _prepare():
                 if not _staggered_reset(emit_log):
-                    emit_log("[ui] the master did not settle after the reset; measuring anyway")
+                    # Staging would only run into the 90 s BEGIN timeout: a master
+                    # that stays slow after a reset means the split link is down,
+                    # and a reset does not clear that (2026-11-26, after a
+                    # firmware-apply run; a fresh flash of both halves did).
+                    raise camera.PrepareRefused(
+                        "the master did not settle after the reset, so the split link is "
+                        "likely down: flash both halves (BOOTSEL), then measure again")
                 emit_log(f"[ui] measuring the RGB phase while staging {Path(path).name}…")
 
             rec = camera.measure_now(str(path), emit_log, prepare=_prepare)

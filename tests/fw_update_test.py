@@ -140,3 +140,48 @@ class MissingKeyboardHintTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BeginTimeoutTest(unittest.TestCase):
+    """A BEGIN that the master keeps answering with '~' (the slave has not
+    confirmed its erase) names the slave half in the failure."""
+
+    def _run(self, status):
+        import tempfile
+        import types as _types
+        import station.fw_update as fw
+
+        class FakeLink:
+            last_error = None
+            def __init__(self, *a): pass
+            def open(self, *a, **k): return True
+            def close(self): pass
+            def is_open(self): return True
+            def xfer(self, data, *a, **k):
+                return bytes([0x50, data[1], status])
+
+        clock = {"t": 0.0}
+        def monotonic():
+            clock["t"] += 10.0   # each poll moves the clock 10 s: the 90 s deadline passes
+            return clock["t"]
+        fake_time = _types.SimpleNamespace(monotonic=monotonic, sleep=lambda s: None,
+                                           time=lambda: 0.0)
+        orig = (fw._FwLink, fw._get_version, fw.time)
+        fw._FwLink, fw.time = FakeLink, fake_time
+        fw._get_version = lambda link, log: {"version": "0.15.5", "size": 1, "crc": 0}
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".bin") as f:
+                f.write(IMAGE)
+                f.flush()
+                logs = []
+                ok = fw.stage_and_verify(f.name, logs.append)
+        finally:
+            fw._FwLink, fw._get_version, fw.time = orig
+        return ok, [line for line in logs if "FAIL" in line]
+
+    def test_busy_until_the_deadline_names_the_slave(self):
+        import station.fw_update as fw
+        ok, fails = self._run(fw.BUSY)
+        self.assertFalse(ok)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("slave half never confirmed its erase", fails[0])
