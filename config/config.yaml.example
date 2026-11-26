@@ -71,6 +71,7 @@ github:
              # the RUNNER badge / diagnostics also need repo-admin
              # ('administration:read') to query self-hosted runner status, and
              # minting registration tokens (Re-register) needs it read/write.
+             # "Cancel stale runs" (Runner tab) needs 'actions:write'.
              # ⚠️ This is a plaintext secret on disk: keep config.yaml 0600 and
              # owned by the station user (setup.sh enforces it — HIL-6), and
              # scope the PAT to this one repo.

@@ -335,6 +335,10 @@ class BackgroundRecording:
         self._rec = None
         self._err = None
 
+    @property
+    def started(self) -> bool:
+        return self._thread is not None
+
     def start(self) -> None:
         if self._thread is None:
             self._thread = threading.Thread(target=self._body, daemon=True)
@@ -687,10 +691,14 @@ def load_last(path: Path | None = None) -> dict | None:
         return None
 
 
-def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict:
+def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS,
+                prepare=None) -> dict:
     """The UI's "Measure phase now": stage ``bin_path`` over HID (which shows the
     flash cue), record meanwhile, judge, save and return the saved record
     (time, source, traces included).
+
+    ``prepare`` runs once the camera is known to be available, before the
+    staging (the UI resets both halves with a known stagger there).
 
     Non-destructive like the CI step: stage + verify only, no APPLY. The image
     must be the build the rig runs (stage_and_verify checks the version).
@@ -706,8 +714,23 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
     # One copy for the whole measurement: a view saved meanwhile (Adjust view
     # changes SETTINGS in place) must not split frames captured with the old crop.
     settings = snapshot_settings(settings)
+    if prepare is not None:
+        prepare()
     rec = BackgroundRecording(settings)
-    staged = stage_and_verify(bin_path, log, on_begin=rec.start, require_identity=True)
+    fails = []   # the staging's FAIL lines, for the saved reason
+
+    def _log(line):
+        if "FAIL:" in line:
+            fails.append(line.split("FAIL:", 1)[1].strip())
+        log(line)
+
+    staged = stage_and_verify(bin_path, _log, on_begin=rec.start, require_identity=True)
+    if not staged and not rec.started:
+        # BEGIN never succeeded, so the camera never ran: report the staging.
+        why = fails[0] if fails else "see the log"
+        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip",
+                          "reason": f"the HID staging failed before the flash cue: {why}"},
+                         "ui", fw=image_fw(bin_path))
     try:
         recording = rec.result()
         res, master, slave = analyse_traces(recording, settings)

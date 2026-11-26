@@ -6,13 +6,16 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, Response, render_template, jsonify, request
 from flask_socketio import SocketIO
 
+from station import rig_lock
 from station.config import (
     FIRMWARE_DIR, UI_HOST, UI_PORT, UI_CORS_ORIGINS, GITHUB_REPO, GITHUB_TOKEN,
     RUNNER_LABELS, UPDATE_BRANCH,
@@ -59,14 +62,17 @@ def set_status(s: str) -> None:
 
 # ── GitHub API helper ─────────────────────────────────────────────────────────
 
-def _gh_api(path: str, timeout: int = 10):
-    """GET https://api.github.com{path}. Returns (status_code|None, parsed_json|None).
+def _gh_api(path: str, timeout: int = 10, method: str = "GET"):
+    """Call https://api.github.com{path}. Returns (status_code|None, parsed_json|None).
 
     Never raises: on a transport error returns (None, None); on an HTTP error
     returns (code, None) so callers can distinguish 401/403/404 from a dead network.
+    A success with an empty body (a 202 from a cancel) returns (code, {}).
     """
     req = urllib.request.Request(
         f"https://api.github.com{path}",
+        data=b"" if method != "GET" else None,
+        method=method,
         headers={
             "User-Agent": "polykybd-ctnd/1.0",
             "Accept": "application/vnd.github+json",
@@ -76,7 +82,8 @@ def _gh_api(path: str, timeout: int = 10):
         req.add_header("Authorization", f"Bearer {GITHUB_TOKEN}")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read())
+            body = resp.read()
+            return resp.status, (json.loads(body) if body else {})
     except urllib.error.HTTPError as exc:
         return exc.code, None
     except Exception:
@@ -86,11 +93,22 @@ def _gh_api(path: str, timeout: int = 10):
 # ── CI status poller ──────────────────────────────────────────────────────────
 
 def _ci_poll_once():
-    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=in_progress&per_page=1")
-    if data is None:
-        return
-    running = data.get("total_count", 0) > 0
-    run_url = data["workflow_runs"][0]["html_url"] if running and data.get("workflow_runs") else None
+    # A stale run (all its jobs ended, the run never did) kept the badge on
+    # "running" from 2026-08-09 to 2026-11-26. Page on until a live run shows
+    # up or the runs end, so stale runs on page 1 cannot hide a live one.
+    live, page = None, 1
+    while live is None:
+        _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs"
+                          f"?status=in_progress&per_page=100&page={page}")
+        if data is None:
+            return
+        runs = data.get("workflow_runs", [])
+        live = next((r for r in runs if not _is_stale(r)), None)
+        if live is None and len(runs) < 100:
+            break
+        page += 1
+    running = live is not None
+    run_url = live.get("html_url") if live else None
     _ci_state.update({"running": running, "url": run_url})
     socketio.emit("ci_status", dict(_ci_state))
 
@@ -131,6 +149,28 @@ def _runner_status() -> str:
     if any(r.get("status") == "online" and r.get("busy") for r in matching):
         return "busy"
     return "offline"
+
+
+def _ci_job_on_rig(proc: str = "/proc") -> bool:
+    """True while the self-hosted runner runs a job on this Pi.
+
+    The runner starts a Runner.Worker process for each job and ends it with the
+    job, so this answers at once; GitHub's busy flag (polled) is the fallback.
+    The UI's rig lock does not cover the CI runner, which is a separate process:
+    a "Measure phase now" during a HIL job (2026-11-26) left a staging session
+    open that failed two CI tests, and took the camera from the CI phase check."""
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        try:
+            with open(os.path.join(proc, pid, "cmdline"), "rb") as f:
+                if b"Runner.Worker" in f.read():
+                    return True
+        except OSError:
+            continue
+    return _runner_state.get("status") == "busy"
 
 
 def _runner_poll_once():
@@ -589,9 +629,71 @@ def _ci_job(run: dict) -> dict:
     }
 
 
+# A run GitHub will never finish, judged this long after its last change:
+#  - "queued" with no jobs: GitHub creates a run's jobs within seconds. Nine
+#    such runs from 6 and 11 Nov 2026 stayed queued for weeks.
+#  - "in_progress" with every job completed: #57230 (Automatic Approve) ran
+#    its one job on 2026-08-09 and still read "in progress" in November.
+# Agreed with the maintainer 2026-11-26.
+STALE_RUN_MIN_AGE_S = 3600
+_STALE_VERDICT: dict = {}   # _stale_key(run) -> verdict for that exact run state
+
+
+def _gh_time(value) -> float | None:
+    """A GitHub timestamp ('2026-11-11T20:55:18Z') as epoch seconds, or None."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _stale_key(run: dict) -> tuple:
+    """The run state a verdict holds for. A re-run keeps the run id but changes
+    run_attempt, status and updated_at, so it is judged again."""
+    return (run.get("id"), run.get("run_attempt"), run.get("status"), run.get("updated_at"))
+
+
+def _is_stale(run: dict, now: float | None = None) -> bool:
+    """True for a run GitHub will never finish (see STALE_RUN_MIN_AGE_S): a
+    queued run with no jobs, or a run in progress whose jobs have all
+    completed, unchanged for STALE_RUN_MIN_AGE_S.
+
+    A True verdict, and False for a queued run with jobs, is cached for the
+    run's exact state (_stale_key); a change of attempt, status or updated_at
+    asks again. False for a running run is not cached, since its jobs end
+    without the run changing. A failed jobs query gives False and is not cached.
+    A run with more than 100 jobs (one page) is never stale; the rig's
+    workflows have far fewer."""
+    status = run.get("status")
+    if status not in ("queued", "in_progress"):
+        return False
+    run_id, key = run.get("id"), _stale_key(run)
+    if key in _STALE_VERDICT:
+        return _STALE_VERDICT[key]
+    changed = _gh_time(run.get("updated_at") or run.get("created_at"))
+    now = time.time() if now is None else now
+    if changed is None or now - changed < STALE_RUN_MIN_AGE_S:
+        return False
+    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/jobs?per_page=100")
+    if data is None:
+        return False
+    jobs = data.get("jobs", [])
+    if status == "queued":
+        verdict = data.get("total_count", 0) == 0
+        _STALE_VERDICT[key] = verdict
+        return verdict
+    verdict = bool(jobs) and data.get("total_count", 0) == len(jobs) and all(
+        j.get("status") == "completed" for j in jobs)
+    if verdict:
+        _STALE_VERDICT[key] = True
+    return verdict
+
+
 @app.route("/ci-jobs")
 def list_ci_jobs():
-    """Queued and running workflow runs, then the last CI_FINISHED_SHOWN finished ones."""
+    """Queued and running workflow runs, then the last CI_FINISHED_SHOWN finished ones.
+    A queued run that will never start has "stale": true."""
     if not GITHUB_REPO:
         return jsonify([])
     jobs = []
@@ -599,8 +701,72 @@ def list_ci_jobs():
         code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page={count}")
         if data is None:
             return jsonify({"error": "GitHub API failure", "status": code}), 502
-        jobs.extend(_ci_job(run) for run in data.get("workflow_runs", []))
+        for run in data.get("workflow_runs", []):
+            job = _ci_job(run)
+            job["stale"] = _is_stale(run)
+            jobs.append(job)
     return jsonify(jobs)
+
+
+_CANCEL_LOCK = threading.Lock()
+
+
+def _cancel_run(run_id) -> str:
+    """Cancel one run; a run GitHub refuses to cancel (409, it never got as
+    far as queuing its jobs) is force-cancelled. Returns a short outcome."""
+    code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/cancel", method="POST")
+    if code == 409:
+        code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/force-cancel",
+                          method="POST")
+    if code == 202:
+        return "cancelled"
+    if code in (401, 403, 404):
+        return f"refused ({code}): the token needs Actions: Read and write"
+    return f"failed ({code if code is not None else 'no answer from GitHub'})"
+
+
+@socketio.on("cancel_stale_runs")
+def on_cancel_stale_runs(_data=None):
+    """Cancel every run GitHub will never finish (see _is_stale).
+
+    Lists the queued and running runs again instead of trusting the UI's copy,
+    so only runs that are stale now are touched. Does not use the rig lock: it changes
+    GitHub only, not the rig."""
+    if not GITHUB_REPO:
+        emit_log("[ui] no github.repo set in config.yaml")
+        return
+    if not _CANCEL_LOCK.acquire(blocking=False):
+        emit_log("[ui] already cancelling stale runs")
+        return
+
+    def _do():
+        try:
+            now, stale = time.time(), []
+            for status in ("queued", "in_progress"):
+                code, data = _gh_api(
+                    f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page=100")
+                if data is None:
+                    emit_log(f"[ui] could not list {status} runs (status {code})")
+                    return
+                stale += [r for r in data.get("workflow_runs", []) if _is_stale(r, now)]
+            if not stale:
+                emit_log("[ui] no stale runs to cancel")
+                return
+            emit_log(f"[ui] cancelling {len(stale)} stale run(s)…")
+            done = 0
+            for run in stale:
+                outcome = _cancel_run(run.get("id"))
+                done += outcome == "cancelled"
+                emit_log(f"  #{run.get('run_number')} {run.get('name')} "
+                         f"({run.get('head_branch')}, {run.get('created_at')}): {outcome}")
+                if outcome.startswith("refused"):
+                    break   # the same token fails for every run
+            emit_log(f"[ui] stale runs cancelled: {done} of {len(stale)}")
+        finally:
+            _CANCEL_LOCK.release()
+            socketio.emit("ci_jobs_changed")
+
+    threading.Thread(target=_do, daemon=True).start()
 
 
 @app.route("/firmware")
@@ -645,18 +811,24 @@ def list_firmware_bins():
     running, note = None, ""
     if _status["value"] not in ("idle", "error"):
         note = f"rig busy ({_status['value']})"
-    elif _runner_state.get("status") == "busy":
+    elif _ci_job_on_rig():
         note = "a CI job is running on the rig"
     elif not _RIG_LOCK.acquire(blocking=False):
         note = "rig busy"
     else:
+        rig_fd = None
         try:
-            v = running_version()
-            running = v["version"] if v else None
-            note = "" if v else "keyboard did not answer FW_UP_GET_VERSION"
+            rig_fd = rig_lock.try_acquire()
+            if rig_fd is None:
+                note = "a CI job is running on the rig"
+            else:
+                v = running_version()
+                running = v["version"] if v else None
+                note = "" if v else "keyboard did not answer FW_UP_GET_VERSION"
         except Exception as exc:
             note = f"version query failed: {exc}"
         finally:
+            rig_lock.release(rig_fd)
             _RIG_LOCK.release()
     return jsonify({"bins": bins, "running": running, "running_note": note})
 
@@ -692,18 +864,28 @@ def camera_history():
 def camera_snapshot():
     """One JPEG from the rig camera, rotated and flipped as config.yaml says.
 
-    Refused while the rig is flashing or testing: a CI run may be recording, and
-    the camera serves one client at a time.
+    Refused while the UI flashes or tests and while a CI job runs: the camera
+    serves one client at a time, and the CI phase check records with it.
     """
     from station import camera
     if _status["value"] not in ("idle", "error"):
         return Response(f"rig busy ({_status['value']})", status=503, mimetype="text/plain")
+    if _ci_job_on_rig():
+        return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     # ?full=1: the whole field of view, without the ROI, for "Adjust view".
     crop = request.args.get("full") != "1"
+    try:
+        rig_fd = rig_lock.try_acquire()
+    except OSError as exc:
+        return Response(f"cannot open the rig lock: {exc}", status=503, mimetype="text/plain")
+    if rig_fd is None:
+        return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     try:
         jpg = camera.snapshot_jpeg(crop=crop)
     except Exception as exc:
         return Response(str(exc), status=503, mimetype="text/plain")
+    finally:
+        rig_lock.release(rig_fd)
     return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
@@ -942,9 +1124,24 @@ def _run_exclusive(what: str, busy_status: str, body) -> bool:
     operator long gone, and a double-tap would silently start two. The lock is
     released in a ``finally`` inside the worker, so every path frees it,
     exceptions included."""
+    if _ci_job_on_rig():
+        emit_log(f"[ui] a CI job is running on the rig — {what} ignored; "
+                 "try again when the Runner tab shows it finished")
+        return False
     if not _RIG_LOCK.acquire(blocking=False):
         emit_log(f"[ui] rig busy — {what} ignored "
                  "(a flash / test / perf run is already active)")
+        return False
+    # The cross-process lock: a CI job that starts now waits for it.
+    try:
+        rig_fd = rig_lock.try_acquire()
+    except OSError as exc:
+        _RIG_LOCK.release()
+        emit_log(f"[ui] cannot open the rig lock ({exc}) — {what} ignored")
+        return False
+    if rig_fd is None:
+        _RIG_LOCK.release()
+        emit_log(f"[ui] a CI job holds the rig — {what} ignored")
         return False
     set_status(busy_status)
 
@@ -952,6 +1149,7 @@ def _run_exclusive(what: str, busy_status: str, body) -> bool:
         try:
             body()
         finally:
+            rig_lock.release(rig_fd)
             _RIG_LOCK.release()
 
     threading.Thread(target=_wrapped, daemon=True).start()
@@ -1147,11 +1345,46 @@ def on_camera_clear_view(_data=None):
         socketio.emit("camera_view_changed", {}, skip_sid=request.sid)
 
 
+# "Measure phase now" resets both halves first and releases the master (left)
+# this long after the slave. The halves then boot a known time apart: firmware
+# whose flash cue uses each half's own timer shows an offset near +-1000 ms (half
+# the 2048 ms cue period), firmware on the shared timer shows about 0. A plain
+# measurement shows a random offset that can be near 0 by chance.
+# Agreed with the maintainer 2026-11-26.
+PHASE_RESET_STAGGER_S = 1.0
+
+
+def _staggered_reset(log) -> bool:
+    """Reset both halves, release the right (slave) first and the left (master)
+    PHASE_RESET_STAGGER_S later, then wait until the master answers and the
+    split link has settled. Returns False when the master never settled."""
+    from station.flash import FlashController
+    from station.test_runner import TestRunner
+    fc = FlashController()
+    runner = TestRunner(log)
+    try:
+        log(f"[ui] resetting both halves, the left (master) "
+            f"{PHASE_RESET_STAGGER_S * 1000:.0f} ms after the right")
+        fc.set_run("left", True, log=log)
+        fc.set_run("right", True, log=log)
+        time.sleep(0.1)
+        fc.set_run("right", False, log=log)
+        time.sleep(PHASE_RESET_STAGGER_S)
+        fc.set_run("left", False, log=log)
+        _run_state.update(left=False, right=False)
+        socketio.emit("run_state", dict(_run_state))
+        return runner.wait_for_master_ready() and runner.settle_master()
+    finally:
+        runner.raw.close()
+        fc.cleanup()
+
+
 @socketio.on("measure_phase")
 def on_measure_phase(data):
     """Stage a .bin over HID (the flash cue breathes on both halves meanwhile)
     and measure the RGB phase between the halves with the camera.
 
+    Resets both halves first with a known stagger (PHASE_RESET_STAGGER_S).
     Non-destructive: stage + verify only, no APPLY. The .bin must be the build
     the rig runs, or the version cross-check refuses it.
     """
@@ -1165,8 +1398,12 @@ def on_measure_phase(data):
     def _do():
         from station import camera
         try:
-            emit_log(f"[ui] measuring the RGB phase while staging {Path(path).name}…")
-            rec = camera.measure_now(str(path), emit_log)
+            def _prepare():
+                if not _staggered_reset(emit_log):
+                    emit_log("[ui] the master did not settle after the reset; measuring anyway")
+                emit_log(f"[ui] measuring the RGB phase while staging {Path(path).name}…")
+
+            rec = camera.measure_now(str(path), emit_log, prepare=_prepare)
             emit_log(f"[ui] RGB phase: {rec['status'].upper()} — "
                      f"{rec.get('reason') or rec.get('info', '')}")
             socketio.emit("phase_result", rec)   # this run's result, not the file

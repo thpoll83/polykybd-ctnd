@@ -35,7 +35,7 @@ from typing import Callable
 
 import hid
 
-from . import bulk_pipe
+from . import bulk_pipe, usb_midi
 
 from .hid import _find_path, _frame, open_device
 from .config import QMK_VENDOR_ID, QMK_PRODUCT_ID, HID_RAW_USAGE_PAGE, HID_RAW_USAGE
@@ -189,6 +189,25 @@ def running_version(vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
         link.close()
 
 
+def missing_keyboard_hint(vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
+                          sys_usb: str = usb_midi.SYS_USB) -> str:
+    """Why no Raw HID interface was found, from what sysfs shows on USB.
+
+    The three causes need different fixes: a half in BOOTSEL needs a UF2 flash,
+    a keyboard without the interface runs a build without Raw HID, and no
+    keyboard at all means the master's USB port is off or the firmware hangs."""
+    boot = len(usb_midi.keyboard_devices(sys_usb, "2e8a", "0003"))
+    kbd = len(usb_midi.keyboard_devices(sys_usb, f"{vid:04x}", f"{pid:04x}"))
+    if boot:
+        return (f"{boot} half(s) sit in BOOTSEL (RP2040 bootrom on USB): "
+                "flash a .uf2 first (Test tab)")
+    if kbd:
+        return ("the keyboard is on USB but has no Raw HID interface: "
+                "the running build may not enable Raw HID")
+    return ("no PolyKybd on USB: check that the left (master) USB port is on "
+            "(Hardware tab), or reset the left half")
+
+
 def stage_and_verify(bin_path: str, log: Callable[[str], None],
                      vid: int = QMK_VENDOR_ID, pid: int = QMK_PRODUCT_ID,
                      require_signed: bool = False,
@@ -233,6 +252,10 @@ def stage_and_verify(bin_path: str, log: Callable[[str], None],
     if not link.open():
         why = f" (last error: {link.last_error})" if link.last_error else ""
         log(f"  FAIL: Raw HID interface not found{why}")
+        try:
+            log(f"  {missing_keyboard_hint(vid, pid)}")
+        except Exception as exc:   # a hint must never hide the failure above
+            log(f"  (could not read USB devices: {exc})")
         return False
     try:
         running = _get_version(link, log)

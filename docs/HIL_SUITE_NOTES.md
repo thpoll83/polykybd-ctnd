@@ -667,9 +667,29 @@ cross-correlation within one period. A positive offset means the slave lags the 
 The Camera tab also shows the last measurement, from a CI run or from its **Measure phase
 now** button: status, offset, and the two brightness traces as a chart. The runner writes
 it to `var/camera_phase_last.json` (gitignored), because the CI runner is a separate
-process from the UI. **Measure phase now** stages the selected `.bin` over HID, which turns
-on the flash cue, and records meanwhile: stage + verify only, no APPLY, like the CI step.
-The `.bin` must be the build the rig runs, or the version cross-check refuses it.
+process from the UI. **Measure phase now** first resets both halves and releases the left
+(master) 1 s after the right (`PHASE_RESET_STAGGER_S` in `station/ui/app.py`), then waits
+until the master answers and the split link has settled. It then stages the selected `.bin`
+over HID, which turns on the flash cue, and records meanwhile: stage + verify only, no
+APPLY, like the CI step. The `.bin` must be the build the rig runs, or the version
+cross-check refuses it.
+
+The stagger makes the result clear. Without it the halves boot a random time apart, and
+firmware with the bug can show an offset near 0 by chance. With it, firmware whose cue
+uses each half's own timer shows an offset far from 0, near ±1000 ms (half the 2048 ms
+cue period), and firmware on the shared timer shows about 0 ms. The offset of the buggy
+firmware also moves between stagings: two measurements without a reset gave −744 and
+−346 ms (2026-11-26), the second after the master's USB dropped three times during the
+BEGIN erase. So only a pass after the fix proves it, not the exact number before.
+
+The UI and the CI runners share one lock on the rig, an flock on `var/rig.lock`
+(`station/rig_lock.py`). `python -m station.test_runner` and `python -m station.perf_runner`
+take it at start and wait while the UI holds it. The UI asks without waiting: while a CI
+job holds it (or a `Runner.Worker` process exists, or GitHub reports the runner busy),
+the UI refuses Flash, Run Tests, Measure Perf and Measure phase now, skips the running
+version query, and the camera snapshot answers 503. The UI's rig lock does not cover the CI runner: on
+2026-11-26 a UI measurement during a HIL job left a staging session open, which failed
+the combos and FW_CHUNK tests, and took the camera from the CI phase check.
 
 Every saved measurement is also appended to `var/camera_phase_history.json` (the last 10,
 without traces): time, source, the firmware version from the staged image, for CI runs the

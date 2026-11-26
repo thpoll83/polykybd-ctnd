@@ -387,6 +387,36 @@ function showTab(name) {
   }
 }
 
+socket.on('ci_jobs_changed', () => fetchCiJobs());
+
+/* A run GitHub will never finish (app.py _is_stale): queued with no jobs, or
+   in progress with all jobs ended, unchanged for an hour. The button cancels those, with the same
+   two-tap confirm as Re-register. The server lists the runs again itself. */
+let _staleTimer = null;
+function updateStaleButton() {
+  const btn = document.getElementById('btn-cancel-stale');
+  if (!btn || btn.dataset.armed === 'true') return;
+  const n = _ciJobs.filter(j => j.stale).length;
+  btn.textContent = n ? `⊘ Cancel ${n} stale run${n > 1 ? 's' : ''}` : '⊘ No stale runs';
+  btn.disabled = !n;
+}
+
+function cancelStaleRuns() {
+  const btn = document.getElementById('btn-cancel-stale');
+  if (btn.dataset.armed !== 'true') {
+    btn.dataset.armed = 'true';
+    btn.textContent = '⚠ Tap to confirm';
+    _staleTimer = setTimeout(() => { btn.dataset.armed = 'false'; updateStaleButton(); }, 3000);
+    return;
+  }
+  clearTimeout(_staleTimer);
+  btn.dataset.armed = 'false';
+  updateStaleButton();
+  appendLog('[ui] cancelling the stale queued runs on GitHub…');
+  openLog();
+  socket.emit('cancel_stale_runs');
+}
+
 function fetchCiJobs() {
   fetch('/ci-jobs')
     .then(r => r.json())
@@ -426,7 +456,10 @@ function ciTimes(j) {
   const started = j.run_started_at ? Date.parse(j.run_started_at) : NaN;
   const ended = j.updated_at ? Date.parse(j.updated_at) : NaN;
   const parts = [`in ${fmtTime(j.created_at)}`];
-  if (j.status === 'queued') {
+  if (j.stale) {
+    parts.push(j.status === 'queued' ? 'no jobs, GitHub will never start it'
+                                     : 'all jobs ended, GitHub never closed the run');
+  } else if (j.status === 'queued') {
     parts.push(`waiting ${fmtDuration(now - created)}`);
   } else {
     parts.push(`started ${fmtTime(j.run_started_at)}` +
@@ -444,6 +477,7 @@ function renderCiJobs(jobs) {
   if (Array.isArray(jobs)) _ciJobs = jobs;
   const list = document.getElementById('ci-jobs-list');
   list.replaceChildren();
+  updateStaleButton();
   if (!_ciJobs.length) {
     const msg = document.createElement('p');
     msg.className = 'no-jobs';
@@ -454,7 +488,7 @@ function renderCiJobs(jobs) {
   const frag = document.createDocumentFragment();
   let finishedHeader = false;
   _ciJobs.forEach(j => {
-    const running = j.status === 'in_progress';
+    const running = j.status === 'in_progress' && !j.stale;
     const finished = j.status === 'completed';
     if (finished && !finishedHeader) {
       const h = document.createElement('p');
@@ -467,11 +501,13 @@ function renderCiJobs(jobs) {
     const card = document.createElement('div');
     const result = finished ? (j.conclusion || 'unknown') : '';
     card.className = 'ci-job ' + (running ? 'ci-job-running'
-      : finished ? `ci-job-done ci-result-${result}` : 'ci-job-queued');
+      : finished ? `ci-job-done ci-result-${result}`
+      : j.stale ? 'ci-job-queued ci-job-stale' : 'ci-job-queued');
 
     const iconEl = document.createElement('span');
     iconEl.className = 'ci-job-icon';
-    iconEl.textContent = running ? '▶' : finished ? (result === 'success' ? '✓' : result === 'failure' ? '✗' : '•') : '⏳';
+    iconEl.textContent = running ? '▶' : finished ? (result === 'success' ? '✓' : result === 'failure' ? '✗' : '•')
+      : j.stale ? '⊘' : '⏳';
 
     const bodyEl = document.createElement('span');
     bodyEl.className = 'ci-job-body';
@@ -490,7 +526,8 @@ function renderCiJobs(jobs) {
 
     const labelEl = document.createElement('span');
     labelEl.className = 'ci-job-label';
-    labelEl.textContent = running ? 'Running' : finished ? (CI_RESULT[result] || result) : 'Queued';
+    labelEl.textContent = running ? 'Running' : finished ? (CI_RESULT[result] || result)
+      : j.stale ? 'Stale' : 'Queued';
 
     bodyEl.append(nameEl, metaEl, timeEl);
     card.append(iconEl, bodyEl, labelEl);
@@ -742,7 +779,7 @@ function renderPhase(d) {
 function measurePhase() {
   const sel = document.getElementById('phase-bin');
   if (!sel.value) { appendLog('[ui] select the .bin of the running build first'); return; }
-  appendLog('[ui] measuring the RGB phase (HID stage + camera, no apply)…');
+  appendLog('[ui] measuring the RGB phase (staggered reset, HID stage + camera, no apply)…');
   openLog();
   socket.emit('measure_phase', { bin: sel.value });
 }
