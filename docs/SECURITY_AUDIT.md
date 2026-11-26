@@ -343,35 +343,6 @@ unauthenticated rig control to every host that can reach the port *and* widens C
 `allow_lan`. This caveat is repeated in `config/config.yaml.example`, which is where
 someone about to make the mistake will actually read it.
 
-The camera routes (`/camera/info`, `/camera/snapshot.jpg`, 2026-11-26) are plain HTTP
-GETs with the same exposure. On loopback they show the kiosk what the rig camera sees.
-With `allow_lan: true`, anyone who can reach the port can see the camera image. The
-snapshot takes one request parameter, `full=1` (drop the crop), and `rpicam-still` gets only
-values from `config.yaml` and the view override.
-
-The Camera tab's "Adjust view" (2026-11-26) lets the UI write `var/camera_view.json`. It
-holds only `camera.roi` and `camera.split_x`, both validated by `CameraSettings.from_config`
-before the write (four fractions inside 0..1; `split_x` between 0.05 and 0.95), and the
-values reach `rpicam` as one `--roi` argument in an argv list, never a shell. The worst a
-caller can do is crop the camera badly, which makes the phase check SKIP. Same exposure as
-the rest of HIL-4: loopback only unless `allow_lan` is set.
-
-Since 2026-11-26 (later), `var/camera_view.json` can also hold `quads`: two outlines of
-four `[x, y]` corners each. `camera.parse_quads` accepts exactly the keys `left` and
-`right`, four numeric pairs inside 0..1 per side, and a convex quad; anything else refuses
-the save. The quads never reach a command line: the server derives the crop from them and
-validates that like any `roi`, and the analysis uses them only as pixel masks. The worst a
-caller can do is again a bad view, which makes the phase check SKIP. The board outlines
-under `station/ui/static/pcb/` are static files generated from the PolyKybd KiCad boards. `lens_k` (same file, later the same day) is one number, type-checked by the socket
-handler and range-checked by `CameraSettings.from_config` (±0.3); it only changes the
-geometry the analysis computes and never reaches a command line.
-
-The camera snapshot (2026-11-26, later) needs only the camera lock, so it also answers
-during a CI job, and during a recording it serves the recording's newest frame. Two GET
-routes serve the three saved frames: `/camera/frames` (JSON) and `/camera/frames/<n>.png`,
-where `n` is an integer route parameter checked against 0..2, so no request data reaches a
-path. Same exposure as the other camera routes: loopback only unless `allow_lan` is set.
-
 The Runner tab's `cancel_stale_runs` handler (2026-11-26) cancels workflow runs on GitHub
 with the PAT, and deletes a run when GitHub answers 409 to both cancel and force-cancel.
 It takes no input: it lists the queued and running runs itself and acts only on those

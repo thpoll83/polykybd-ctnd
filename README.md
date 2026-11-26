@@ -349,7 +349,7 @@ flashes, tests or measures, every action button is disabled.
 
 The tab you used last is opened again after a reload.
 
-The status dot in the header pulses amber while flashing, blue while testing, teal while measuring the RGB phase, amber again while (re)registering the runner, and turns red on error.
+The status dot in the header pulses amber while flashing, blue while testing, amber again while (re)registering the runner, and turns red on error.
 
 **Header badges:**
 
