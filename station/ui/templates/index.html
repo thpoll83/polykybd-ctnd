@@ -121,7 +121,7 @@
           <select id="phase-bin" title="The .bin of the build the rig runs; staging it shows the flash cue"><option value="">— .bin of the running build —</option></select>
           <p id="phase-bin-note"></p>
           <button class="btn btn-teal btn-sm" id="btn-measure-phase" onclick="measurePhase()"
-                  title="Stage the selected .bin over HID (non-destructive, no apply) and record the flash cue on both halves">Measure phase now</button>
+                  title="Reset both halves (the left 1 s after the right), stage the selected .bin over HID (non-destructive, no apply) and record the flash cue on both halves">Measure phase now</button>
         </div>
       </aside>
     </section>
@@ -161,6 +161,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=20"></script>
+  <script src="/static/app.js?v=21"></script>
 </body>
 </html>

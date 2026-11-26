@@ -779,7 +779,7 @@ function renderPhase(d) {
 function measurePhase() {
   const sel = document.getElementById('phase-bin');
   if (!sel.value) { appendLog('[ui] select the .bin of the running build first'); return; }
-  appendLog('[ui] measuring the RGB phase (HID stage + camera, no apply)…');
+  appendLog('[ui] measuring the RGB phase (staggered reset, HID stage + camera, no apply)…');
   openLog();
   socket.emit('measure_phase', { bin: sel.value });
 }

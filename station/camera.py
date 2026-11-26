@@ -691,10 +691,14 @@ def load_last(path: Path | None = None) -> dict | None:
         return None
 
 
-def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict:
+def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS,
+                prepare=None) -> dict:
     """The UI's "Measure phase now": stage ``bin_path`` over HID (which shows the
     flash cue), record meanwhile, judge, save and return the saved record
     (time, source, traces included).
+
+    ``prepare`` runs once the camera is known to be available, before the
+    staging (the UI resets both halves with a known stagger there).
 
     Non-destructive like the CI step: stage + verify only, no APPLY. The image
     must be the build the rig runs (stage_and_verify checks the version).
@@ -710,6 +714,8 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
     # One copy for the whole measurement: a view saved meanwhile (Adjust view
     # changes SETTINGS in place) must not split frames captured with the old crop.
     settings = snapshot_settings(settings)
+    if prepare is not None:
+        prepare()
     rec = BackgroundRecording(settings)
     fails = []   # the staging's FAIL lines, for the saved reason
 

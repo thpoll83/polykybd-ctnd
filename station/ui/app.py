@@ -1274,11 +1274,46 @@ def on_camera_clear_view(_data=None):
         socketio.emit("camera_view_changed", {}, skip_sid=request.sid)
 
 
+# "Measure phase now" resets both halves first and releases the master (left)
+# this long after the slave. The halves then boot a known time apart: firmware
+# whose flash cue uses each half's own timer shows an offset near +-1000 ms (half
+# the 2048 ms cue period), firmware on the shared timer shows about 0. A plain
+# measurement shows a random offset that can be near 0 by chance.
+# Agreed with the maintainer 2026-11-26.
+PHASE_RESET_STAGGER_S = 1.0
+
+
+def _staggered_reset(log) -> bool:
+    """Reset both halves, release the right (slave) first and the left (master)
+    PHASE_RESET_STAGGER_S later, then wait until the master answers and the
+    split link has settled. Returns False when the master never settled."""
+    from station.flash import FlashController
+    from station.test_runner import TestRunner
+    fc = FlashController()
+    runner = TestRunner(log)
+    try:
+        log(f"[ui] resetting both halves, the left (master) "
+            f"{PHASE_RESET_STAGGER_S * 1000:.0f} ms after the right")
+        fc.set_run("left", True, log=log)
+        fc.set_run("right", True, log=log)
+        time.sleep(0.1)
+        fc.set_run("right", False, log=log)
+        time.sleep(PHASE_RESET_STAGGER_S)
+        fc.set_run("left", False, log=log)
+        _run_state.update(left=False, right=False)
+        socketio.emit("run_state", dict(_run_state))
+        return runner.wait_for_master_ready() and runner.settle_master()
+    finally:
+        runner.raw.close()
+        fc.cleanup()
+
+
 @socketio.on("measure_phase")
 def on_measure_phase(data):
     """Stage a .bin over HID (the flash cue breathes on both halves meanwhile)
     and measure the RGB phase between the halves with the camera.
 
+    Resets both halves first with a known stagger (PHASE_RESET_STAGGER_S).
     Non-destructive: stage + verify only, no APPLY. The .bin must be the build
     the rig runs, or the version cross-check refuses it.
     """
@@ -1292,8 +1327,12 @@ def on_measure_phase(data):
     def _do():
         from station import camera
         try:
-            emit_log(f"[ui] measuring the RGB phase while staging {Path(path).name}…")
-            rec = camera.measure_now(str(path), emit_log)
+            def _prepare():
+                if not _staggered_reset(emit_log):
+                    emit_log("[ui] the master did not settle after the reset; measuring anyway")
+                emit_log(f"[ui] measuring the RGB phase while staging {Path(path).name}…")
+
+            rec = camera.measure_now(str(path), emit_log, prepare=_prepare)
             emit_log(f"[ui] RGB phase: {rec['status'].upper()} — "
                      f"{rec.get('reason') or rec.get('info', '')}")
             socketio.emit("phase_result", rec)   # this run's result, not the file

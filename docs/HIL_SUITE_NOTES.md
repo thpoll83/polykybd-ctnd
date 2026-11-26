@@ -667,9 +667,20 @@ cross-correlation within one period. A positive offset means the slave lags the 
 The Camera tab also shows the last measurement, from a CI run or from its **Measure phase
 now** button: status, offset, and the two brightness traces as a chart. The runner writes
 it to `var/camera_phase_last.json` (gitignored), because the CI runner is a separate
-process from the UI. **Measure phase now** stages the selected `.bin` over HID, which turns
-on the flash cue, and records meanwhile: stage + verify only, no APPLY, like the CI step.
-The `.bin` must be the build the rig runs, or the version cross-check refuses it.
+process from the UI. **Measure phase now** first resets both halves and releases the left
+(master) 1 s after the right (`PHASE_RESET_STAGGER_S` in `station/ui/app.py`), then waits
+until the master answers and the split link has settled. It then stages the selected `.bin`
+over HID, which turns on the flash cue, and records meanwhile: stage + verify only, no
+APPLY, like the CI step. The `.bin` must be the build the rig runs, or the version
+cross-check refuses it.
+
+The stagger makes the result clear. Without it the halves boot a random time apart, and
+firmware with the bug can show an offset near 0 by chance. With it, firmware whose cue
+uses each half's own timer shows an offset far from 0, near ±1000 ms (half the 2048 ms
+cue period), and firmware on the shared timer shows about 0 ms. The offset of the buggy
+firmware also moves between stagings: two measurements without a reset gave −744 and
+−346 ms (2026-11-26), the second after the master's USB dropped three times during the
+BEGIN erase. So only a pass after the fix proves it, not the exact number before.
 
 Every saved measurement is also appended to `var/camera_phase_history.json` (the last 10,
 without traces): time, source, the firmware version from the staged image, for CI runs the
