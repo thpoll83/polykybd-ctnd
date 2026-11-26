@@ -371,6 +371,9 @@ class MeasureNowSettingsCopyTest(unittest.TestCase):
             camera.availability = lambda s=None: (True, "fake camera")
             camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
             old_split = camera.SETTINGS.split_x
+            # A fixed split, independent of any view saved on this machine:
+            # synth() puts the LEDs at 1/8..3/8 and 5/8..7/8 of the width.
+            camera.SETTINGS.split_x = 0.5
             try:
                 out = camera.measure_now("fw.bin", lambda m: None)
             finally:
@@ -378,7 +381,7 @@ class MeasureNowSettingsCopyTest(unittest.TestCase):
                  camera.LAST_RESULT_PATH) = orig
                 camera.SETTINGS.split_x = old_split
         self.assertIsNot(seen["settings"], camera.SETTINGS)
-        self.assertEqual(seen["settings"].split_x, old_split)
+        self.assertEqual(seen["settings"].split_x, 0.5)
         self.assertEqual(out["status"], "pass")   # split at the old 0.5: both halves in phase
 
 

@@ -694,11 +694,29 @@ window.addEventListener('resize', placeCameraOverlay);
    fraction of the cropped image, which is what the phase check uses. */
 let _adjust = null;   // { step: 'box'|'split', box: [x, y, w, h], split: x (full-image fraction), drag }
 
+// rpicam's --roi is in sensor coordinates (libcamera ScalerCrop), before
+// hflip/vflip/rotation. The editor draws on the displayed (flipped) image, so a
+// box is mirrored on each flipped axis when it is saved and when it is loaded
+// (the same formula both ways). rotation 180 flips both axes. split_x is not
+// converted: it applies to the cropped, already flipped output image.
+function flipAxes(info) {
+  const rot = Number(info.rotation) === 180;
+  return { h: !!info.hflip !== rot, v: !!info.vflip !== rot };
+}
+
+function toFromSensor(box, info) {
+  let [x, y, w, h] = box;
+  const f = flipAxes(info);
+  if (f.h) x = 1 - x - w;
+  if (f.v) y = 1 - y - h;
+  return [x, y, w, h];
+}
+
 function fullViewFromInfo(info) {
   let box = [0, 0, 1, 1];
   if (info.roi) {
     const v = info.roi.split(',').map(Number);
-    if (v.length === 4 && v.every(n => isFinite(n))) box = v;
+    if (v.length === 4 && v.every(n => isFinite(n))) box = toFromSensor(v, info);
   }
   return { box, split: box[0] + info.split_x * box[2] };
 }
@@ -775,7 +793,10 @@ function roundedView() {
   const x0 = r(bx), y0 = r(by), x1 = r(Math.min(1, bx + bw)), y1 = r(Math.min(1, by + bh));
   const w = r(x1 - x0), h = r(y1 - y0);
   const full = x0 <= 0.001 && y0 <= 0.001 && x1 >= 0.999 && y1 >= 0.999;
-  return { roi: full ? '' : [x0, y0, w, h].join(','),
+  // Mirroring a rounded box keeps it inside 0..1 (1 - x - w >= 0), so this
+  // stays valid for the server; r() only drops float noise.
+  const sensor = toFromSensor([x0, y0, w, h], _cameraInfo || {}).map(r);
+  return { roi: full ? '' : sensor.join(','),
            split_x: full ? r(_adjust.split) : r((_adjust.split - x0) / w) };
 }
 
