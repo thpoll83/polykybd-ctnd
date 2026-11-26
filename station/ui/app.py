@@ -608,7 +608,15 @@ def camera_info():
     st = camera.SETTINGS
     return jsonify({"available": ok, "detail": why, "rotation": st.rotation,
                     "hflip": st.hflip, "vflip": st.vflip, "split_x": st.split_x,
-                    "master_on_left": st.master_on_left})
+                    "master_on_left": st.master_on_left, "roi": st.roi})
+
+
+@app.route("/camera/last")
+def camera_last():
+    """The last RGB phase measurement (CI run or "Measure phase now"), with traces."""
+    from station import camera
+    data = camera.load_last()
+    return jsonify(data or {})
 
 
 @app.route("/camera/snapshot.jpg")
@@ -1028,6 +1036,37 @@ def on_run_tests(data):
     # Busy status marks the whole flash+test run — the self-update timer reads
     # it to defer a pull+restart until the rig is idle.
     _run_exclusive("run_tests", "testing", _do)
+
+
+@socketio.on("measure_phase")
+def on_measure_phase(data):
+    """Stage a .bin over HID (the flash cue breathes on both halves meanwhile)
+    and measure the RGB phase between the halves with the camera.
+
+    Non-destructive: stage + verify only, no APPLY. The .bin must be the build
+    the rig runs, or the version cross-check refuses it.
+    """
+    if not isinstance(data, dict):
+        return
+    path = _selected_firmware(data.get("bin"))
+    if not path or not str(path).lower().endswith(".bin"):
+        emit_log("[ui] select a .bin firmware file of the running build first")
+        return
+
+    def _do():
+        from station import camera
+        try:
+            emit_log(f"[ui] measuring the RGB phase while staging {Path(path).name}…")
+            rec = camera.measure_now(str(path), emit_log)
+            emit_log(f"[ui] RGB phase: {rec['status'].upper()} — "
+                     f"{rec.get('reason') or rec.get('info', '')}")
+            socketio.emit("phase_result", rec)   # this run's result, not the file
+            set_status("idle")
+        except Exception as exc:
+            emit_log(f"[ui] phase measurement error: {exc}")
+            set_status("error")
+
+    _run_exclusive("measure_phase", "measuring", _do)
 
 
 @socketio.on("run_perf")

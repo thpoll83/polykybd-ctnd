@@ -84,6 +84,13 @@ class SettingsTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 CameraSettings.from_config(bad)
 
+    def test_roi(self):
+        s = CameraSettings.from_config({"roi": "0.1,0.25,0.8,0.5"})
+        self.assertEqual(s.orient_args()[-2:], ["--roi", "0.1,0.25,0.8,0.5"])
+        for bad in ("0.1,0.2,0.8", "a,b,c,d", "0.5,0,0.6,1", "0,0,0,1"):
+            with self.assertRaises(ValueError, msg=bad):
+                CameraSettings.from_config({"roi": bad})
+
     def test_orient_args(self):
         s = CameraSettings.from_config({"rotation": 180, "hflip": True})
         self.assertEqual(s.orient_args(), ["--rotation", "180", "--hflip"])
@@ -146,6 +153,12 @@ class PhaseTest(unittest.TestCase):
     def test_right_leads(self):
         self.check(-700.0)
 
+    def test_no_bias_at_large_offsets(self):
+        # The overlap of an 8 s recording stops covering whole periods at large
+        # lags; whole-trace means once pulled the peak by -22 ms at +800 ms.
+        for d in (800.0, 1000.0, -1000.0):
+            self.check(d, tol=3.0)
+
     def test_wraps_into_half_period(self):
         # 1500 ms late is the same picture as 548 ms early.
         self.check(1500.0 - camera.FLASH_CUE_PERIOD_MS)
@@ -167,8 +180,7 @@ class PhaseTest(unittest.TestCase):
         rec.lumas = [bytes(y[i] if i in led else base[i] for i in range(len(y)))
                      for y in rec.lumas]
         res = camera.analyse(rec, CameraSettings.from_config({}))
-        # Nine sampled LED pixels per half: allow half a frame (8.6 ms at 58 fps).
-        self.assertAlmostEqual(res.offset_ms, 437.0, delta=9.0)
+        self.assertAlmostEqual(res.offset_ms, 437.0, delta=6.0)
 
     def test_fps_reported(self):
         res = self.check(0.0)
@@ -231,7 +243,147 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(camera.judge(self.res(correlation=0.2))["status"], "skip")
 
 
+class LastResultTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "var" / "last.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_round_trip_with_downsampled_traces(self):
+        rec = synth(300.0)
+        res, master, slave = camera.analyse_traces(rec, CameraSettings.from_config({}))
+        record = camera.judge(res)
+        camera.save_last(record, "ci", rec.timestamps_ms, master, slave, path=self.path)
+        d = camera.load_last(self.path)
+        self.assertEqual((d["source"], d["status"]), ("ci", record["status"]))
+        self.assertIn("time", d)
+        tr = d["traces"]
+        self.assertEqual(len(tr["t_ms"]), camera.CHART_POINTS)
+        self.assertEqual(len(tr["master"]), len(tr["slave"]))
+        self.assertEqual(tr["t_ms"][0], 0.0)
+
+    def test_skip_without_traces(self):
+        camera.save_last({"name": "x", "status": "skip", "reason": "r"}, "ui", path=self.path)
+        d = camera.load_last(self.path)
+        self.assertEqual(d["status"], "skip")
+        self.assertNotIn("traces", d)
+
+    def test_missing_or_broken_file_is_none(self):
+        self.assertIsNone(camera.load_last(self.path))
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{not json")
+        self.assertIsNone(camera.load_last(self.path))
+
+    def test_no_temp_files_left(self):
+        for i in range(3):
+            camera.save_last({"status": "pass", "n": i}, "ci", path=self.path)
+        self.assertEqual(camera.load_last(self.path)["n"], 2)
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ["last.json"])
+
+    def test_write_failure_does_not_raise(self):
+        # A path under a file cannot be created: save_last logs and returns.
+        blocker = self.path.parent
+        blocker.parent.mkdir(parents=True, exist_ok=True)
+        blocker.write_text("a file, not a directory")
+        with self.assertLogs("polykybd-ctnd", level="WARNING"):
+            camera.save_last({"status": "pass"}, "ci", path=self.path)
+
+
+class MeasureNowTest(unittest.TestCase):
+    def test_no_camera_skips_without_staging(self):
+        import tempfile
+        from pathlib import Path
+        staged = []
+        import station.fw_update as fw
+        orig, orig_path = fw.stage_and_verify, camera.LAST_RESULT_PATH
+        fw.stage_and_verify = lambda *a, **k: staged.append(1) or True
+        with tempfile.TemporaryDirectory() as tmp:
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            try:
+                out = camera.measure_now("x.bin", lambda m: None,
+                                         CameraSettings.from_config({"enabled": "no"}))
+                self.assertEqual(camera.load_last()["status"], "skip")
+            finally:
+                fw.stage_and_verify, camera.LAST_RESULT_PATH = orig, orig_path
+        self.assertEqual(out["status"], "skip")
+        self.assertEqual(out["source"], "ui")
+        self.assertIn("time", out)
+        self.assertEqual(staged, [])
+
+    def test_measures_while_staging(self):
+        import station.fw_update as fw
+        calls = {}
+        orig_stage, orig_av, orig_rec = fw.stage_and_verify, camera.availability, camera.record
+        orig_path = camera.LAST_RESULT_PATH
+
+        def fake_stage(path, log, on_begin=None, **k):
+            calls["path"] = path
+            on_begin()   # BEGIN succeeded: the recording starts here
+            return True
+
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            fw.stage_and_verify = fake_stage
+            camera.availability = lambda s=None: (True, "fake camera")
+            camera.record = lambda s=None, seconds=None: synth(640.0)
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            try:
+                out = camera.measure_now("fw.bin", lambda m: None, CameraSettings.from_config({}))
+                saved = camera.load_last()
+            finally:
+                fw.stage_and_verify, camera.availability, camera.record = orig_stage, orig_av, orig_rec
+                camera.LAST_RESULT_PATH = orig_path
+        self.assertEqual(calls["path"], "fw.bin")
+        self.assertEqual(out["status"], "xfail")
+        self.assertAlmostEqual(out["offset_ms"], 640.0, delta=9.0)
+        self.assertEqual(saved["source"], "ui")
+        self.assertIn("traces", saved)
+        self.assertEqual(out["traces"], saved["traces"])   # returned = what was saved
+
+
+class MeasureNowStagingFailedTest(unittest.TestCase):
+    def test_failed_staging_is_not_a_pass(self):
+        import tempfile
+        from pathlib import Path
+        import station.fw_update as fw
+        orig = (fw.stage_and_verify, camera.availability, camera.record, camera.LAST_RESULT_PATH)
+
+        def fake_stage(path, log, on_begin=None, **k):
+            on_begin()
+            return False   # e.g. COMMIT refused after the recording started
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fw.stage_and_verify = fake_stage
+            camera.availability = lambda s=None: (True, "fake camera")
+            camera.record = lambda s=None, seconds=None: synth(0.0)
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            try:
+                out = camera.measure_now("fw.bin", lambda m: None, CameraSettings.from_config({}))
+            finally:
+                fw.stage_and_verify, camera.availability, camera.record, camera.LAST_RESULT_PATH = orig
+        self.assertEqual(out["status"], "skip")
+        self.assertIn("HID staging failed", out["reason"])
+        self.assertIn("traces", out)
+
+
 class RunnerHookTest(unittest.TestCase):
+    def setUp(self):
+        # rgb_phase_check() saves its result; keep it out of the checkout's var/.
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_path = camera.LAST_RESULT_PATH
+        camera.LAST_RESULT_PATH = Path(self._tmp.name) / "last.json"
+
+    def tearDown(self):
+        camera.LAST_RESULT_PATH = self._orig_path
+        self._tmp.cleanup()
+
     def test_no_camera_skips_with_reason(self):
         from station.test_runner import TestRunner
         logs = []
@@ -241,6 +393,7 @@ class RunnerHookTest(unittest.TestCase):
         self.assertEqual(rec["status"], "skip")
         self.assertEqual(rec["reason"], "no camera detected")
         self.assertTrue(any("SKIP" in line for line in logs))
+        self.assertEqual(camera.load_last()["reason"], "no camera detected")
 
     def test_recording_error_skips(self):
         from station.test_runner import TestRunner

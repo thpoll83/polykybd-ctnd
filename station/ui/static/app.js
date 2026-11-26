@@ -10,6 +10,7 @@ const actionBtns = [
   'btn-usb-left',     'btn-bootsel-left',  'btn-reset-left',
   'btn-usb-right',    'btn-bootsel-right', 'btn-reset-right',
   'btn-hand-left',    'btn-hand-right',
+  'btn-perf',         'btn-measure-phase',
 ].map(id => document.getElementById(id));
 
 /* ── Clock ── */
@@ -26,6 +27,7 @@ socket.on('status', ({ value }) => {
   statusEl.textContent = value;
   const busy = value !== 'idle' && value !== 'error';
   actionBtns.forEach(b => b.disabled = busy);
+  if (!busy) resultsEnded();
 });
 
 socket.on('log', ({ msg }) => appendLog(msg));
@@ -83,6 +85,7 @@ socket.on('update_status', ({ state, behind, branch }) => {
 const TEST_MARK = { pass: '✓', fail: '✗', skip: '⏭', xfail: '🟡', xpass: '❗' };
 
 socket.on('test_result', result => {
+  renderResults(result);
   const icon = result.passed ? '✓ PASS' : '✗ FAIL';
   appendLog(`\n── ${icon} ──`);
   (result.results || []).forEach(r => {
@@ -93,6 +96,64 @@ socket.on('test_result', result => {
   });
   appendLog('');
 });
+
+/* One row per test in the Test tab, with a status chip, so the outcome is
+   visible without scrolling the log. */
+function renderResults(result) {
+  _resultsPending = false;
+  const box = document.getElementById('results');
+  box.replaceChildren();
+  const head = document.createElement('div');
+  head.className = 'result-head ' + (result.passed ? 'st-pass' : 'st-fail');
+  head.textContent = result.passed ? 'PASS' : 'FAIL';
+  box.appendChild(head);
+  (result.results || []).forEach(r => {
+    const status = r.status || (r.passed ? 'pass' : 'fail');
+    const row = document.createElement('div');
+    row.className = 'result-row';
+    const chip = document.createElement('span');
+    chip.className = 'chip st-' + status;
+    chip.textContent = status.toUpperCase();
+    const name = document.createElement('span');
+    name.className = 'result-name';
+    name.textContent = r.name;
+    row.append(chip, name);
+    const why = r.reason || r.error || r.info;
+    if (why) {
+      const note = document.createElement('span');
+      note.className = 'result-note';
+      note.textContent = why;
+      row.appendChild(note);
+    }
+    box.appendChild(row);
+  });
+}
+
+// Set while a test run's results are expected. A run that ends without a
+// test_result (an exception, a lost connection) would otherwise leave the
+// "Running…" text up for good, so the status handler replaces it.
+let _resultsPending = false;
+
+function resultsEnded() {
+  if (!_resultsPending) return;
+  _resultsPending = false;
+  const box = document.getElementById('results');
+  box.replaceChildren();
+  const p = document.createElement('p');
+  p.className = 'placeholder';
+  p.textContent = 'The run ended without a result. The Log tab shows why.';
+  box.appendChild(p);
+}
+
+function resultsRunning(what) {
+  _resultsPending = true;
+  const box = document.getElementById('results');
+  box.replaceChildren();
+  const p = document.createElement('p');
+  p.className = 'placeholder';
+  p.textContent = what + ' — the newest log line is shown at the bottom; the Log tab has all of it.';
+  box.appendChild(p);
+}
 
 /* ── Primary actions ── */
 function flashSide(side) {
@@ -111,6 +172,7 @@ function runTests() {
   const extended = document.getElementById('extended-tests').checked;
   appendLog(extended ? '[ui] running the EXTENDED suite (slow checks included)…'
                      : '[ui] running the default suite…');
+  resultsRunning(extended ? 'Running the extended suite' : 'Running the default suite');
   socket.emit('run_tests', { left_uf2: left, right_uf2: right, extended });
 }
 
@@ -187,7 +249,10 @@ function updateStation() {
   socket.emit('update_now');
 }
 
-function clearLog() { logEl.textContent = ''; }
+function clearLog() {
+  logEl.textContent = '';
+  document.getElementById('log-last').textContent = '—';
+}
 
 function copyLog() {
   const text = logEl.textContent;
@@ -265,23 +330,34 @@ function setHandedness(masterIsLeft) {
 
 let _ciJobsTimer = null;
 
-function openRunner() {
-  document.getElementById('main-controls').hidden = true;
-  document.getElementById('runner-panel').hidden = false;
-  document.getElementById('log-panel').hidden = true;
-  document.getElementById('ci-jobs-panel').hidden = false;
-  if (_ciJobsTimer) clearInterval(_ciJobsTimer);
-  fetchCiJobs();
-  _ciJobsTimer = setInterval(fetchCiJobs, 30000);
-}
+/* ── Tabs ──
+   One section per mode. The last tab is remembered per browser (a reload of
+   the kiosk returns to it); storage can throw in a locked-down profile, so
+   every access is guarded. Entering a tab starts what it polls, leaving it
+   stops that again. */
+const TABS = ['test', 'hardware', 'camera', 'runner', 'log'];
+let _currentTab = null;
 
-function closeRunner() {
-  clearInterval(_ciJobsTimer);
-  _ciJobsTimer = null;
-  document.getElementById('runner-panel').hidden = true;
-  document.getElementById('main-controls').hidden = false;
-  document.getElementById('ci-jobs-panel').hidden = true;
-  document.getElementById('log-panel').hidden = false;
+function showTab(name) {
+  if (!TABS.includes(name)) name = 'test';
+  if (name === _currentTab) return;
+  if (_currentTab === 'camera') closeCamera();
+  if (_currentTab === 'runner') { clearInterval(_ciJobsTimer); _ciJobsTimer = null; }
+  TABS.forEach(t => {
+    document.getElementById('tab-' + t).hidden = t !== name;
+    const btn = document.querySelector(`.tab[data-tab="${t}"]`);
+    btn.classList.toggle('active', t === name);
+    btn.setAttribute('aria-selected', t === name ? 'true' : 'false');
+    btn.tabIndex = t === name ? 0 : -1;
+  });
+  _currentTab = name;
+  try { localStorage.setItem('ctnd-tab', name); } catch (e) { /* no storage */ }
+  if (name === 'camera') openCamera();
+  if (name === 'runner') {
+    fetchCiJobs();
+    _ciJobsTimer = setInterval(fetchCiJobs, 30000);
+  }
+  if (name === 'log') logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
 }
 
 function fetchCiJobs() {
@@ -337,16 +413,6 @@ function renderCiJobs(jobs) {
   list.appendChild(frag);
 }
 
-function openMore()  {
-  document.getElementById('main-controls').hidden = true;
-  document.getElementById('more-panel').hidden = false;
-}
-
-function closeMore() {
-  document.getElementById('more-panel').hidden = true;
-  document.getElementById('main-controls').hidden = false;
-}
-
 // ── Camera view ──────────────────────────────────────────────────────────────
 // Shows the rig camera with the dashed split line the RGB phase check uses, so
 // the orientation (rotation, flips, split_x, master_on_left in config.yaml) can
@@ -369,10 +435,9 @@ function openCamera() {
   const gen = ++_cameraGen;
   _cameraInfo = null;
   clearCameraImage();
-  document.getElementById('more-panel').hidden = true;
-  document.getElementById('camera-controls').hidden = false;
-  document.getElementById('log-panel').hidden = true;
-  document.getElementById('camera-panel').hidden = false;
+  loadPhaseLast();
+  _sharpPeak = 0;
+  document.getElementById('camera-sharp').textContent = '';
   const msg = document.getElementById('camera-msg');
   msg.textContent = 'Loading camera…';
   fetch('/camera/info')
@@ -385,6 +450,7 @@ function openCamera() {
       document.getElementById('camera-tag-left').textContent  = info.master_on_left ? master : slave;
       document.getElementById('camera-tag-right').textContent = info.master_on_left ? slave : master;
       _cameraText = `rotation ${info.rotation}°, hflip ${info.hflip}, vflip ${info.vflip}, ` +
+                    (info.roi ? `roi ${info.roi}, ` : '') +
                     `split_x ${info.split_x} — the dashed line must fall between the halves`;
       msg.textContent = _cameraText;
       placeCameraOverlay();
@@ -447,13 +513,129 @@ function closeCamera() {
   _cameraInfo = null;
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
   clearCameraImage();
-  document.getElementById('camera-controls').hidden = true;
-  document.getElementById('camera-panel').hidden = true;
-  document.getElementById('log-panel').hidden = false;
-  document.getElementById('main-controls').hidden = false;
+}
+
+/* ── RGB phase: the last measurement and "Measure phase now" ──
+   The CI runner and the UI both write the last result to var/ on the rig;
+   /camera/last serves it. The chart shows the two brightness traces the
+   offset was computed from. */
+// Bumped by every phase_result; a /camera/last reply that started before the
+// newest phase_result arrived is older than what is shown, so it is dropped.
+let _phaseSeq = 0;
+
+function loadPhaseLast() {
+  const seq = _phaseSeq;
+  fetch('/camera/last')
+    .then(r => r.json())
+    .then(d => { if (seq === _phaseSeq) renderPhase(d); })
+    .catch(() => {});
+}
+
+socket.on('phase_result', d => { _phaseSeq++; renderPhase(d); });
+
+function renderPhase(d) {
+  const box = document.getElementById('phase-last');
+  const chart = document.getElementById('phase-chart');
+  const legend = document.getElementById('phase-legend');
+  box.replaceChildren();
+  if (!d || !d.status) {
+    const p = document.createElement('p');
+    p.className = 'placeholder';
+    p.textContent = 'No measurement yet. The next HIL run records one, or use Measure phase now.';
+    box.appendChild(p);
+    chart.toggleAttribute('hidden', true); legend.hidden = true;   // an SVG element has no .hidden property
+    return;
+  }
+  const head = document.createElement('div');
+  head.className = 'phase-head';
+  const chip = document.createElement('span');
+  chip.className = 'chip st-' + d.status;
+  chip.textContent = d.status.toUpperCase();
+  const when = document.createElement('span');
+  when.className = 'phase-when';
+  const t = d.time ? new Date(d.time).toLocaleString() : '';
+  when.textContent = `${t} · ${d.source === 'ci' ? 'CI run' : 'measured here'}`;
+  head.append(chip, when);
+  box.appendChild(head);
+  if (d.offset_ms !== undefined) {
+    const big = document.createElement('div');
+    big.className = 'phase-offset';
+    big.textContent = `${d.offset_ms > 0 ? '+' : ''}${d.offset_ms} ms`;
+    box.appendChild(big);
+  }
+  const detail = document.createElement('p');
+  detail.className = 'phase-detail';
+  detail.textContent = d.reason || d.info || '';
+  box.appendChild(detail);
+
+  const tr = d.traces;
+  if (tr && tr.t_ms && tr.t_ms.length > 1) {
+    const all = tr.master.concat(tr.slave);
+    const lo = Math.min(...all), hi = Math.max(...all), span = (hi - lo) || 1;
+    const tmax = tr.t_ms[tr.t_ms.length - 1] || 1;
+    const pts = vals => vals.map((v, i) =>
+      `${(tr.t_ms[i] / tmax * 300).toFixed(1)},${(86 - (v - lo) / span * 82).toFixed(1)}`).join(' ');
+    document.getElementById('phase-line-master').setAttribute('points', pts(tr.master));
+    document.getElementById('phase-line-slave').setAttribute('points', pts(tr.slave));
+    chart.toggleAttribute('hidden', false); legend.hidden = false;
+  } else {
+    chart.toggleAttribute('hidden', true); legend.hidden = true;   // an SVG element has no .hidden property
+  }
+}
+
+function measurePhase() {
+  const sel = document.getElementById('phase-bin');
+  if (!sel.value) { appendLog('[ui] select the .bin of the running build first'); return; }
+  appendLog('[ui] measuring the RGB phase (HID stage + camera, no apply)…');
+  socket.emit('measure_phase', { bin: sel.value });
+}
+
+/* ── Focus aid ──
+   Sharpness of each snapshot as the variance of the 4-neighbour Laplacian of
+   its grey values, computed here on a canvas (the server has no image
+   library). A sharper image has stronger edges and a larger value. The
+   number only compares snapshots of the same scene and lighting, so it shows
+   the peak since the tab opened next to the current value. */
+let _sharpPeak = 0;
+const _sharpCanvas = document.createElement('canvas');
+
+function sharpness(img) {
+  const w = Math.min(img.naturalWidth, 640);
+  const h = Math.round(img.naturalHeight * w / img.naturalWidth);
+  if (w < 3 || h < 3) return 0;
+  _sharpCanvas.width = w;
+  _sharpCanvas.height = h;
+  const ctx = _sharpCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0, j = 0; i < g.length; i++, j += 4) {
+    g[i] = 0.299 * px[j] + 0.587 * px[j + 1] + 0.114 * px[j + 2];
+  }
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const lap = g[i - 1] + g[i + 1] + g[i - w] + g[i + w] - 4 * g[i];
+      sum += lap; sum2 += lap * lap; n++;
+    }
+  }
+  const mean = sum / n;
+  return sum2 / n - mean * mean;
+}
+
+function showSharpness() {
+  const img = document.getElementById('camera-img');
+  const el = document.getElementById('camera-sharp');
+  if (!_cameraInfo || !img.naturalWidth) { el.textContent = ''; return; }
+  const v = sharpness(img);
+  _sharpPeak = Math.max(_sharpPeak, v);
+  el.textContent = `Sharpness ${v.toFixed(0)} (peak ${_sharpPeak.toFixed(0)} since this tab opened)`;
+  el.classList.toggle('at-peak', v >= 0.97 * _sharpPeak);
 }
 
 document.getElementById('camera-img').addEventListener('load', placeCameraOverlay);
+document.getElementById('camera-img').addEventListener('load', showSharpness);
 window.addEventListener('resize', placeCameraOverlay);
 
 function quitApp() { window.close(); }
@@ -462,6 +644,15 @@ function refreshFirmware() {
   fetch('/firmware')
     .then(r => r.json())
     .then(files => {
+      const bin = document.getElementById('phase-bin');
+      const prevBin = bin.value;
+      bin.innerHTML = '<option value="">— .bin of the running build —</option>';
+      files.filter(f => f.toLowerCase().endsWith('.bin')).forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = opt.textContent = f;
+        if (f === prevBin) opt.selected = true;
+        bin.appendChild(opt);
+      });
       ['left-fw', 'right-fw'].forEach(id => {
         const sel  = document.getElementById(id);
         const prev = sel.value;
@@ -516,8 +707,13 @@ armIdle();
 /* ── Helpers ── */
 function appendLog(msg) {
   logEl.textContent += msg + '\n';
+  const last = msg.trim();
+  if (last) document.getElementById('log-last').textContent = last;
   const panel = logEl.parentElement;
   panel.scrollTop = panel.scrollHeight;
 }
 
 refreshFirmware();
+let _savedTab = 'test';
+try { _savedTab = localStorage.getItem('ctnd-tab') || 'test'; } catch (e) { /* no storage */ }
+showTab(_savedTab);

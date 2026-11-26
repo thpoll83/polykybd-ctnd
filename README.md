@@ -238,7 +238,7 @@ cd /opt/polykybd-ctnd
 ./scripts/register-runner.sh --token <TOK>   # or paste a one-off registration token
 ```
 
-Or recover straight from the **touchscreen** — no SSH — with the **Runner** row's **⟳ Restart** / **↻ Re-register** buttons (see [Troubleshooting](#github-actions-runner-waiting-for-a-runner)).
+Or recover straight from the **touchscreen** — no SSH — on the **Runner** tab, with its **⟳ Restart** / **↻ Re-register** buttons (see [Troubleshooting](#github-actions-runner-waiting-for-a-runner)).
 
 ### 5. Harden the rig
 
@@ -334,18 +334,21 @@ than by setting `ui.allow_lan`.
 
 ### Touchscreen UI
 
-| Control | Action |
-|---|---|
-| **Left / Right dropdowns** | Select a UF2 file from `/opt/polykybd-ctnd/firmware/` |
-| **⟳ button** | Refresh the firmware file list |
-| **Flash Left / Flash Right** | Flash a single half |
-| **Run Tests** | Flash both halves then execute the test suite |
-| **Clear Log / Copy Log** | Clear or copy the log panel |
-| **Runner ⚕ Diagnose** | Print a full self-hosted-runner diagnostic to the log (see below) |
-| **Runner ⟳ Restart** | `systemctl restart` the runner service — for a configured-but-wedged runner |
-| **Runner ↻ Re-register** | Stop → reconfigure → restart the runner (two-tap confirm) — for a broken/`Not configured` registration |
+Five tabs sit under the header. The newest log line shows in a strip at the bottom of
+every tab; tap it to open the Log tab. While the rig flashes, tests or measures, every
+action button is disabled.
 
-The status dot in the header pulses amber while flashing, blue while testing, amber again while (re)registering the runner, and turns red on error.
+| Tab | Controls |
+|---|---|
+| **Test** | Left / Right firmware selection from `/opt/polykybd-ctnd/firmware/` (⟳ refreshes the list), **Flash Left / Flash Right**, **Run Tests** (flash both halves, then run the suite; **Extended** adds the slow tier), **Measure Perf**. The results of the last run are listed, one row per test with its status. |
+| **Hardware** | One card per half: USB power, BOOTSEL and Reset toggles. **Handedness: USB = Left / Right**. |
+| **Camera** | The rig camera's live view with the `split_x` line and MASTER/SLAVE labels, a sharpness number for focusing the lens (turn it until the number peaks; it turns green at the peak), the last RGB phase measurement with its brightness traces, and **Measure phase now** (stages the selected `.bin` over HID and records the flash cue). See `docs/HIL_SUITE_NOTES.md` → *The RGB phase check*. |
+| **Runner** | Queued and running CI jobs, **⌕ Diagnose** (full runner diagnostic in the log), **⟳ Restart** (`systemctl restart` the runner service, for a configured-but-wedged runner), **↻ Re-register** (stop → reconfigure → restart, two-tap confirm, for a broken or `Not configured` registration), **Quit**. |
+| **Log** | The full log, **Copy Log**, **Clear Log**. |
+
+The tab you used last is opened again after a reload.
+
+The status dot in the header pulses amber while flashing, blue while testing, teal while measuring the RGB phase, amber again while (re)registering the runner, and turns red on error.
 
 **Header badges:**
 

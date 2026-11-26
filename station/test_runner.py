@@ -427,14 +427,20 @@ class TestRunner:
         name = camera.RGB_PHASE_TEST_NAME
         if cam_rec is None:
             self.log(f"[test] SKIP: {name} — {unavailable_reason}")
-            return {"name": name, "status": "skip", "reason": unavailable_reason}
+            rec = {"name": name, "status": "skip", "reason": unavailable_reason}
+            camera.save_last(rec, "ci")   # the UI must not keep showing an older result
+            return rec
         try:
-            res = camera.analyse(cam_rec.result())
+            recording = cam_rec.result()
+            res, master, slave = camera.analyse_traces(recording)
         except Exception as exc:
             why = f"camera recording failed: {exc}"
             self.log(f"[test] SKIP: {name} — {why}")
-            return {"name": name, "status": "skip", "reason": why}
+            rec = {"name": name, "status": "skip", "reason": why}
+            camera.save_last(rec, "ci")
+            return rec
         rec = camera.judge(res)
+        camera.save_last(rec, "ci", recording.timestamps_ms, master, slave)
         label = {"pass": "PASS", "xfail": "XFAIL", "skip": "SKIP"}[rec["status"]]
         self.log(f"[test] {label}: {name} — {rec.get('reason') or rec['info']}")
         return rec
