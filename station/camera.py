@@ -191,6 +191,14 @@ def save_view_override(roi: str, split_x: float, path: Path | None = None) -> st
     return ""
 
 
+def snapshot_settings(settings: CameraSettings) -> CameraSettings:
+    """A copy taken under _view_lock, so a save or reset cannot land between
+    reading roi and split_x (a torn copy would pair one view's crop with
+    another view's split)."""
+    with _view_lock:
+        return replace(settings)
+
+
 def clear_view_override(path: Path | None = None) -> str:
     """Remove the UI override; config.yaml's roi and split_x apply again."""
     path = VIEW_OVERRIDE_PATH if path is None else path
@@ -619,7 +627,7 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
         return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
     # One copy for the whole measurement: a view saved meanwhile (Adjust view
     # changes SETTINGS in place) must not split frames captured with the old crop.
-    settings = replace(settings)
+    settings = snapshot_settings(settings)
     rec = BackgroundRecording(settings)
     staged = stage_and_verify(bin_path, log, on_begin=rec.start, require_identity=True)
     try:
