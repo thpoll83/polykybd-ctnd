@@ -92,7 +92,7 @@ def _gh_api(path: str, timeout: int = 10, method: str = "GET"):
 # ── CI status poller ──────────────────────────────────────────────────────────
 
 def _ci_poll_once():
-    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=in_progress&per_page=10")
+    _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=in_progress&per_page=100")
     if data is None:
         return
     # A stale run (all its jobs ended, the run never did) kept the badge on
@@ -627,7 +627,7 @@ def _ci_job(run: dict) -> dict:
 #    its one job on 2026-08-09 and still read "in progress" in November.
 # Agreed with the maintainer 2026-11-26.
 STALE_RUN_MIN_AGE_S = 3600
-_STALE_VERDICT: dict = {}   # run id -> True/False; both verdicts never change
+_STALE_VERDICT: dict = {}   # _stale_key(run) -> verdict for that exact run state
 
 
 def _gh_time(value) -> float | None:
@@ -639,21 +639,29 @@ def _gh_time(value) -> float | None:
         return None
 
 
+def _stale_key(run: dict) -> tuple:
+    """The run state a verdict holds for. A re-run keeps the run id but changes
+    run_attempt, status and updated_at, so it is judged again."""
+    return (run.get("id"), run.get("run_attempt"), run.get("status"), run.get("updated_at"))
+
+
 def _is_stale(run: dict, now: float | None = None) -> bool:
     """True for a run GitHub will never finish (see STALE_RUN_MIN_AGE_S): a
     queued run with no jobs, or a run in progress whose jobs have all
     completed, unchanged for STALE_RUN_MIN_AGE_S.
 
-    A True verdict is cached per run id (the run stays that way until it is
-    cancelled). A False one is cached only for a queued run with jobs, which
-    does not lose them; a running run is asked again, since its jobs end. A
-    failed jobs query gives False and is not cached."""
+    A True verdict, and False for a queued run with jobs, is cached for the
+    run's exact state (_stale_key); a change of attempt, status or updated_at
+    asks again. False for a running run is not cached, since its jobs end
+    without the run changing. A failed jobs query gives False and is not cached.
+    A run with more than 100 jobs (one page) is never stale; the rig's
+    workflows have far fewer."""
     status = run.get("status")
     if status not in ("queued", "in_progress"):
         return False
-    run_id = run.get("id")
-    if run_id in _STALE_VERDICT:
-        return _STALE_VERDICT[run_id]
+    run_id, key = run.get("id"), _stale_key(run)
+    if key in _STALE_VERDICT:
+        return _STALE_VERDICT[key]
     changed = _gh_time(run.get("updated_at") or run.get("created_at"))
     now = time.time() if now is None else now
     if changed is None or now - changed < STALE_RUN_MIN_AGE_S:
@@ -664,12 +672,12 @@ def _is_stale(run: dict, now: float | None = None) -> bool:
     jobs = data.get("jobs", [])
     if status == "queued":
         verdict = data.get("total_count", 0) == 0
-        _STALE_VERDICT[run_id] = verdict
+        _STALE_VERDICT[key] = verdict
         return verdict
     verdict = bool(jobs) and data.get("total_count", 0) == len(jobs) and all(
         j.get("status") == "completed" for j in jobs)
     if verdict:
-        _STALE_VERDICT[run_id] = True
+        _STALE_VERDICT[key] = True
     return verdict
 
 

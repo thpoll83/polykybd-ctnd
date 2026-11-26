@@ -85,6 +85,19 @@ class StaleRunTest(unittest.TestCase):
         self.assertFalse(app._is_stale(self.run_(12, 9 * 3600, "completed"), NOW))
         self.assertEqual(self.calls, [])
 
+    def test_rerun_of_a_stale_run_is_judged_again(self):
+        # The run id stays on a re-run; attempt, status and updated_at change.
+        self.jobs[13] = []
+        self.assertTrue(app._is_stale(self.run_(13, 2 * 3600), NOW))
+        rerun = dict(self.run_(13, 60), run_attempt=2)
+        self.assertFalse(app._is_stale(rerun, NOW))
+
+    def test_queued_with_jobs_then_running_with_all_jobs_done_is_stale(self):
+        self.jobs[14] = ["queued"]
+        self.assertFalse(app._is_stale(self.run_(14, 2 * 3600), NOW))
+        self.jobs[14] = ["completed"]
+        self.assertTrue(app._is_stale(self.run_(14, 2 * 3600, "in_progress"), NOW))
+
     def test_verdict_is_cached(self):
         self.jobs[5] = []
         app._is_stale(self.run_(5, 2 * 3600), NOW)
@@ -94,7 +107,7 @@ class StaleRunTest(unittest.TestCase):
     def test_failed_jobs_query_is_not_stale_and_not_cached(self):
         app._gh_api = lambda path, timeout=10, method="GET": (502, None)
         self.assertFalse(app._is_stale(self.run_(6, 2 * 3600), NOW))
-        self.assertNotIn(6, app._STALE_VERDICT)
+        self.assertEqual(app._STALE_VERDICT, {})
 
 
 @unittest.skipIf(app is None, "Flask not installed")
