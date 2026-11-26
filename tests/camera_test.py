@@ -139,7 +139,8 @@ class PhaseTest(unittest.TestCase):
         rec.lumas = [bytes(y[i] if i in led else base[i] for i in range(len(y)))
                      for y in rec.lumas]
         res = camera.analyse(rec, CameraSettings.from_config({}))
-        self.assertAlmostEqual(res.offset_ms, 437.0, delta=6.0)
+        # Nine sampled LED pixels per half: allow half a frame (8.6 ms at 58 fps).
+        self.assertAlmostEqual(res.offset_ms, 437.0, delta=9.0)
 
     def test_fps_reported(self):
         res = self.check(0.0)
