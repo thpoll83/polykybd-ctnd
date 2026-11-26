@@ -682,9 +682,12 @@ firmware also moves between stagings: two measurements without a reset gave −7
 −346 ms (2026-11-26), the second after the master's USB dropped three times during the
 BEGIN erase. So only a pass after the fix proves it, not the exact number before.
 
-While a CI job runs on the rig (a `Runner.Worker` process exists, or GitHub reports the
-runner busy), the UI refuses Flash, Run Tests, Measure Perf and Measure phase now, and
-the camera snapshot answers 503. The UI's rig lock does not cover the CI runner: on
+The UI and the CI runners share one lock on the rig, an flock on `var/rig.lock`
+(`station/rig_lock.py`). `python -m station.test_runner` and `python -m station.perf_runner`
+take it at start and wait while the UI holds it. The UI asks without waiting: while a CI
+job holds it (or a `Runner.Worker` process exists, or GitHub reports the runner busy),
+the UI refuses Flash, Run Tests, Measure Perf and Measure phase now, skips the running
+version query, and the camera snapshot answers 503. The UI's rig lock does not cover the CI runner: on
 2026-11-26 a UI measurement during a HIL job left a staging session open, which failed
 the combos and FW_CHUNK tests, and took the camera from the CI phase check.
 

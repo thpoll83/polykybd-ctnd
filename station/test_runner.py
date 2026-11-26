@@ -1844,6 +1844,10 @@ if __name__ == "__main__":
             parser.error(str(exc))
         suite = list(TESTS) + [probe_test] if args.probe_with_suite else [probe_test]
 
+    # Wait for a UI action on the rig to finish, and keep the UI out until
+    # this process exits (station/rig_lock.py).
+    from . import rig_lock
+    _rig_fd = rig_lock.acquire_waiting(log=print)
     runner = TestRunner()
     try:
         result = runner.flash_and_test(args.left, args.right, tests=suite,

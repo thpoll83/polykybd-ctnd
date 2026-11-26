@@ -702,6 +702,10 @@ def main(argv=None) -> int:
     parser.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE_PCT,
                         help=f"Regression tolerance in percent (default: {DEFAULT_TOLERANCE_PCT:g})")
     args = parser.parse_args(argv)
+    # Wait for a UI action on the rig to finish, and keep the UI out until
+    # this process exits (station/rig_lock.py).
+    from . import rig_lock
+    rig_lock.acquire_waiting(log=print)
 
     if not args.no_flash and not (args.left and args.right):
         parser.error("--left and --right are required unless --no-flash is given")

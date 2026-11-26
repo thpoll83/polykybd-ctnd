@@ -15,6 +15,7 @@ from pathlib import Path
 from flask import Flask, Response, render_template, jsonify, request
 from flask_socketio import SocketIO
 
+from station import rig_lock
 from station.config import (
     FIRMWARE_DIR, UI_HOST, UI_PORT, UI_CORS_ORIGINS, GITHUB_REPO, GITHUB_TOKEN,
     RUNNER_LABELS, UPDATE_BRANCH,
@@ -807,13 +808,18 @@ def list_firmware_bins():
     elif not _RIG_LOCK.acquire(blocking=False):
         note = "rig busy"
     else:
+        rig_fd = rig_lock.try_acquire()
         try:
-            v = running_version()
-            running = v["version"] if v else None
-            note = "" if v else "keyboard did not answer FW_UP_GET_VERSION"
+            if rig_fd is None:
+                note = "a CI job is running on the rig"
+            else:
+                v = running_version()
+                running = v["version"] if v else None
+                note = "" if v else "keyboard did not answer FW_UP_GET_VERSION"
         except Exception as exc:
             note = f"version query failed: {exc}"
         finally:
+            rig_lock.release(rig_fd)
             _RIG_LOCK.release()
     return jsonify({"bins": bins, "running": running, "running_note": note})
 
@@ -859,10 +865,15 @@ def camera_snapshot():
         return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     # ?full=1: the whole field of view, without the ROI, for "Adjust view".
     crop = request.args.get("full") != "1"
+    rig_fd = rig_lock.try_acquire()
+    if rig_fd is None:
+        return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     try:
         jpg = camera.snapshot_jpeg(crop=crop)
     except Exception as exc:
         return Response(str(exc), status=503, mimetype="text/plain")
+    finally:
+        rig_lock.release(rig_fd)
     return Response(jpg, mimetype="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
@@ -1109,12 +1120,19 @@ def _run_exclusive(what: str, busy_status: str, body) -> bool:
         emit_log(f"[ui] rig busy — {what} ignored "
                  "(a flash / test / perf run is already active)")
         return False
+    # The cross-process lock: a CI job that starts now waits for it.
+    rig_fd = rig_lock.try_acquire()
+    if rig_fd is None:
+        _RIG_LOCK.release()
+        emit_log(f"[ui] a CI job holds the rig — {what} ignored")
+        return False
     set_status(busy_status)
 
     def _wrapped():
         try:
             body()
         finally:
+            rig_lock.release(rig_fd)
             _RIG_LOCK.release()
 
     threading.Thread(target=_wrapped, daemon=True).start()
