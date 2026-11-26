@@ -865,6 +865,37 @@ class QuadTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lens_k"):
                 CameraSettings.from_config({"lens_k": bad})
 
+    def test_corners_without_an_inverse_belong_to_no_quad(self):
+        # At k = -0.3 the model's largest observed radius is about 0.585; the
+        # frame corners (0.833) have no straightened point.
+        self.assertIsNone(camera.undistort((0.0, 0.0), -0.3))
+        self.assertIsNone(camera.undistort((1.0, 1.0), -0.3))
+        self.assertIsNotNone(camera.undistort((0.5, 0.3), -0.3))
+        # Every pixel either has no straightened point, or one that maps back to it.
+        none = 0
+        for j in range(17):
+            for i in range(17):
+                pt = (i / 16, j / 16)
+                u = camera.undistort(pt, -0.3)
+                if u is None:
+                    none += 1
+                    continue
+                back = camera.distort(u, -0.3)
+                self.assertAlmostEqual(back[0], pt[0], places=6)
+                self.assertAlmostEqual(back[1], pt[1], places=6)
+        self.assertGreater(none, 0)
+        # A full-frame quad pair still measures: the corners just drop out.
+        full = {"left": [[0.0, 0.0], [0.49, 0.0], [0.49, 1.0], [0.0, 1.0]],
+                "right": [[0.51, 0.0], [1.0, 0.0], [1.0, 1.0], [0.51, 1.0]]}
+        res = camera.analyse(synth(300.0), CameraSettings.from_config({"lens_k": -0.3, "quads": full}))
+        self.assertAlmostEqual(res.offset_ms, 300.0, delta=6.0)
+
+    def test_overlapping_quads_split_between_their_centres(self):
+        q = camera.parse_quads({"left": [[0.1, 0.1], [0.6, 0.1], [0.6, 0.9], [0.1, 0.9]],
+                                "right": [[0.4, 0.1], [0.9, 0.1], [0.9, 0.9], [0.4, 0.9]]})
+        roi, split = camera.view_from_quads(q, CameraSettings())
+        self.assertAlmostEqual(split, 0.5, places=3)
+
     def test_lens_k_moves_the_leds_and_the_crop(self):
         led = camera.led_pixels(self.view(lens_k=-0.2), "left", self.BOARD, self.W, self.H)[0]
         self.assertGreater(led[1], 60.0)    # left of the centre (110, 70): pulled towards it

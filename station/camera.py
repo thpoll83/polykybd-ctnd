@@ -79,9 +79,13 @@ def distort(pt, k: float) -> tuple[float, float]:
     return 0.5 + dx * f / SENSOR_ASPECT, 0.5 + dy * f
 
 
-def undistort(pt, k: float) -> tuple[float, float]:
-    """The inverse of distort(): Newton's method on the radius, which grows
-    monotonically for |k| <= LENS_K_MAX."""
+def undistort(pt, k: float) -> tuple[float, float] | None:
+    """The inverse of distort(), or None where it has none.
+
+    Newton's method on the radius r of r + c r^3 = rd. With barrel correction
+    (c < 0) the forward model reaches its largest radius at r = 1/sqrt(-3c);
+    an observed point further out (the corners at strong correction) has no
+    straightened point, so it is None and belongs to no quad."""
     if not k:
         return pt[0], pt[1]
     dx, dy = (pt[0] - 0.5) * SENSOR_ASPECT, pt[1] - 0.5
@@ -89,9 +93,15 @@ def undistort(pt, k: float) -> tuple[float, float]:
     rd = math.hypot(dx, dy)
     if rd == 0:
         return pt[0], pt[1]
+    if c < 0:
+        r_top = 1 / math.sqrt(-3 * c)
+        if rd > r_top + c * r_top ** 3:
+            return None
     r = rd
-    for _ in range(12):
+    for _ in range(30):
         r -= (r + c * r ** 3 - rd) / (1 + 3 * c * r * r)
+    if not math.isfinite(r) or abs(r + c * r ** 3 - rd) > 1e-9 or (c < 0 and r > 1 / math.sqrt(-3 * c)):
+        return None
     f = r / rd
     return 0.5 + dx * f / SENSOR_ASPECT, 0.5 + dy * f
 
@@ -335,7 +345,7 @@ def view_from_quads(quads: tuple, s: CameraSettings) -> tuple[str, float]:
     out = replace(s, roi=roi)
     us = [[to_output(p, out)[0] for p in q] for q in seen]
     a, b = sorted(us, key=lambda u: sum(u))
-    split = (max(a) + min(b)) / 2 if max(a) < min(b) else (sum(a) + sum(b)) / 8
+    split = (max(a) + min(b)) / 2 if max(a) < min(b) else (sum(a) + sum(b)) / (len(a) + len(b))
     return roi, round(split, 3)
 
 
@@ -737,6 +747,8 @@ def side_traces(rec: Recording, split_x: float, step: int = 4,
         for r in rows:
             for c in cols:
                 p = undistort(from_output((c + 0.5) / w, (r + 0.5) / h, view), view.lens_k)
+                if p is None:      # the lens model has no straightened point here
+                    continue
                 if inside_quad(a, *p):
                     in_a.add(r * w + c)
                 if inside_quad(b, *p):

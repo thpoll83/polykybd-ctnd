@@ -913,8 +913,10 @@ document.getElementById('camera-img').addEventListener('load', () => setCameraLo
 document.getElementById('camera-img').addEventListener('error', () => setCameraLoading(false));
 // The image box changes size after load (the sharpness line appears below it,
 // the log drawer opens): place the split line and labels again each time.
-if (window.ResizeObserver) new ResizeObserver(() => placeCameraOverlay()).observe(document.getElementById('camera-img'));
-window.addEventListener('resize', placeCameraOverlay);
+// Flat halves are sized to the view too: redraw them on the same changes.
+function relayoutCamera() { placeCameraOverlay(); drawFlat(); }
+if (window.ResizeObserver) new ResizeObserver(relayoutCamera).observe(document.getElementById('camera-img'));
+window.addEventListener('resize', relayoutCamera);
 
 /* ── Adjust view ──
    One four-corner outline per half. The full (uncropped) image is shown with
@@ -1178,7 +1180,12 @@ function drawStraightened() {
   const { x0, y0, pw, ph } = paintedRect(img);
   const cw = Math.max(1, Math.round(pw)), ch = Math.max(1, Math.round(ph));
   const k = _adjust.k;
-  paintFrom(cv, cw, ch, (i, j) => distortPt([(i + 0.5) / cw, (j + 0.5) / ch], k));
+  // Dragging a corner changes none of these: repaint only when one changes.
+  const key = [k, cw, ch];
+  if (cv._src !== _srcPixels || String(cv._key) !== String(key)) {
+    paintFrom(cv, cw, ch, (i, j) => distortPt([(i + 0.5) / cw, (j + 0.5) / ch], k));
+    cv._src = _srcPixels; cv._key = key;
+  }
   cv.style.left = x0 + 'px'; cv.style.top = y0 + 'px';
   cv.style.width = pw + 'px'; cv.style.height = ph + 'px';
   cv.hidden = false;
