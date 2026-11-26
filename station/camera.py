@@ -16,6 +16,7 @@ finds the lag with the highest circular cross-correlation within one period.
 Everything after the capture is plain Python with no camera, so
 ``tests/camera_test.py`` runs it on synthetic frames.
 """
+import logging
 import math
 import os
 import shutil
@@ -90,7 +91,21 @@ class CameraSettings:
         return args
 
 
-SETTINGS = CameraSettings.from_config(CAMERA)
+def _load_settings(c: dict | None) -> tuple[CameraSettings, str]:
+    """Settings from config.yaml, or a disabled camera and the reason.
+
+    A bad value in the optional camera block must not stop test_runner (which
+    imports this module) from loading, so it disables the camera instead. The
+    check then SKIPs with the reason, and the UI shows it.
+    """
+    try:
+        return CameraSettings.from_config(c), ""
+    except (TypeError, ValueError) as exc:
+        logging.getLogger("polykybd-ctnd").warning("camera block in config.yaml ignored: %s", exc)
+        return CameraSettings(enabled="no"), f"camera block in config.yaml is invalid: {exc}"
+
+
+SETTINGS, CONFIG_ERROR = _load_settings(CAMERA)
 
 
 def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
@@ -103,6 +118,8 @@ def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
 
 def availability(settings: CameraSettings = SETTINGS) -> tuple[bool, str]:
     """(usable, reason). Never raises: a rig without a camera SKIPs."""
+    if settings is SETTINGS and CONFIG_ERROR:
+        return False, CONFIG_ERROR
     if settings.enabled == "no":
         return False, "camera.enabled is no in config.yaml"
     if shutil.which("rpicam-hello") is None:
@@ -124,6 +141,8 @@ def snapshot_jpeg(settings: CameraSettings = SETTINGS,
     Raises RuntimeError when the camera is disabled in config.yaml, busy (a CI
     capture holds it) or absent.
     """
+    if settings is SETTINGS and CONFIG_ERROR:
+        raise RuntimeError(CONFIG_ERROR)
     if settings.enabled == "no":
         raise RuntimeError("camera.enabled is no in config.yaml")
     if not _lock.acquire(blocking=False):

@@ -657,8 +657,11 @@ cross-correlation within one period. A positive offset means the slave lags the 
   of each half, so the halves differ by their boot-time difference mod 2048 ms. Promote
   this to `fail` once the firmware uses `sync_timer_read32()` there.
 - `skip`: no camera (`camera.enabled: auto` and `rpicam-hello --list-cameras` finds none),
-  staging failed before BEGIN, or the camera saw too little breathing on one half
-  (swing below 3 luma units, or correlation below 0.6). Check the framing in the UI:
+  staging failed before BEGIN, the `camera:` block in `config.yaml` is invalid (the
+  reason names the value), or the camera saw too little breathing on one half: swing
+  below 3 luma units, a trace that does not repeat after one 2048 ms period
+  (periodicity below 0.6, for example a one-off room-light change), or correlation
+  below 0.6. Check the framing in the UI:
   More ··· → Camera shows the image with the `split_x` line and the master/slave labels.
 
 Capture uses `rpicam-vid` raw YUV into `/dev/shm`, with fixed exposure, gain and white

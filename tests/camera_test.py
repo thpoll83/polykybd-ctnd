@@ -89,6 +89,18 @@ class SettingsTest(unittest.TestCase):
         self.assertIn("enabled", why)
 
 
+class LoadSettingsTest(unittest.TestCase):
+    def test_bad_block_disables_the_camera_instead_of_raising(self):
+        with self.assertLogs("polykybd-ctnd", level="WARNING"):
+            s, err = camera._load_settings({"rotation": 90})
+        self.assertEqual(s.enabled, "no")
+        self.assertIn("rotation", err)
+
+    def test_good_block_has_no_error(self):
+        s, err = camera._load_settings({"rotation": 180})
+        self.assertEqual((s.rotation, err), (180, ""))
+
+
 class ParseTest(unittest.TestCase):
     def test_parse_pts(self):
         self.assertEqual(camera.parse_pts("# timecode format v2\n0.000\n11.112\n\n22.2\n"),
