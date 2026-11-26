@@ -492,8 +492,9 @@ def _downsample(ts: list[float], values: list[float], n: int = CHART_POINTS):
 
 def save_last(record: dict, source: str, ts: list[float] | None = None,
               master: list[float] | None = None, slave: list[float] | None = None,
-              path: Path | None = None) -> None:
-    """Write the result record (and the traces, when there are any) atomically.
+              path: Path | None = None) -> dict:
+    """Write the result record (and the traces, when there are any) atomically,
+    and return what was written (also when the write failed).
 
     Never raises: the UI view is a convenience, and a write failure must not
     change a test result.
@@ -522,6 +523,7 @@ def save_last(record: dict, source: str, ts: list[float] | None = None,
             raise
     except OSError as exc:
         logging.getLogger("polykybd-ctnd").warning("could not save the camera result: %s", exc)
+    return data
 
 
 def load_last(path: Path | None = None) -> dict | None:
@@ -534,7 +536,8 @@ def load_last(path: Path | None = None) -> dict | None:
 
 def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict:
     """The UI's "Measure phase now": stage ``bin_path`` over HID (which shows the
-    flash cue), record meanwhile, judge, save and return the record.
+    flash cue), record meanwhile, judge, save and return the saved record
+    (time, source, traces included).
 
     Non-destructive like the CI step: stage + verify only, no APPLY. The image
     must be the build the rig runs (stage_and_verify checks the version).
@@ -543,7 +546,9 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
 
     ok, why = availability(settings)
     if not ok:
-        return {"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}
+        # Saved like any other outcome, so the panel never keeps showing an
+        # older measurement after this one could not run.
+        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
     rec = BackgroundRecording(settings)
     staged = stage_and_verify(bin_path, log, on_begin=rec.start)
     try:
@@ -553,9 +558,5 @@ def measure_now(bin_path: str, log, settings: CameraSettings = SETTINGS) -> dict
         why = f"camera recording failed: {exc}"
         if not staged:
             why += " (the HID staging failed too, see the log)"
-        out = {"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}
-        save_last(out, "ui")
-        return out
-    out = judge(res)
-    save_last(out, "ui", recording.timestamps_ms, master, slave)
-    return out
+        return save_last({"name": RGB_PHASE_TEST_NAME, "status": "skip", "reason": why}, "ui")
+    return save_last(judge(res), "ui", recording.timestamps_ms, master, slave)

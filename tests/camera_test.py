@@ -295,16 +295,23 @@ class LastResultTest(unittest.TestCase):
 
 class MeasureNowTest(unittest.TestCase):
     def test_no_camera_skips_without_staging(self):
+        import tempfile
+        from pathlib import Path
         staged = []
         import station.fw_update as fw
-        orig = fw.stage_and_verify
+        orig, orig_path = fw.stage_and_verify, camera.LAST_RESULT_PATH
         fw.stage_and_verify = lambda *a, **k: staged.append(1) or True
-        try:
-            out = camera.measure_now("x.bin", lambda m: None,
-                                     CameraSettings.from_config({"enabled": "no"}))
-        finally:
-            fw.stage_and_verify = orig
+        with tempfile.TemporaryDirectory() as tmp:
+            camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
+            try:
+                out = camera.measure_now("x.bin", lambda m: None,
+                                         CameraSettings.from_config({"enabled": "no"}))
+                self.assertEqual(camera.load_last()["status"], "skip")
+            finally:
+                fw.stage_and_verify, camera.LAST_RESULT_PATH = orig, orig_path
         self.assertEqual(out["status"], "skip")
+        self.assertEqual(out["source"], "ui")
+        self.assertIn("time", out)
         self.assertEqual(staged, [])
 
     def test_measures_while_staging(self):
@@ -336,9 +343,22 @@ class MeasureNowTest(unittest.TestCase):
         self.assertAlmostEqual(out["offset_ms"], 640.0, delta=9.0)
         self.assertEqual(saved["source"], "ui")
         self.assertIn("traces", saved)
+        self.assertEqual(out["traces"], saved["traces"])   # returned = what was saved
 
 
 class RunnerHookTest(unittest.TestCase):
+    def setUp(self):
+        # rgb_phase_check() saves its result; keep it out of the checkout's var/.
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_path = camera.LAST_RESULT_PATH
+        camera.LAST_RESULT_PATH = Path(self._tmp.name) / "last.json"
+
+    def tearDown(self):
+        camera.LAST_RESULT_PATH = self._orig_path
+        self._tmp.cleanup()
+
     def test_no_camera_skips_with_reason(self):
         from station.test_runner import TestRunner
         logs = []

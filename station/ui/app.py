@@ -1060,7 +1060,7 @@ def on_measure_phase(data):
             rec = camera.measure_now(str(path), emit_log)
             emit_log(f"[ui] RGB phase: {rec['status'].upper()} — "
                      f"{rec.get('reason') or rec.get('info', '')}")
-            socketio.emit("phase_result", camera.load_last() or rec)
+            socketio.emit("phase_result", rec)   # this run's result, not the file
             set_status("idle")
         except Exception as exc:
             emit_log(f"[ui] phase measurement error: {exc}")

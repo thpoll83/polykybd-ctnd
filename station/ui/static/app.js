@@ -249,7 +249,10 @@ function updateStation() {
   socket.emit('update_now');
 }
 
-function clearLog() { logEl.textContent = ''; }
+function clearLog() {
+  logEl.textContent = '';
+  document.getElementById('log-last').textContent = '—';
+}
 
 function copyLog() {
   const text = logEl.textContent;
