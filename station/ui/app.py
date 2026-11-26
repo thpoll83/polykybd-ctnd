@@ -926,6 +926,9 @@ def camera_info():
     return jsonify({"available": ok, "detail": why, "rotation": st.rotation,
                     "hflip": st.hflip, "vflip": st.vflip, "split_x": st.split_x,
                     "master_on_left": st.master_on_left, "roi": st.roi,
+                    "quads": ({k: [list(p) for p in q] for k, q in zip(camera.QUAD_SIDES, st.quads)}
+                              if st.quads else None),
+                    "boards": camera.BOARDS,
                     "view_override": bool(camera.load_view_override())})
 
 
@@ -1416,27 +1419,34 @@ def on_run_tests(data):
 
 @socketio.on("camera_set_view")
 def on_camera_set_view(data):
-    """Store the crop and split line drawn in the Camera tab ("Adjust view").
+    """Store the view set in the Camera tab ("Adjust view").
 
-    Only camera.roi and camera.split_x, validated like config.yaml, written to
-    var/camera_view.json. The CI runner reads it on its next run.
+    Either one four-corner outline per half (quads, sensor fractions; the crop
+    and split_x are derived from them) or a crop and split line (roi, split_x).
+    Validated like config.yaml and written to var/camera_view.json. The CI
+    runner reads it on its next run.
     """
     from station import camera
     if not isinstance(data, dict):
         return
+    quads = data.get("quads")
+    if quads is not None:
+        # The crop and split line come from the quads (camera.view_from_quads).
+        data = {"roi": "", "split_x": 0.5, "quads": quads}
     roi, split_x = data.get("roi"), data.get("split_x")
     if not isinstance(roi, str) or not isinstance(split_x, (int, float)) or isinstance(split_x, bool):
         emit_log("[ui] camera view not saved: roi must be text and split_x a number")
         socketio.emit("camera_view", {"ok": False, "error": "roi must be text and split_x a number"},
                       to=request.sid)
         return
-    err = camera.save_view_override(roi, float(split_x))
+    err = camera.save_view_override(roi, float(split_x), quads=quads)
     if err:
         emit_log(f"[ui] camera view not saved: {err}")
         socketio.emit("camera_view", {"ok": False, "error": err}, to=request.sid)
         return
     emit_log(f"[ui] camera view saved: roi {camera.SETTINGS.roi or '(none)'}, "
-             f"split_x {camera.SETTINGS.split_x:.3f}")
+             f"split_x {camera.SETTINGS.split_x:.3f}"
+             + (", one outline per half" if camera.SETTINGS.quads else ""))
     socketio.emit("camera_view", {"ok": True}, to=request.sid)   # the saving browser only
     socketio.emit("camera_view_changed", {}, skip_sid=request.sid)   # others reload, unless adjusting
 

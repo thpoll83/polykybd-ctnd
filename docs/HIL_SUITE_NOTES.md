@@ -711,11 +711,37 @@ The CI runner and the UI append under an flock on `camera_phase_history.lock`. T
 tab lists it, so a release build and a fix can be compared: run the HIL workflow on the
 release tag, then on the fix.
 
-**Adjust view** in the Camera tab sets `camera.roi` and `camera.split_x` by touch: it shows
-the full image (`/camera/snapshot.jpg?full=1`), you drag a box around both halves, then tap
-the gap. The UI validates the values like `config.yaml` and writes only these two keys to
+**Adjust view** in the Camera tab fits one outline per half. It shows the full image
+(`/camera/snapshot.jpg?full=1`) with each board's PCB outline, keycaps and LEDs drawn
+semi-transparent and warped (CSS `matrix3d`) into four corners. Drag each corner until the
+outline lies on its board, or drag inside an outline to move it. Save is off while an
+outline is twisted (not convex). The server validates the corners
+(`camera.parse_quads`), derives the crop (the bounding box of both quads, rounded outwards
+to 0.001) and `split_x` (between the quads), and writes `roi`, `split_x` and `quads` to
 `var/camera_view.json`, which overrides `config.yaml` for them. The CI runner reads the
 file on its next run. An invalid file is ignored with a warning; `config.yaml` then applies.
+
+The quads are stored in sensor fractions, before rotation and flips, like `--roi`, so they
+stay right when `rotation`, `hflip` or `vflip` change. Corners are in the order of the
+outline's top-left, top-right, bottom-right, bottom-left. With quads, the phase check reads
+only the pixels inside each quad (`camera.side_traces`), and the image-left trace is the
+quad whose centre lies further left; `split_x` is not used. A quad that covers no pixel of
+the recording makes the check SKIP with that reason. Without quads, the check splits the
+image at `split_x` as before.
+
+Each quad maps the board's view box (millimetres) to image pixels with a homography
+(`camera.board_to_image`). `camera.led_pixels` finds each LED of the board in a recording,
+and `camera.rectify` cuts a half out as a straight, top-down image, for checks per LED.
+
+The outlines come from the KiCad boards. Regenerate them after a board change:
+
+    pip install kiutils
+    for s in left right; do python scripts/pcb_outline.py \
+        ../PolyKybd/poly_kybd/poly_kybd_split72_$s.kicad_pcb station/ui/static/pcb/split72_$s.svg; done
+
+This writes `split72_<side>.svg` (outline, 18 mm keycap squares at the `Kailh_socket_MX*`
+footprints, dots at the `*WS2812*` LEDs) and `split72_<side>.json` (view box size and LED
+centres in the same millimetres). `tests/camera_test.py` checks that the two files agree.
 
 For focusing the lens (the OV5647 module has a manual, fixed-focus lens), the Camera tab
 shows the sharpness of each snapshot: the variance of the 4-neighbour Laplacian of its grey

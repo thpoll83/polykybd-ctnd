@@ -518,6 +518,28 @@ main {
   pointer-events: none;
 }
 #camera-box[hidden] { display: none; }
+
+/* "Adjust view": a board outline warped (matrix3d) into its quad, and the
+   corner handles. */
+.camera-pcb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  opacity: 0.7;
+  pointer-events: none;
+}
+.camera-handle {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border: 2px solid #00e5ff;
+  border-radius: 50%;
+  background: rgba(0, 229, 255, 0.25);
+  pointer-events: none;
+}
+.camera-pcb[hidden], .camera-handle[hidden] { display: none; }
 #camera-frame { touch-action: none; }
 
 .firmware-row {
