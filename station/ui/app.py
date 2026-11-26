@@ -680,6 +680,13 @@ def camera_last():
     return jsonify(data or {})
 
 
+@app.route("/camera/history")
+def camera_history():
+    """The last phase measurements (newest first) with firmware version and source."""
+    from station import camera
+    return jsonify(camera.load_history())
+
+
 @app.route("/camera/snapshot.jpg")
 def camera_snapshot():
     """One JPEG from the rig camera, rotated and flipped as config.yaml says.

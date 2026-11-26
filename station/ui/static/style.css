@@ -677,3 +677,12 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 
 #phase-bin-note { font-size: 11px; color: #888; line-height: 1.4; }
 .phase-measure select option.bin-other { color: #777; }
+
+/* ── Phase history ── */
+#phase-history-box[hidden] { display: none; }
+#phase-history-box h3 { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+#phase-history { max-height: 120px; overflow-y: auto; }
+.phase-hist-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
+.phase-hist-row .chip { flex: 0 0 44px; font-size: 9px; }
+.phase-hist-offset { flex: 0 0 76px; white-space: nowrap; text-align: right; color: #ddd; font-variant-numeric: tabular-nums; }
+.phase-hist-what { flex: 1; min-width: 0; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

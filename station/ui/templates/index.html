@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=12">
+  <link rel="stylesheet" href="/static/style.css?v=13">
 </head>
 <body data-status="idle">
   <header>
@@ -113,6 +113,10 @@
         <p class="chart-legend" id="phase-legend" hidden>
           <span class="lg-master">master</span> <span class="lg-slave">slave</span> brightness over the recording
         </p>
+        <div id="phase-history-box" hidden>
+          <h3>History</h3>
+          <div id="phase-history"></div>
+        </div>
         <div class="phase-measure">
           <select id="phase-bin" title="The .bin of the build the rig runs; staging it shows the flash cue"><option value="">— .bin of the running build —</option></select>
           <p id="phase-bin-note"></p>
@@ -155,6 +159,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=17"></script>
+  <script src="/static/app.js?v=18"></script>
 </body>
 </html>

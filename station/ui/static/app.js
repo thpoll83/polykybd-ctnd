@@ -529,6 +529,7 @@ function openCamera() {
   _cameraInfo = null;
   clearCameraImage();
   loadPhaseLast();
+  loadPhaseHistory();
   loadPhaseBins();
   _sharpPeak = 0;
   document.getElementById('camera-sharp').textContent = '';
@@ -645,7 +646,41 @@ function loadPhaseLast() {
     .catch(() => {});
 }
 
-socket.on('phase_result', d => { _phaseSeq++; renderPhase(d); });
+socket.on('phase_result', d => { _phaseSeq++; renderPhase(d); loadPhaseHistory(); });
+
+/* The last measurements (newest first): when, from where, which firmware,
+   result and offset, to compare builds, e.g. a release before and after a fix. */
+function loadPhaseHistory() {
+  fetch('/camera/history')
+    .then(r => r.json())
+    .then(renderPhaseHistory)
+    .catch(() => {});
+}
+
+function renderPhaseHistory(hist) {
+  const box = document.getElementById('phase-history-box');
+  const list = document.getElementById('phase-history');
+  list.replaceChildren();
+  box.hidden = !hist || !hist.length;
+  (hist || []).forEach(h => {
+    const row = document.createElement('div');
+    row.className = 'phase-hist-row';
+    const chip = document.createElement('span');
+    chip.className = 'chip st-' + (h.status || 'skip');
+    chip.textContent = (h.status || '?').toUpperCase();
+    const off = document.createElement('span');
+    off.className = 'phase-hist-offset';
+    off.textContent = h.offset_ms !== undefined && h.status !== 'skip'
+      ? `${h.offset_ms > 0 ? '+' : ''}${h.offset_ms} ms` : '–';
+    const what = document.createElement('span');
+    what.className = 'phase-hist-what';
+    const src = h.source === 'ci' ? `CI${h.ref ? ' ' + h.ref : ''}${h.commit ? ' @' + h.commit : ''}` : 'here';
+    what.textContent = `${fmtTime(h.time)} · ${h.fw || '?'} · ${src}`;
+    what.title = h.reason || h.info || '';
+    row.append(chip, off, what);
+    list.appendChild(row);
+  });
+}
 
 function renderPhase(d) {
   const box = document.getElementById('phase-last');

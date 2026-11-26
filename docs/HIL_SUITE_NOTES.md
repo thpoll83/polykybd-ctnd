@@ -671,6 +671,13 @@ process from the UI. **Measure phase now** stages the selected `.bin` over HID, 
 on the flash cue, and records meanwhile: stage + verify only, no APPLY, like the CI step.
 The `.bin` must be the build the rig runs, or the version cross-check refuses it.
 
+Every saved measurement is also appended to `var/camera_phase_history.json` (the last 10,
+without traces): time, source, the firmware version from the staged image, for CI runs the
+commit and branch (`GITHUB_SHA`, `GITHUB_HEAD_REF`/`GITHUB_REF_NAME`), status and offset.
+The CI runner and the UI append under an flock on `camera_phase_history.lock`. The Camera
+tab lists it, so a release build and a fix can be compared: run the HIL workflow on the
+release tag, then on the fix.
+
 **Adjust view** in the Camera tab sets `camera.roi` and `camera.split_x` by touch: it shows
 the full image (`/camera/snapshot.jpg?full=1`), you drag a box around both halves, then tap
 the gap. The UI validates the values like `config.yaml` and writes only these two keys to

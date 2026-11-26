@@ -340,7 +340,8 @@ class TestRunner:
                                 "status": "pass" if fw_ok else "fail"})
                 self.log(f"[test] {'PASS' if fw_ok else 'FAIL'}: "
                          f"firmware update (stage+verify .bin)")
-                results.append(self.rgb_phase_check(cam_rec, cam_why))
+                results.append(self.rgb_phase_check(cam_rec, cam_why,
+                                                    fw=camera.image_fw(bin_path)))
 
             # Full HID update INCLUDING apply — extended tier, and the only check
             # that overwrites the running firmware. See firmware_apply_roundtrip.
@@ -419,7 +420,7 @@ class TestRunner:
     # evidence that the flash took. See the `unknown` parameter.
     MASTERS_UNKNOWN = -1
 
-    def rgb_phase_check(self, cam_rec, unavailable_reason: str) -> dict:
+    def rgb_phase_check(self, cam_rec, unavailable_reason: str, fw: str | None = None) -> dict:
         """Judge the camera recording made during HID staging (station/camera.py).
 
         Report-only: a phase offset above the tolerance is xfail, not fail.
@@ -428,7 +429,7 @@ class TestRunner:
         if cam_rec is None:
             self.log(f"[test] SKIP: {name} — {unavailable_reason}")
             rec = {"name": name, "status": "skip", "reason": unavailable_reason}
-            camera.save_last(rec, "ci")   # the UI must not keep showing an older result
+            camera.save_last(rec, "ci", fw=fw)   # the UI must not keep showing an older result
             return rec
         try:
             recording = cam_rec.result()
@@ -437,10 +438,10 @@ class TestRunner:
             why = f"camera recording failed: {exc}"
             self.log(f"[test] SKIP: {name} — {why}")
             rec = {"name": name, "status": "skip", "reason": why}
-            camera.save_last(rec, "ci")
+            camera.save_last(rec, "ci", fw=fw)
             return rec
         rec = camera.judge(res)
-        camera.save_last(rec, "ci", recording.timestamps_ms, master, slave)
+        camera.save_last(rec, "ci", recording.timestamps_ms, master, slave, fw=fw)
         label = {"pass": "PASS", "xfail": "XFAIL", "skip": "SKIP"}[rec["status"]]
         self.log(f"[test] {label}: {name} — {rec.get('reason') or rec['info']}")
         return rec
