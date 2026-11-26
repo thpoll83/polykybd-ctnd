@@ -468,7 +468,13 @@ main {
   gap: 8px;
 }
 #phase-scroll > * { flex-shrink: 0; }   /* scroll instead of squeezing the chart */
-#camera-flat-label[hidden] { display: none; }
+.view-switch { display: flex; gap: 2px; }
+.view-switch .btn { background: #333; color: #ccc; }
+/* Six controls in the camera row: size them to their text and wrap if needed. */
+#camera-view-buttons { flex-wrap: wrap; justify-content: center; }
+#camera-view-buttons .btn, #camera-view-buttons .chk { flex: 0 0 auto; width: auto; padding: 0 12px; }
+.view-switch .btn.on { background: #1565C0; color: #fff; }
+.view-switch .btn[hidden] { display: none; }
 .phase-measure { flex: 0 0 auto; margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
 .phase-measure select {
   height: 38px;
@@ -771,11 +777,15 @@ body[data-status="error"]          .status-dot { background: #f44336; }
 .phase-measure select option.bin-other { color: #777; }
 
 /* ── Phase history ── */
-#phase-frames-box[hidden] { display: none; }
-#phase-frames-box h3 { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-#phase-frames-label { font-size: 11px; color: #aaa; margin-bottom: 4px; }
-#phase-frames { display: flex; gap: 4px; }
-#phase-frames figure { flex: 1; margin: 0; min-width: 0; }
+/* "Last run" in the main view: the frames as large as the view allows. */
+#camera-lastrun {
+  position: absolute; inset: 0; background: #000; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 6px;
+}
+#camera-lastrun[hidden] { display: none; }
+#phase-frames-label { font-size: 12px; color: #ccc; }
+#phase-frames { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px; }
+#phase-frames figure { margin: 0; min-width: 0; }
 #phase-frames img { width: 100%; display: block; border: 1px solid #333; border-radius: 3px; image-rendering: pixelated; }
 #phase-frames figcaption { font-size: 10px; color: #888; text-align: center; }
 #phase-history-box[hidden] { display: none; }

@@ -617,8 +617,8 @@ function openCamera() {
                                 : `split_x ${info.split_x} — the dashed line must fall between the halves`);
       msg.textContent = _cameraText;
       if (info.quads) loadBoards().then(() => { if (gen === _cameraGen) placeCameraOverlay(); }).catch(() => {});
-      document.getElementById('camera-flat-label').hidden = !info.quads;
-      if (!info.quads) document.getElementById('camera-flat').checked = false;
+      document.getElementById('mode-flat').hidden = !info.quads;
+      if (!info.quads && _viewMode === 'flat') setViewMode('live');
       placeCameraOverlay();
       refreshCamera();
       cameraLive();
@@ -749,13 +749,12 @@ function loadPhaseFrames() {
 }
 
 function renderPhaseFrames(meta) {
-  const box = document.getElementById('phase-frames-box');
   const strip = document.getElementById('phase-frames');
   const label = document.getElementById('phase-frames-label');
   strip.replaceChildren();
   const frames = (meta && meta.frames) || [];
-  box.hidden = !frames.length;
-  if (!frames.length) return;
+  document.getElementById('mode-last').hidden = !frames.length;
+  if (!frames.length) { if (_viewMode === 'last') setViewMode('live'); return; }
   label.textContent = `${(meta.label && meta.label.text) || 'Recording'} · ${fmtTime(meta.started)}`;
   const stamp = encodeURIComponent(meta.started || '');
   frames.forEach((f, i) => {
@@ -1099,7 +1098,7 @@ function placeOutline(side, corners) {
 
 function hideOutlines() {
   ['left', 'right'].forEach(side => { document.getElementById('camera-pcb-' + side).hidden = true; });
-  document.getElementById('camera-curves').hidden = true;
+  document.getElementById('camera-curves').toggleAttribute('hidden', true);   // SVG: no .hidden
   document.querySelectorAll('.camera-handle').forEach(el => { el.hidden = true; });
 }
 
@@ -1125,7 +1124,7 @@ function drawSavedQuads() {
     paths.push(`<polygon points="${pts.map(p => p.map(n => n.toFixed(1)).join(',')).join(' ')}"/>`);
   }
   svg.innerHTML = paths.join('');
-  svg.hidden = false;
+  svg.toggleAttribute('hidden', false);   // an SVG element has no .hidden property
   document.querySelectorAll('.camera-handle').forEach(el => { el.hidden = true; });
 }
 
@@ -1139,6 +1138,7 @@ function adjustHint() {
 
 function startAdjust() {
   if (!_cameraInfo) return;
+  setViewMode('live');   // the editor works on the camera image
   _adjust = { quads: initialQuads(_cameraInfo), k: _cameraInfo.lens_k || 0, drag: null, ready: false };
   const lens = document.getElementById('camera-lens');
   lens.min = -(_cameraInfo.lens_k_max || 0.3); lens.max = _cameraInfo.lens_k_max || 0.3;
@@ -1295,9 +1295,23 @@ function saveAdjust() {
    Each half cut out of the live image through its saved quad and the lens
    model, straightened to the board's millimetres (true proportions), with the
    PCB outline on top. Image-left half first. */
+// What the main view shows: 'live' (the camera), 'flat' (the halves
+// straightened) or 'last' (the last recording's frames).
+let _viewMode = 'live';
+function setViewMode(mode) {
+  _viewMode = mode;
+  document.querySelectorAll('#camera-mode button').forEach(b => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  document.getElementById('camera-lastrun').hidden = mode !== 'last';
+  flatToggled();
+  if (mode === 'live') placeCameraOverlay();
+}
+
 function flatOn() {
-  const t = document.getElementById('camera-flat');
-  return !!(t && t.checked && _cameraInfo && _cameraInfo.quads && !_adjust);
+  return !!(_viewMode === 'flat' && _cameraInfo && _cameraInfo.quads && !_adjust);
 }
 
 function drawFlat() {

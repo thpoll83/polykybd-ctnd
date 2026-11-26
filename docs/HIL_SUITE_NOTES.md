@@ -689,8 +689,8 @@ with `rec.json` (size, start time, label), and the snapshot route answers with t
 complete frame as greyscale PNG; the `X-Camera-Label` header names what records, e.g.
 `CI run #1870 · hil-test · PR #485 · 317d311` (from the job's `GITHUB_*` variables) or
 `UI · Measure phase now`. After each recording three frames (start, middle, end) stay in
-`var/camera_frames/` with `frames.json`, and the Camera tab shows them under "Last
-recording" (`/camera/frames`, `/camera/frames/<0-2>.png`).
+`var/camera_frames/` with `frames.json`, and the Camera tab shows them in the main view
+under **Last run** (`/camera/frames`, `/camera/frames/<0-2>.png`).
 
 The rig lock file holds the holder's PID and program; a refusal names it. If no CI job runs
 and the UI still reports the rig held, `sudo fuser -v var/rig.lock` shows the process.
@@ -744,8 +744,11 @@ Each quad maps the board's view box (millimetres) to the straightened view with 
 homography (`camera.board_to_view`); `camera.board_mapper` adds the lens model, the crop
 and the flips. `camera.led_pixels` finds each LED of the board in a recording, and
 `camera.rectify` cuts a half out as a straight, top-down image, for checks per LED.
-**Flat halves** in the Camera tab does the same in the browser on the live image: each half
-straightened to the board's millimetres, image-left half first, PCB outline on top.
+The Camera tab's main view switches between **Camera** (the live image), **Flat halves**
+and **Last run** (the three frames above). Flat halves does what `rectify` does, in the
+browser on the live image: each half straightened to the board's millimetres, image-left
+half first, PCB outline on top. It is offered once outlines are saved; Last run once a
+recording left frames.
 
 The outlines come from the KiCad boards. Regenerate them after a board change:
 

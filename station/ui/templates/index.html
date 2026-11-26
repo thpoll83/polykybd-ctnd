@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=21">
+  <link rel="stylesheet" href="/static/style.css?v=22">
 </head>
 <body data-status="idle">
   <header>
@@ -106,14 +106,25 @@
           <div class="camera-handle" id="camera-handle-right-1" hidden></div>
           <div class="camera-handle" id="camera-handle-right-2" hidden></div>
           <div class="camera-handle" id="camera-handle-right-3" hidden></div>
+          <!-- "Last run": three frames of the last recording, with what recorded it. -->
+          <div id="camera-lastrun" hidden>
+            <p id="phase-frames-label"></p>
+            <div id="phase-frames"></div>
+          </div>
         </div>
         <p id="camera-msg">Loading camera…</p>
         <p id="camera-sharp" title="Variance of the Laplacian of the snapshot. Turn the lens until the number peaks; keep the camera and the scene still meanwhile."></p>
         <div class="button-row camera-buttons" id="camera-view-buttons">
           <button class="btn btn-gray btn-sm" onclick="refreshCamera()">&#x21BB; Refresh</button>
           <label class="chk chk-sm"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (2 s)</label>
-          <label class="chk chk-sm" id="camera-flat-label" hidden
-                 title="Each half cut out through its outline and straightened to the board's size"><input type="checkbox" id="camera-flat" onchange="flatToggled()"> Flat halves</label>
+          <!-- What the main view shows: the camera, the halves straightened, or the last run's frames. -->
+          <div class="view-switch" id="camera-mode" role="group" aria-label="Camera view">
+            <button class="btn btn-sm on" data-mode="live" aria-pressed="true" onclick="setViewMode('live')">Camera</button>
+            <button class="btn btn-sm" data-mode="flat" id="mode-flat" aria-pressed="false" hidden onclick="setViewMode('flat')"
+                    title="Each half cut out through its outline and straightened to the board's size">Flat halves</button>
+            <button class="btn btn-sm" data-mode="last" id="mode-last" aria-pressed="false" hidden onclick="setViewMode('last')"
+                    title="Three frames of the last recording (CI or Measure phase now)">Last run</button>
+          </div>
           <button class="btn btn-blue btn-sm" id="btn-adjust-view" onclick="startAdjust()"
                   title="Fit one PCB outline per half on the full camera image">Adjust view</button>
         </div>
@@ -140,11 +151,6 @@
         <p class="chart-legend" id="phase-legend" hidden>
           <span class="lg-master">master</span> <span class="lg-slave">slave</span> brightness over the recording
         </p>
-        <div id="phase-frames-box" hidden>
-          <h3>Last recording</h3>
-          <p id="phase-frames-label"></p>
-          <div id="phase-frames"></div>
-        </div>
         <div id="phase-history-box" hidden>
           <h3>History</h3>
           <div id="phase-history"></div>
@@ -194,6 +200,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=28"></script>
+  <script src="/static/app.js?v=29"></script>
 </body>
 </html>
