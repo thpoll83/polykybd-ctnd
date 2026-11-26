@@ -929,6 +929,8 @@ def camera_info():
                     "quads": ({k: [list(p) for p in q] for k, q in zip(camera.QUAD_SIDES, st.quads)}
                               if st.quads else None),
                     "boards": camera.BOARDS,
+                    "lens_k": st.lens_k, "lens_k_max": camera.LENS_K_MAX,
+                    "sensor_aspect": camera.SENSOR_ASPECT,
                     "view_override": bool(camera.load_view_override())})
 
 
@@ -1430,6 +1432,11 @@ def on_camera_set_view(data):
     if not isinstance(data, dict):
         return
     quads = data.get("quads")
+    lens_k = data.get("lens_k", 0.0)
+    if not isinstance(lens_k, (int, float)) or isinstance(lens_k, bool):
+        emit_log("[ui] camera view not saved: lens_k must be a number")
+        socketio.emit("camera_view", {"ok": False, "error": "lens_k must be a number"}, to=request.sid)
+        return
     if quads is not None:
         # The crop and split line come from the quads (camera.view_from_quads).
         data = {"roi": "", "split_x": 0.5, "quads": quads}
@@ -1439,14 +1446,15 @@ def on_camera_set_view(data):
         socketio.emit("camera_view", {"ok": False, "error": "roi must be text and split_x a number"},
                       to=request.sid)
         return
-    err = camera.save_view_override(roi, float(split_x), quads=quads)
+    err = camera.save_view_override(roi, float(split_x), quads=quads, lens_k=float(lens_k))
     if err:
         emit_log(f"[ui] camera view not saved: {err}")
         socketio.emit("camera_view", {"ok": False, "error": err}, to=request.sid)
         return
     emit_log(f"[ui] camera view saved: roi {camera.SETTINGS.roi or '(none)'}, "
              f"split_x {camera.SETTINGS.split_x:.3f}"
-             + (", one outline per half" if camera.SETTINGS.quads else ""))
+             + (", one outline per half" if camera.SETTINGS.quads else "")
+             + (f", lens k {camera.SETTINGS.lens_k:+.3f}" if camera.SETTINGS.lens_k else ""))
     socketio.emit("camera_view", {"ok": True}, to=request.sid)   # the saving browser only
     socketio.emit("camera_view_changed", {}, skip_sid=request.sid)   # others reload, unless adjusting
 

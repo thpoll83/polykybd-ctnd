@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=19">
+  <link rel="stylesheet" href="/static/style.css?v=21">
 </head>
 <body data-status="idle">
   <header>
@@ -81,6 +81,10 @@
       <div id="camera-panel">
         <div id="camera-frame">
           <img id="camera-img" alt="Live rig camera view">
+          <!-- "Adjust view" with a lens correction: the image straightened. -->
+          <canvas id="camera-undist" hidden></canvas>
+          <!-- The saved outlines' edges on the live view (curved with a lens correction). -->
+          <svg id="camera-curves" hidden></svg>
           <div id="camera-spinner" role="status" aria-label="Loading camera image"></div>
           <div id="camera-split" hidden></div>
           <span class="camera-tag" id="camera-tag-left" hidden></span>
@@ -89,6 +93,11 @@
           <!-- "Adjust view": each board's outline warped into four draggable corners. -->
           <img class="camera-pcb" id="camera-pcb-left" alt="" hidden>
           <img class="camera-pcb" id="camera-pcb-right" alt="" hidden>
+          <!-- "Flat halves": each half straightened to the board's millimetres. -->
+          <div id="camera-flatview" hidden>
+            <div class="flat-half"><canvas id="camera-flat-0"></canvas><img id="camera-flat-pcb-0" alt=""></div>
+            <div class="flat-half"><canvas id="camera-flat-1"></canvas><img id="camera-flat-pcb-1" alt=""></div>
+          </div>
           <div class="camera-handle" id="camera-handle-left-0" hidden></div>
           <div class="camera-handle" id="camera-handle-left-1" hidden></div>
           <div class="camera-handle" id="camera-handle-left-2" hidden></div>
@@ -103,11 +112,16 @@
         <div class="button-row camera-buttons" id="camera-view-buttons">
           <button class="btn btn-gray btn-sm" onclick="refreshCamera()">&#x21BB; Refresh</button>
           <label class="chk chk-sm"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (2 s)</label>
+          <label class="chk chk-sm" id="camera-flat-label" hidden
+                 title="Each half cut out through its outline and straightened to the board's size"><input type="checkbox" id="camera-flat" onchange="flatToggled()"> Flat halves</label>
           <button class="btn btn-blue btn-sm" id="btn-adjust-view" onclick="startAdjust()"
                   title="Fit one PCB outline per half on the full camera image">Adjust view</button>
         </div>
         <!-- "Adjust view": drag the corners of each outline onto its board. -->
         <div class="button-row camera-buttons" id="camera-adjust-buttons" hidden>
+          <label class="lens-slider" title="Wide-angle lens correction: move until the board edges look straight. 0 = none, negative = barrel">Lens
+            <input type="range" id="camera-lens" min="-0.3" max="0.3" step="0.005" value="0" oninput="lensChanged()">
+            <span id="camera-lens-val">0.000</span></label>
           <button class="btn btn-green btn-sm" id="btn-adjust-save" onclick="saveAdjust()" disabled>Save</button>
           <button class="btn btn-amber btn-sm" id="btn-adjust-reset" onclick="resetAdjust()"
                   title="Remove the view set here; config.yaml roi and split_x apply again">Use config.yaml</button>
@@ -116,6 +130,8 @@
       </div>
       <aside id="phase-panel">
         <h2>RGB phase between the halves</h2>
+        <!-- Scrolls on its own, so the measure controls below stay reachable. -->
+        <div id="phase-scroll">
         <div id="phase-last"><p class="placeholder">No measurement yet.</p></div>
         <svg id="phase-chart" viewBox="0 0 300 90" preserveAspectRatio="none" hidden>
           <polyline id="phase-line-master" fill="none" stroke="#4FC3F7" stroke-width="1.5"></polyline>
@@ -132,6 +148,7 @@
         <div id="phase-history-box" hidden>
           <h3>History</h3>
           <div id="phase-history"></div>
+        </div>
         </div>
         <div class="phase-measure">
           <select id="phase-bin" title="The .bin of the build the rig runs; staging it shows the flash cue"><option value="">— .bin of the running build —</option></select>
@@ -177,6 +194,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=27"></script>
+  <script src="/static/app.js?v=28"></script>
 </body>
 </html>

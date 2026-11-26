@@ -729,9 +729,23 @@ quad whose centre lies further left; `split_x` is not used. A quad that covers n
 the recording makes the check SKIP with that reason. Without quads, the check splits the
 image at `split_x` as before.
 
-Each quad maps the board's view box (millimetres) to image pixels with a homography
-(`camera.board_to_image`). `camera.led_pixels` finds each LED of the board in a recording,
-and `camera.rectify` cuts a half out as a straight, top-down image, for checks per LED.
+A wide-angle lens bends straight edges. The **Lens** slider in Adjust view sets
+`lens_k` of a one-parameter radial model (`camera.distort`): a point at radius r from the
+image centre (r = 1 in the corners, measured in the 4:3 sensor proportions) is seen at
+r · (1 + lens_k · r²). Barrel distortion is negative. The slider straightens the editor
+image live; move it until the board edges look straight, then fit the corners. The quads
+are stored in the straightened view, and `lens_k` is saved with them (limited to ±0.3:
+the model folds back at −1/3). The crop is the bounding box of the curved quad edges.
+The analysis straightens each sampled pixel (`camera.undistort`, Newton's method on the
+radius) before it tests which quad holds it. On the live view the saved edges are drawn
+curved; the PCB picture is drawn only without a correction (a CSS warp has straight edges).
+
+Each quad maps the board's view box (millimetres) to the straightened view with a
+homography (`camera.board_to_view`); `camera.board_mapper` adds the lens model, the crop
+and the flips. `camera.led_pixels` finds each LED of the board in a recording, and
+`camera.rectify` cuts a half out as a straight, top-down image, for checks per LED.
+**Flat halves** in the Camera tab does the same in the browser on the live image: each half
+straightened to the board's millimetres, image-left half first, PCB outline on top.
 
 The outlines come from the KiCad boards. Regenerate them after a board change:
 

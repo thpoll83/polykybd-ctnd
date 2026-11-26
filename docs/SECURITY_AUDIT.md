@@ -362,7 +362,9 @@ four `[x, y]` corners each. `camera.parse_quads` accepts exactly the keys `left`
 the save. The quads never reach a command line: the server derives the crop from them and
 validates that like any `roi`, and the analysis uses them only as pixel masks. The worst a
 caller can do is again a bad view, which makes the phase check SKIP. The board outlines
-under `station/ui/static/pcb/` are static files generated from the PolyKybd KiCad boards.
+under `station/ui/static/pcb/` are static files generated from the PolyKybd KiCad boards. `lens_k` (same file, later the same day) is one number, type-checked by the socket
+handler and range-checked by `CameraSettings.from_config` (±0.3); it only changes the
+geometry the analysis computes and never reaches a command line.
 
 The camera snapshot (2026-11-26, later) needs only the camera lock, so it also answers
 during a CI job, and during a recording it serves the recording's newest frame. Two GET

@@ -819,12 +819,21 @@ class QuadTest(unittest.TestCase):
 
     BOARD = {"width_mm": 100.0, "height_mm": 50.0, "leds": [{"ref": "LED1", "x": 25.0, "y": 25.0}]}
 
+    W, H = 220, 140
+
+    def view(self, **extra):
+        # The left quad covers pixels (10, 20)..(210, 120) of a 220 x 140 recording:
+        # 2 px per mm for the 100 x 50 mm board.
+        left = [[10 / self.W, 20 / self.H], [210 / self.W, 20 / self.H],
+                [210 / self.W, 120 / self.H], [10 / self.W, 120 / self.H]]
+        right = [[0.96, 0.9], [0.99, 0.9], [0.99, 0.99], [0.96, 0.99]]
+        return CameraSettings.from_config({"quads": {"left": left, "right": right}, **extra})
+
     def test_homography_maps_the_corners_and_the_leds(self):
-        quad = [(10, 20), (210, 20), (210, 120), (10, 120)]
-        self.assertEqual([(r, round(x, 6), round(y, 6)) for r, x, y in camera.led_pixels(quad, self.BOARD)],
-                         [("LED1", 60.0, 70.0)])
+        got = camera.led_pixels(self.view(), "left", self.BOARD, self.W, self.H)
+        self.assertEqual([(r, round(x, 6), round(y, 6)) for r, x, y in got], [("LED1", 60.0, 70.0)])
         skew = [(12, 7), (190, 30), (170, 140), (5, 110)]
-        hm = camera.board_to_image(skew, self.BOARD)
+        hm = camera.board_to_view(skew, self.BOARD)
         for (bx, by), (ix, iy) in zip([(0, 0), (100, 0), (100, 50), (0, 50)], skew):
             x, y = camera.apply_h(hm, bx, by)
             self.assertAlmostEqual(x, ix, places=6)
@@ -833,14 +842,65 @@ class QuadTest(unittest.TestCase):
             camera.homography([(0, 0), (1, 1), (2, 2), (0, 1)], skew)
 
     def test_rectify_straightens_a_half(self):
-        w, h = 220, 140
-        frame = bytearray(w * h)
-        quad = [(10, 20), (210, 20), (210, 120), (10, 120)]   # 2 px per mm
-        frame[70 * w + 60] = 200                              # the LED at 25, 25 mm
-        ow, oh, out = camera.rectify(bytes(frame), w, h, quad, self.BOARD, px_per_mm=2.0)
+        frame = bytearray(self.W * self.H)
+        frame[70 * self.W + 60] = 200                         # the LED at 25, 25 mm
+        ow, oh, out = camera.rectify(bytes(frame), self.W, self.H, self.view(), "left",
+                                     self.BOARD, px_per_mm=2.0)
         self.assertEqual((ow, oh), (200, 100))
         self.assertEqual(out[50 * ow + 50], 200)              # 25 mm at 2 px per mm
         self.assertEqual(sum(1 for v in out if v), 1)
+
+    def test_lens_model_round_trip_and_barrel_direction(self):
+        for k in (-0.3, -0.12, 0.0, 0.2, 0.3):
+            for p in ((0.5, 0.5), (0.1, 0.2), (0.95, 0.9), (0.0, 1.0)):
+                u = camera.undistort(camera.distort(p, k), k)
+                self.assertAlmostEqual(u[0], p[0], places=6)
+                self.assertAlmostEqual(u[1], p[1], places=6)
+        # Barrel (k < 0): a corner is seen closer to the centre; the centre does not move.
+        self.assertEqual(camera.distort((0.5, 0.5), -0.2), (0.5, 0.5))
+        x, y = camera.distort((1.0, 1.0), -0.2)
+        self.assertAlmostEqual(x, 0.9)
+        self.assertAlmostEqual(y, 0.9)
+        for bad in (-0.31, 0.5):
+            with self.assertRaisesRegex(ValueError, "lens_k"):
+                CameraSettings.from_config({"lens_k": bad})
+
+    def test_lens_k_moves_the_leds_and_the_crop(self):
+        led = camera.led_pixels(self.view(lens_k=-0.2), "left", self.BOARD, self.W, self.H)[0]
+        self.assertGreater(led[1], 60.0)    # left of the centre (110, 70): pulled towards it
+        self.assertAlmostEqual(led[2], 70.0, places=6)   # on the centre row: stays
+        # A quad near the corner: the curved edges are seen inside its corners,
+        # so the crop is smaller than the straight quads' box.
+        q = camera.parse_quads({"left": [[0.0, 0.0], [0.45, 0.0], [0.45, 1.0], [0.0, 1.0]],
+                                "right": [[0.55, 0.0], [1.0, 0.0], [1.0, 1.0], [0.55, 1.0]]})
+        self.assertEqual(camera.view_from_quads(q, CameraSettings())[0], "")
+        roi, _ = camera.view_from_quads(q, CameraSettings(lens_k=-0.2))
+        x, y, w, h = (float(v) for v in roi.split(","))
+        # Corners are seen at 0.1; the middles of the straight edges bow outwards,
+        # to 0.064 (left edge) and 0.036 (top edge).
+        self.assertAlmostEqual(x, 0.064, places=3)
+        self.assertAlmostEqual(y, 0.036, places=3)
+
+    def test_lens_k_is_saved_and_used_by_the_analysis(self):
+        import tempfile
+        from pathlib import Path
+        orig = (camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads, camera.SETTINGS.lens_k)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "camera_view.json"
+            try:
+                self.assertEqual(camera.save_view_override(
+                    "", 0.5, path, quads={"left": LEFT_Q, "right": RIGHT_Q}, lens_k=-0.1), "")
+                self.assertEqual(camera.SETTINGS.lens_k, -0.1)
+                self.assertEqual(camera.load_view_override(path)["lens_k"], -0.1)
+                self.assertIn("lens_k", camera.save_view_override(
+                    "", 0.5, path, quads={"left": LEFT_Q, "right": RIGHT_Q}, lens_k=-0.9))
+            finally:
+                (camera.SETTINGS.roi, camera.SETTINGS.split_x, camera.SETTINGS.quads,
+                 camera.SETTINGS.lens_k) = orig
+        # The synthetic LEDs sit well inside the quads, so a mild correction still measures.
+        s = CameraSettings.from_config({"lens_k": -0.1, "quads": {"left": LEFT_Q, "right": RIGHT_Q}})
+        res = camera.analyse(synth(300.0), s)
+        self.assertAlmostEqual(res.offset_ms, 300.0, delta=6.0)
 
     def test_board_files_match_their_outlines(self):
         import re
