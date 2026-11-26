@@ -356,9 +356,19 @@ let _cameraGen   = 0;      // bumped on open and close; late responses of an old
 let _cameraInfo  = null;   // the /camera/info reply of the open view
 let _cameraText  = '';     // the orientation line, restored after a snapshot error clears
 
+// Drop the last snapshot and hide the overlay, so a reopened view never shows
+// an old image next to "No camera".
+function clearCameraImage() {
+  const img = document.getElementById('camera-img');
+  if (img.src) URL.revokeObjectURL(img.src);
+  img.removeAttribute('src');
+  placeCameraOverlay();   // _cameraInfo is null here, so this hides the line and labels
+}
+
 function openCamera() {
   const gen = ++_cameraGen;
   _cameraInfo = null;
+  clearCameraImage();
   document.getElementById('more-panel').hidden = true;
   document.getElementById('camera-controls').hidden = false;
   document.getElementById('log-panel').hidden = true;
@@ -436,6 +446,7 @@ function closeCamera() {
   _cameraGen++;
   _cameraInfo = null;
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
+  clearCameraImage();
   document.getElementById('camera-controls').hidden = true;
   document.getElementById('camera-panel').hidden = true;
   document.getElementById('log-panel').hidden = false;
