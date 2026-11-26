@@ -119,23 +119,44 @@ class CancelRunTest(unittest.TestCase):
         app._gh_api = self._orig
 
     def _fake(self, answers):
+        """answers: step name ("cancel", "force-cancel", "delete") -> status."""
         calls = []
 
         def fake(path, timeout=10, method="GET"):
-            calls.append(path.rsplit("/", 1)[1])
-            return answers[path.rsplit("/", 1)[1]], {}
+            last = path.rsplit("/", 1)[1]
+            step = "delete" if method == "DELETE" else last
+            calls.append(step)
+            return answers[step], {}
         app._gh_api = fake
         return calls
 
     def test_cancel(self):
         calls = self._fake({"cancel": 202})
-        self.assertEqual(app._cancel_run(7), "cancelled")
+        self.assertTrue(app._cancel_run(7).startswith("cancelled"))
         self.assertEqual(calls, ["cancel"])
 
     def test_409_falls_back_to_force_cancel(self):
         calls = self._fake({"cancel": 409, "force-cancel": 202})
-        self.assertEqual(app._cancel_run(8), "cancelled")
+        self.assertTrue(app._cancel_run(8).startswith("cancelled"))
         self.assertEqual(calls, ["cancel", "force-cancel"])
+
+    def test_409_twice_deletes_the_run(self):
+        # What GitHub answered for all nine stale runs on 2026-11-26.
+        calls = self._fake({"cancel": 409, "force-cancel": 409, "delete": 204})
+        out = app._cancel_run(10)
+        self.assertTrue(out.startswith("deleted"))
+        self.assertIn("cancel 409, force-cancel 409, delete 204", out)
+        self.assertEqual(calls, ["cancel", "force-cancel", "delete"])
+
+    def test_refused_delete_names_every_step(self):
+        self._fake({"cancel": 409, "force-cancel": 409, "delete": 409})
+        self.assertEqual(app._cancel_run(11),
+                         "failed (cancel 409, force-cancel 409, delete 409)")
+
+    def test_other_error_stops_without_delete(self):
+        calls = self._fake({"cancel": 500})
+        self.assertEqual(app._cancel_run(12), "failed (cancel 500)")
+        self.assertEqual(calls, ["cancel"])
 
     def test_missing_permission_is_named(self):
         self._fake({"cancel": 403})

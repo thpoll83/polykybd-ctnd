@@ -712,17 +712,26 @@ _CANCEL_LOCK = threading.Lock()
 
 
 def _cancel_run(run_id) -> str:
-    """Cancel one run; a run GitHub refuses to cancel (409, it never got as
-    far as queuing its jobs) is force-cancelled. Returns a short outcome."""
-    code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/cancel", method="POST")
-    if code == 409:
-        code, _ = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run_id}/force-cancel",
-                          method="POST")
-    if code == 202:
-        return "cancelled"
-    if code in (401, 403, 404):
-        return f"refused ({code}): the token needs Actions: Read and write"
-    return f"failed ({code if code is not None else 'no answer from GitHub'})"
+    """End one stale run: cancel it, force-cancel it on a 409, and delete it
+    when GitHub refuses both with 409. On 2026-11-26 GitHub answered 409 to
+    cancel and force-cancel for all nine stale runs (no jobs, or every job
+    done). Deleting removes the run and its logs; a stale run has none worth
+    keeping. Returns a short outcome with each step's status code."""
+    base = f"/repos/{GITHUB_REPO}/actions/runs/{run_id}"
+    steps = []
+    for what, path, method, ok in (("cancel", "/cancel", "POST", 202),
+                                   ("force-cancel", "/force-cancel", "POST", 202),
+                                   ("delete", "", "DELETE", 204)):
+        code, _ = _gh_api(base + path, method=method)
+        steps.append(f"{what} {code if code is not None else 'no answer'}")
+        if code == ok:
+            return ("cancelled" if method == "POST" else "deleted") + f" ({', '.join(steps)})"
+        if code in (401, 403, 404):
+            return (f"refused ({', '.join(steps)}): the token needs "
+                    "Actions: Read and write")
+        if code != 409:
+            break
+    return f"failed ({', '.join(steps)})"
 
 
 @socketio.on("cancel_stale_runs")
@@ -752,16 +761,16 @@ def on_cancel_stale_runs(_data=None):
             if not stale:
                 emit_log("[ui] no stale runs to cancel")
                 return
-            emit_log(f"[ui] cancelling {len(stale)} stale run(s)…")
+            emit_log(f"[ui] ending {len(stale)} stale run(s) (cancel, else delete)…")
             done = 0
             for run in stale:
                 outcome = _cancel_run(run.get("id"))
-                done += outcome == "cancelled"
+                done += outcome.startswith(("cancelled", "deleted"))
                 emit_log(f"  #{run.get('run_number')} {run.get('name')} "
                          f"({run.get('head_branch')}, {run.get('created_at')}): {outcome}")
                 if outcome.startswith("refused"):
                     break   # the same token fails for every run
-            emit_log(f"[ui] stale runs cancelled: {done} of {len(stale)}")
+            emit_log(f"[ui] stale runs ended: {done} of {len(stale)}")
         finally:
             _CANCEL_LOCK.release()
             socketio.emit("ci_jobs_changed")
