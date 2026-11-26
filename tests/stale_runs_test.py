@@ -129,5 +129,42 @@ class CancelRunTest(unittest.TestCase):
         self.assertIn("Actions: Read and write", app._cancel_run(9))
 
 
+@unittest.skipIf(app is None, "Flask not installed")
+class CiJobOnRigTest(unittest.TestCase):
+    """The UI refuses rig actions while the runner's Runner.Worker runs."""
+
+    def _proc(self, cmdlines):
+        import os
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for pid, cmd in cmdlines.items():
+            os.makedirs(os.path.join(tmp.name, pid))
+            with open(os.path.join(tmp.name, pid, "cmdline"), "wb") as f:
+                f.write(cmd)
+        os.makedirs(os.path.join(tmp.name, "self"))
+        return tmp.name
+
+    def setUp(self):
+        self._orig = dict(app._runner_state)
+        app._runner_state["status"] = "online"
+
+    def tearDown(self):
+        app._runner_state.clear()
+        app._runner_state.update(self._orig)
+
+    def test_worker_process_means_a_job(self):
+        proc = self._proc({"10": b"/home/pi/actions-runner/bin/Runner.Worker\0spawnclient\0"})
+        self.assertTrue(app._ci_job_on_rig(proc))
+
+    def test_listener_alone_is_no_job(self):
+        proc = self._proc({"10": b"/home/pi/actions-runner/bin/Runner.Listener\0run\0"})
+        self.assertFalse(app._ci_job_on_rig(proc))
+
+    def test_github_busy_flag_is_the_fallback(self):
+        app._runner_state["status"] = "busy"
+        self.assertTrue(app._ci_job_on_rig(self._proc({})))
+
+
 if __name__ == "__main__":
     unittest.main()

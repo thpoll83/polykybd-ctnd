@@ -682,6 +682,12 @@ firmware also moves between stagings: two measurements without a reset gave −7
 −346 ms (2026-11-26), the second after the master's USB dropped three times during the
 BEGIN erase. So only a pass after the fix proves it, not the exact number before.
 
+While a CI job runs on the rig (a `Runner.Worker` process exists, or GitHub reports the
+runner busy), the UI refuses Flash, Run Tests, Measure Perf and Measure phase now, and
+the camera snapshot answers 503. The UI's rig lock does not cover the CI runner: on
+2026-11-26 a UI measurement during a HIL job left a staging session open, which failed
+the combos and FW_CHUNK tests, and took the camera from the CI phase check.
+
 Every saved measurement is also appended to `var/camera_phase_history.json` (the last 10,
 without traces): time, source, the firmware version from the staged image, for CI runs the
 commit and branch (`GITHUB_SHA`, `GITHUB_HEAD_REF`/`GITHUB_REF_NAME`), status and offset.

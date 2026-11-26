@@ -142,6 +142,28 @@ def _runner_status() -> str:
     return "offline"
 
 
+def _ci_job_on_rig(proc: str = "/proc") -> bool:
+    """True while the self-hosted runner runs a job on this Pi.
+
+    The runner starts a Runner.Worker process for each job and ends it with the
+    job, so this answers at once; GitHub's busy flag (polled) is the fallback.
+    The UI's rig lock does not cover the CI runner, which is a separate process:
+    a "Measure phase now" during a HIL job (2026-11-26) left a staging session
+    open that failed two CI tests, and took the camera from the CI phase check."""
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        try:
+            with open(os.path.join(proc, pid, "cmdline"), "rb") as f:
+                if b"Runner.Worker" in f.read():
+                    return True
+        except OSError:
+            continue
+    return _runner_state.get("status") == "busy"
+
+
 def _runner_poll_once():
     _runner_state["status"] = _runner_status()
     socketio.emit("runner_status", dict(_runner_state))
@@ -772,7 +794,7 @@ def list_firmware_bins():
     running, note = None, ""
     if _status["value"] not in ("idle", "error"):
         note = f"rig busy ({_status['value']})"
-    elif _runner_state.get("status") == "busy":
+    elif _ci_job_on_rig():
         note = "a CI job is running on the rig"
     elif not _RIG_LOCK.acquire(blocking=False):
         note = "rig busy"
@@ -819,12 +841,14 @@ def camera_history():
 def camera_snapshot():
     """One JPEG from the rig camera, rotated and flipped as config.yaml says.
 
-    Refused while the rig is flashing or testing: a CI run may be recording, and
-    the camera serves one client at a time.
+    Refused while the UI flashes or tests and while a CI job runs: the camera
+    serves one client at a time, and the CI phase check records with it.
     """
     from station import camera
     if _status["value"] not in ("idle", "error"):
         return Response(f"rig busy ({_status['value']})", status=503, mimetype="text/plain")
+    if _ci_job_on_rig():
+        return Response("a CI job is running on the rig", status=503, mimetype="text/plain")
     # ?full=1: the whole field of view, without the ROI, for "Adjust view".
     crop = request.args.get("full") != "1"
     try:
@@ -1069,6 +1093,10 @@ def _run_exclusive(what: str, busy_status: str, body) -> bool:
     operator long gone, and a double-tap would silently start two. The lock is
     released in a ``finally`` inside the worker, so every path frees it,
     exceptions included."""
+    if _ci_job_on_rig():
+        emit_log(f"[ui] a CI job is running on the rig — {what} ignored; "
+                 "try again when the Runner tab shows it finished")
+        return False
     if not _RIG_LOCK.acquire(blocking=False):
         emit_log(f"[ui] rig busy — {what} ignored "
                  "(a flash / test / perf run is already active)")
