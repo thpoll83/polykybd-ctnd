@@ -57,6 +57,39 @@ def synth(delay_ms: float, seconds: float = 8.0, fps: float = 58.0,
     return Recording(width, height, ts, lumas)
 
 
+class StepIntervalTest(unittest.TestCase):
+    """How often each half's LEDs change level, from the camera trace."""
+
+    @staticmethod
+    def staircase(update_ms: float, fps: float = 62.0, seconds: float = 8.0):
+        # The cue's 32 levels over a 2048 ms triangle, held between LED updates
+        # that come every update_ms.
+        ts, vals, t = [], [], 0.0
+        while t < seconds * 1000:
+            shown = (t // update_ms) * update_ms
+            vals.append(float(int(31 * tri(shown))))
+            ts.append(t)
+            t += 1000.0 / fps
+        return ts, vals
+
+    def test_normal_redraw_changes_about_every_level(self):
+        ts, vals = self.staircase(update_ms=8.0)
+        self.assertLess(camera.step_interval_ms(ts, vals), 50.0)
+
+    def test_sparse_redraw_holds_levels_longer(self):
+        ts, vals = self.staircase(update_ms=100.0)
+        self.assertGreater(camera.step_interval_ms(ts, vals), 80.0)
+
+    def test_flat_trace_gives_zero(self):
+        self.assertEqual(camera.step_interval_ms([0.0, 16.0, 32.0], [5.0, 5.0, 5.0]), 0.0)
+
+    def test_judge_reports_the_steps(self):
+        res = camera.PhaseResult(offset_ms=-50.0, correlation=0.99, swing_left=120,
+                                 swing_right=130, frames=480, fps=62,
+                                 step_left_ms=97.0, step_right_ms=32.0)
+        self.assertIn("LED steps L 97 / R 32 ms", camera.judge(res)["info"])
+
+
 class SettingsTest(unittest.TestCase):
     def test_defaults(self):
         s = CameraSettings.from_config({})
