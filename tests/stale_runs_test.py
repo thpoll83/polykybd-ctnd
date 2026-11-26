@@ -290,12 +290,19 @@ class RigJobsTest(unittest.TestCase):
         self.assertEqual([t["tag"] for t in tags], ["HIL suite", "cam", "fw apply"])
         self.assertEqual(tags[0]["status"], "in_progress")
 
-    def test_cached_for_the_same_run_state(self):
-        run = {"id": 1, "run_attempt": 1, "updated_at": "t"}
+    def test_finished_run_cached_for_the_same_state(self):
+        run = {"id": 1, "run_attempt": 1, "updated_at": "t", "status": "completed"}
         app._rig_jobs(run)
         app._rig_jobs(run)
         self.assertEqual(self.calls, 1)
         app._rig_jobs(dict(run, updated_at="t2"))
+        self.assertEqual(self.calls, 2)
+
+    def test_running_run_is_asked_every_time(self):
+        # Its jobs move from queued to running without its updated_at changing.
+        run = {"id": 2, "run_attempt": 1, "updated_at": "t", "status": "in_progress"}
+        app._rig_jobs(run)
+        app._rig_jobs(run)
         self.assertEqual(self.calls, 2)
 
 

@@ -470,6 +470,12 @@ function ciTimes(j) {
   return parts.join(' · ');
 }
 
+const RIG_STATE_ICON = { queued: '⏳', waiting: '⏳', in_progress: '▶', success: '✓',
+                         failure: '✗', timed_out: '⏱', cancelled: '⊘' };
+const RIG_STATE_TEXT = { queued: 'queued', waiting: 'waiting', in_progress: 'running',
+                         success: 'passed', failure: 'failed', timed_out: 'timed out',
+                         cancelled: 'cancelled' };
+
 const CI_RESULT = { success: '✓ Passed', failure: '✗ Failed', cancelled: '⊘ Cancelled',
                     skipped: '⏭ Skipped', timed_out: '⏱ Timed out' };
 
@@ -540,9 +546,13 @@ function renderCiJobs(jobs) {
     const rigEl = document.createElement('span');
     rigEl.className = 'ci-job-rig';
     (j.rig || []).forEach(r => {
+      const state = r.status === 'completed' ? (r.conclusion || 'done') : (r.status || 'unknown');
       const t = document.createElement('span');
-      t.className = 'ci-rig-tag ci-rig-' + (r.status === 'completed' ? (r.conclusion || 'done') : r.status);
-      t.textContent = r.tag;
+      t.className = 'ci-rig-tag ci-rig-' + state;
+      // A symbol as well as the colour, and the state in words for screen readers.
+      t.textContent = `${RIG_STATE_ICON[state] || '•'} ${r.tag}`;
+      t.title = `${r.tag}: ${RIG_STATE_TEXT[state] || state}`;
+      t.setAttribute('aria-label', t.title);
       rigEl.appendChild(t);
     });
     rigEl.hidden = !rigEl.childElementCount;

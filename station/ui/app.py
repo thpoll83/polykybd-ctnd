@@ -706,16 +706,18 @@ RIG_JOB_TAGS = (
     ("Debug probe", ("probe",)),
     ("DOOM", ("DOOM",)),
 )
-_RIG_JOBS_CACHE: dict = {}   # (id, run_attempt, updated_at) -> tags
+_RIG_JOBS_CACHE: dict = {}   # (id, run_attempt, updated_at) -> tags, finished runs only
 
 
 def _rig_jobs(run: dict) -> list[dict]:
     """The run's jobs on the rig (self-hosted), skipped ones left out, as
-    [{"tag", "status", "conclusion"}]. Cached for the run's exact state; a
-    failed query gives [] and is not cached."""
+    [{"tag", "status", "conclusion"}]. Cached only for a finished run, keyed
+    by its exact state: a running run's jobs change without its updated_at
+    changing. A failed query gives [] and is not cached."""
     key = (run.get("id"), run.get("run_attempt"), run.get("updated_at"))
-    if key in _RIG_JOBS_CACHE:
-        return _RIG_JOBS_CACHE[key]
+    cached = _RIG_JOBS_CACHE.get(key)   # get: another request may prune meanwhile
+    if cached is not None:
+        return cached
     _, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs/{run.get('id')}/jobs?per_page=100")
     if data is None:
         return []
@@ -728,7 +730,8 @@ def _rig_jobs(run: dict) -> list[dict]:
         for tag in labels:
             tags.append({"tag": tag, "status": job.get("status"),
                          "conclusion": job.get("conclusion")})
-    _RIG_JOBS_CACHE[key] = tags
+    if run.get("status") == "completed":
+        _RIG_JOBS_CACHE[key] = tags
     return tags
 
 
@@ -752,7 +755,7 @@ def list_ci_jobs():
     shown = {(j["id"], j.get("run_attempt"), j.get("updated_at")) for j in jobs}
     for k in list(_RIG_JOBS_CACHE):
         if k not in shown:
-            del _RIG_JOBS_CACHE[k]
+            _RIG_JOBS_CACHE.pop(k, None)   # another request may have removed it
     return jsonify(jobs)
 
 
