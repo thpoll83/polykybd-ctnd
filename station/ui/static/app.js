@@ -1139,6 +1139,7 @@ function adjustHint() {
 function startAdjust() {
   if (!_cameraInfo) return;
   setViewMode('live');   // the editor works on the camera image
+  document.getElementById('camera-mode').style.visibility = 'hidden';   // keeps the layout
   _adjust = { quads: initialQuads(_cameraInfo), k: _cameraInfo.lens_k || 0, drag: null, ready: false };
   const lens = document.getElementById('camera-lens');
   lens.min = -(_cameraInfo.lens_k_max || 0.3); lens.max = _cameraInfo.lens_k_max || 0.3;
@@ -1185,6 +1186,7 @@ function drawStraightened() {
 
 function endAdjust() {
   _adjust = null;
+  document.getElementById('camera-mode').style.visibility = '';
   document.getElementById('camera-undist').hidden = true;
   document.getElementById('camera-adjust-buttons').hidden = true;
   document.getElementById('camera-view-buttons').hidden = false;

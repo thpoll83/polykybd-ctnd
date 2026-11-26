@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=22">
+  <link rel="stylesheet" href="/static/style.css?v=23">
 </head>
 <body data-status="idle">
   <header>
@@ -79,6 +79,15 @@
     <!-- ── Camera: live view, last phase result, measure now ── -->
     <section class="tab-panel" id="tab-camera" role="tabpanel" aria-labelledby="tabbtn-camera" hidden>
       <div id="camera-panel">
+        <div id="camera-stage">
+          <!-- What the main view shows: the camera, the halves straightened, or the last run's frames. -->
+          <div class="view-switch" id="camera-mode" role="group" aria-label="Camera view">
+            <button class="btn btn-sm on" data-mode="live" aria-pressed="true" onclick="setViewMode('live')">Camera</button>
+            <button class="btn btn-sm" data-mode="flat" id="mode-flat" aria-pressed="false" hidden onclick="setViewMode('flat')"
+                    title="Each half cut out through its outline and straightened to the board's size">Flat halves</button>
+            <button class="btn btn-sm" data-mode="last" id="mode-last" aria-pressed="false" hidden onclick="setViewMode('last')"
+                    title="Three frames of the last recording (CI or Measure phase now)">Last run</button>
+          </div>
         <div id="camera-frame">
           <img id="camera-img" alt="Live rig camera view">
           <!-- "Adjust view" with a lens correction: the image straightened. -->
@@ -112,19 +121,12 @@
             <div id="phase-frames"></div>
           </div>
         </div>
+        </div>
         <p id="camera-msg">Loading camera…</p>
         <p id="camera-sharp" title="Variance of the Laplacian of the snapshot. Turn the lens until the number peaks; keep the camera and the scene still meanwhile."></p>
         <div class="button-row camera-buttons" id="camera-view-buttons">
           <button class="btn btn-gray btn-sm" onclick="refreshCamera()">&#x21BB; Refresh</button>
           <label class="chk chk-sm"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (2 s)</label>
-          <!-- What the main view shows: the camera, the halves straightened, or the last run's frames. -->
-          <div class="view-switch" id="camera-mode" role="group" aria-label="Camera view">
-            <button class="btn btn-sm on" data-mode="live" aria-pressed="true" onclick="setViewMode('live')">Camera</button>
-            <button class="btn btn-sm" data-mode="flat" id="mode-flat" aria-pressed="false" hidden onclick="setViewMode('flat')"
-                    title="Each half cut out through its outline and straightened to the board's size">Flat halves</button>
-            <button class="btn btn-sm" data-mode="last" id="mode-last" aria-pressed="false" hidden onclick="setViewMode('last')"
-                    title="Three frames of the last recording (CI or Measure phase now)">Last run</button>
-          </div>
           <button class="btn btn-blue btn-sm" id="btn-adjust-view" onclick="startAdjust()"
                   title="Fit one PCB outline per half on the full camera image">Adjust view</button>
         </div>
