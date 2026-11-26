@@ -382,7 +382,8 @@ function showTab(name) {
   if (name === 'camera') openCamera();
   if (name === 'runner') {
     fetchCiJobs();
-    _ciJobsTimer = setInterval(fetchCiJobs, 30000);
+    let ticks = 0;   // poll GitHub every 30 s, redraw the times every 5 s
+    _ciJobsTimer = setInterval(() => { if (++ticks % 6 === 0) fetchCiJobs(); else renderCiJobs(); }, 5000);
   }
 }
 
@@ -396,26 +397,81 @@ function fetchCiJobs() {
     });
 }
 
+// Times in the Runner tab: when a run came in, when it started (with the
+// wait), and how long it took (still counting while it runs). Finished runs
+// show their result. Re-rendered every 5 s from the last /ci-jobs reply, so the
+// running time moves between the 30 s polls.
+let _ciJobs = [];
+
+function fmtTime(iso) {
+  if (!iso) return '–';
+  const d = new Date(iso);
+  const now = new Date();
+  const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === now.toDateString() ? t
+    : `${d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} ${t}`;
+}
+
+function fmtDuration(ms) {
+  if (!(ms >= 0)) return '–';
+  const s = Math.round(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+function ciTimes(j) {
+  const now = Date.now();
+  const created = j.created_at ? Date.parse(j.created_at) : NaN;
+  const started = j.run_started_at ? Date.parse(j.run_started_at) : NaN;
+  const ended = j.updated_at ? Date.parse(j.updated_at) : NaN;
+  const parts = [`in ${fmtTime(j.created_at)}`];
+  if (j.status === 'queued') {
+    parts.push(`waiting ${fmtDuration(now - created)}`);
+  } else {
+    parts.push(`started ${fmtTime(j.run_started_at)}` +
+               (started > created ? ` (waited ${fmtDuration(started - created)})` : ''));
+    parts.push(j.status === 'completed' ? `took ${fmtDuration(ended - started)}`
+                                        : `running ${fmtDuration(now - started)}`);
+  }
+  return parts.join(' · ');
+}
+
+const CI_RESULT = { success: '✓ Passed', failure: '✗ Failed', cancelled: '⊘ Cancelled',
+                    skipped: '⏭ Skipped', timed_out: '⏱ Timed out' };
+
 function renderCiJobs(jobs) {
+  if (Array.isArray(jobs)) _ciJobs = jobs;
   const list = document.getElementById('ci-jobs-list');
   list.replaceChildren();
-  if (!jobs.length) {
+  if (!_ciJobs.length) {
     const msg = document.createElement('p');
     msg.className = 'no-jobs';
-    msg.textContent = 'No scheduled or running CI jobs.';
+    msg.textContent = 'No scheduled, running or recent CI jobs.';
     list.appendChild(msg);
     return;
   }
   const frag = document.createDocumentFragment();
-  jobs.forEach(j => {
+  let finishedHeader = false;
+  _ciJobs.forEach(j => {
     const running = j.status === 'in_progress';
+    const finished = j.status === 'completed';
+    if (finished && !finishedHeader) {
+      const h = document.createElement('p');
+      h.className = 'ci-jobs-heading';
+      h.textContent = 'Recently finished';
+      frag.appendChild(h);
+      finishedHeader = true;
+    }
 
     const card = document.createElement('div');
-    card.className = `ci-job ${running ? 'ci-job-running' : 'ci-job-queued'}`;
+    const result = finished ? (j.conclusion || 'unknown') : '';
+    card.className = 'ci-job ' + (running ? 'ci-job-running'
+      : finished ? `ci-job-done ci-result-${result}` : 'ci-job-queued');
 
     const iconEl = document.createElement('span');
     iconEl.className = 'ci-job-icon';
-    iconEl.textContent = running ? '▶' : '⏳';
+    iconEl.textContent = running ? '▶' : finished ? (result === 'success' ? '✓' : result === 'failure' ? '✗' : '•') : '⏳';
 
     const bodyEl = document.createElement('span');
     bodyEl.className = 'ci-job-body';
@@ -428,11 +484,15 @@ function renderCiJobs(jobs) {
     metaEl.className = 'ci-job-meta';
     metaEl.textContent = `${j.event ?? ''} · ${j.head_branch ?? ''}`;
 
+    const timeEl = document.createElement('span');
+    timeEl.className = 'ci-job-times';
+    timeEl.textContent = ciTimes(j);
+
     const labelEl = document.createElement('span');
     labelEl.className = 'ci-job-label';
-    labelEl.textContent = running ? 'Running' : 'Queued';
+    labelEl.textContent = running ? 'Running' : finished ? (CI_RESULT[result] || result) : 'Queued';
 
-    bodyEl.append(nameEl, metaEl);
+    bodyEl.append(nameEl, metaEl, timeEl);
     card.append(iconEl, bodyEl, labelEl);
     frag.appendChild(card);
   });
@@ -454,7 +514,14 @@ function clearCameraImage() {
   const img = document.getElementById('camera-img');
   if (img.src) URL.revokeObjectURL(img.src);
   img.removeAttribute('src');
+  setCameraLoading(true);
   placeCameraOverlay();   // _cameraInfo is null here, so this hides the line and labels
+}
+
+// No image yet: hide the img (an img without a picture draws a broken-image
+// icon) and show the spinner in its place.
+function setCameraLoading(loading) {
+  document.getElementById('camera-frame').dataset.loading = loading ? 'true' : 'false';
 }
 
 function openCamera() {
@@ -462,6 +529,7 @@ function openCamera() {
   _cameraInfo = null;
   clearCameraImage();
   loadPhaseLast();
+  loadPhaseBins();
   _sharpPeak = 0;
   document.getElementById('camera-sharp').textContent = '';
   const msg = document.getElementById('camera-msg');
@@ -470,7 +538,7 @@ function openCamera() {
     .then(r => r.json())
     .then(info => {
       if (gen !== _cameraGen) return;   // the view was closed or reopened meanwhile
-      if (!info.available) { msg.textContent = 'No camera: ' + info.detail; return; }
+      if (!info.available) { msg.textContent = 'No camera: ' + info.detail; setCameraLoading(false); return; }
       _cameraInfo = info;
       const master = 'MASTER (USB)', slave = 'SLAVE';
       document.getElementById('camera-tag-left').textContent  = info.master_on_left ? master : slave;
@@ -683,6 +751,10 @@ function showSharpness() {
 
 document.getElementById('camera-img').addEventListener('load', placeCameraOverlay);
 document.getElementById('camera-img').addEventListener('load', showSharpness);
+document.getElementById('camera-img').addEventListener('load', () => setCameraLoading(false));
+// The image box changes size after load (the sharpness line appears below it,
+// the log drawer opens): place the split line and labels again each time.
+if (window.ResizeObserver) new ResizeObserver(() => placeCameraOverlay()).observe(document.getElementById('camera-img'));
 window.addEventListener('resize', placeCameraOverlay);
 
 /* ── Adjust view ──
@@ -866,21 +938,46 @@ socket.on('camera_view', ({ ok, error }) => {
   if (_currentTab === 'camera') { closeCamera(); openCamera(); }
 });
 
+/* The .bin list for "Measure phase now": newest first, each with the firmware
+   version built into it and its date. When the rig was idle, the server also
+   asked the keyboard which version it runs; matching images are marked ✓ and
+   the newest one is preselected (the measurement refuses other versions). */
+function loadPhaseBins() {
+  const sel = document.getElementById('phase-bin');
+  const note = document.getElementById('phase-bin-note');
+  const prev = sel.value;
+  fetch('/firmware/bins')
+    .then(r => r.json())
+    .then(({ bins, running, running_note }) => {
+      sel.replaceChildren();
+      const first = document.createElement('option');
+      first.value = '';
+      first.textContent = bins.length ? '— .bin of the running build —' : '— no .bin in firmware/ —';
+      sel.appendChild(first);
+      let pick = '';
+      bins.forEach(b => {
+        const match = running && b.fw === running;
+        const opt = document.createElement('option');
+        opt.value = b.name;
+        opt.textContent = `${match ? '✓ ' : ''}${b.fw || 'unknown version'} · ${fmtTime(b.mtime)} · ${b.name}`;
+        if (running && !match) opt.className = 'bin-other';
+        sel.appendChild(opt);
+        if (match && !pick) pick = b.name;   // bins are newest first
+      });
+      sel.value = bins.some(b => b.name === prev) ? prev : pick;
+      note.textContent = running
+        ? `Keyboard runs ${running}` + (pick ? ' — matching image selected.' : ' — no image with that version here.')
+        : (running_note ? `Running version unknown: ${running_note}.` : '');
+    })
+    .catch(() => { note.textContent = 'Could not list the .bin files.'; });
+}
+
 function quitApp() { window.close(); }
 
 function refreshFirmware() {
   fetch('/firmware')
     .then(r => r.json())
     .then(files => {
-      const bin = document.getElementById('phase-bin');
-      const prevBin = bin.value;
-      bin.innerHTML = '<option value="">— .bin of the running build —</option>';
-      files.filter(f => f.toLowerCase().endsWith('.bin')).forEach(f => {
-        const opt = document.createElement('option');
-        opt.value = opt.textContent = f;
-        if (f === prevBin) opt.selected = true;
-        bin.appendChild(opt);
-      });
       ['left-fw', 'right-fw'].forEach(id => {
         const sel  = document.getElementById(id);
         const prev = sel.value;

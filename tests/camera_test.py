@@ -484,12 +484,16 @@ class ViewOverrideTest(unittest.TestCase):
         got = {}
         camera._view_lock.acquire()   # a save is between the file write and SETTINGS
         t = threading.Thread(target=lambda: got.setdefault("s", camera.snapshot_settings(camera.SETTINGS)))
-        t.start()
-        t.join(0.2)
-        self.assertTrue(t.is_alive())   # the copy waits instead of reading half an update
-        camera.SETTINGS.roi, camera.SETTINGS.split_x = "0.1,0.3,0.8,0.4", 0.55
-        camera._view_lock.release()
-        t.join(2)
+        try:
+            t.start()
+            t.join(0.2)
+            self.assertTrue(t.is_alive())   # the copy waits instead of reading half an update
+            camera.SETTINGS.roi, camera.SETTINGS.split_x = "0.1,0.3,0.8,0.4", 0.55
+        finally:
+            # Release on every path, so a regression cannot leave the lock held
+            # for the tests that run after this one.
+            camera._view_lock.release()
+            t.join(2)
         self.assertEqual((got["s"].roi, got["s"].split_x), ("0.1,0.3,0.8,0.4", 0.55))
         self.assertIsNot(got["s"], camera.SETTINGS)
 
