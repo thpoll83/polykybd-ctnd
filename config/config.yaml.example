@@ -90,6 +90,8 @@ camera:
   rotation: 0            # 0 or 180
   hflip: false
   vflip: false
+  # roi and split_x can also be set by touch: Camera tab → Adjust view. That
+  # stores them in var/camera_view.json, which overrides the two values here.
   roi: ""               # optional crop "x,y,w,h" as fractions of the full view, e.g.
                          # "0.1,0.3,0.8,0.4" for a wide-angle lens; split_x then refers
                          # to the cropped image. Applies to the live view and recording.

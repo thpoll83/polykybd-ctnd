@@ -110,7 +110,8 @@ class CameraSettings:
             raise ValueError(f"camera.split_x must be between 0.05 and 0.95, not {s.split_x}")
         return s
 
-    def orient_args(self) -> list[str]:
+    def orient_args(self, crop: bool = True) -> list[str]:
+        """rpicam arguments for rotation, flips and (unless crop is False) the ROI."""
         args = []
         if self.rotation:
             args += ["--rotation", str(self.rotation)]
@@ -118,12 +119,29 @@ class CameraSettings:
             args.append("--hflip")
         if self.vflip:
             args.append("--vflip")
-        if self.roi:
+        if self.roi and crop:
             args += ["--roi", self.roi]
         return args
 
 
-def _load_settings(c: dict | None) -> tuple[CameraSettings, str]:
+# The crop and split line set graphically in the UI's Camera tab ("Adjust
+# view"). They override camera.roi and camera.split_x from config.yaml and
+# nothing else. The UI writes the file, the CI runner reads it at import (each
+# run is a new process). A missing or invalid file leaves config.yaml in charge.
+VIEW_OVERRIDE_PATH = Path(__file__).resolve().parent.parent / "var" / "camera_view.json"
+VIEW_KEYS = ("roi", "split_x")
+
+
+def load_view_override(path: Path | None = None) -> dict:
+    path = VIEW_OVERRIDE_PATH if path is None else path
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: d[k] for k in VIEW_KEYS if isinstance(d, dict) and k in d}
+
+
+def _load_settings(c: dict | None, view: dict | None = None) -> tuple[CameraSettings, str]:
     """Settings from config.yaml, or a disabled camera and the reason.
 
     A bad value in the optional camera block must not stop test_runner (which
@@ -131,13 +149,58 @@ def _load_settings(c: dict | None) -> tuple[CameraSettings, str]:
     check then SKIPs with the reason, and the UI shows it.
     """
     try:
-        return CameraSettings.from_config(c), ""
+        s = CameraSettings.from_config(c)
     except (TypeError, ValueError) as exc:
         logging.getLogger("polykybd-ctnd").warning("camera block in config.yaml ignored: %s", exc)
         return CameraSettings(enabled="no"), f"camera block in config.yaml is invalid: {exc}"
+    if view:
+        try:
+            merged = {**(c or {}), **view}
+            v = CameraSettings.from_config(merged)
+            s.roi, s.split_x = v.roi, v.split_x
+        except (TypeError, ValueError) as exc:
+            logging.getLogger("polykybd-ctnd").warning(
+                "camera view override ignored (config.yaml values used): %s", exc)
+    return s, ""
 
 
-SETTINGS, CONFIG_ERROR = _load_settings(CAMERA)
+SETTINGS, CONFIG_ERROR = _load_settings(CAMERA, load_view_override())
+
+
+def save_view_override(roi: str, split_x: float, path: Path | None = None) -> str:
+    """Validate and store the crop and split line from the UI, and apply them to
+    SETTINGS in place (functions take SETTINGS as a default argument, so the
+    object must stay the same). Returns "" or the reason it was refused.
+    """
+    path = VIEW_OVERRIDE_PATH if path is None else path
+    try:
+        v = CameraSettings.from_config({**(CAMERA or {}), "roi": roi, "split_x": split_x})
+    except (TypeError, ValueError) as exc:
+        return str(exc)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps({"roi": v.roi, "split_x": v.split_x}))
+        os.replace(tmp, path)
+    except OSError as exc:
+        return f"could not save the view: {exc}"
+    SETTINGS.roi, SETTINGS.split_x = v.roi, v.split_x
+    return ""
+
+
+def clear_view_override(path: Path | None = None) -> str:
+    """Remove the UI override; config.yaml's roi and split_x apply again."""
+    path = VIEW_OVERRIDE_PATH if path is None else path
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        return f"could not remove the view override: {exc}"
+    s, _ = _load_settings(CAMERA)
+    SETTINGS.roi, SETTINGS.split_x = s.roi, s.split_x
+    return ""
 
 
 def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
@@ -167,8 +230,10 @@ def availability(settings: CameraSettings = SETTINGS) -> tuple[bool, str]:
 
 
 def snapshot_jpeg(settings: CameraSettings = SETTINGS,
-                  width: int = 1296, height: int = 972) -> bytes:
+                  width: int = 1296, height: int = 972, crop: bool = True) -> bytes:
     """One JPEG with the configured rotation and flips, for the UI's camera view.
+    ``crop=False`` ignores the ROI (the UI's "Adjust view" draws the crop on the
+    full image).
 
     Raises RuntimeError when the camera is disabled in config.yaml, busy (a CI
     capture holds it) or absent.
@@ -182,7 +247,7 @@ def snapshot_jpeg(settings: CameraSettings = SETTINGS,
     try:
         r = _run(["rpicam-still", "-n", "-t", "300", "--immediate",
                   "--width", str(width), "--height", str(height),
-                  "-e", "jpg", "-o", "-", *settings.orient_args()], timeout=20)
+                  "-e", "jpg", "-o", "-", *settings.orient_args(crop)], timeout=20)
         if r.returncode != 0 or not r.stdout.startswith(b"\xff\xd8"):
             err = r.stderr.decode(errors="replace").strip().splitlines()
             raise RuntimeError(err[-1] if err else f"rpicam-still exit {r.returncode}")

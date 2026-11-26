@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=1024, initial-scale=1.0">
   <title>PolyKybd CTND</title>
-  <link rel="stylesheet" href="/static/style.css?v=9">
+  <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body data-status="idle">
   <header>
@@ -30,7 +30,6 @@
     <button class="tab" role="tab" id="tabbtn-hardware" aria-controls="tab-hardware" aria-selected="false" data-tab="hardware" onclick="showTab('hardware')">Hardware</button>
     <button class="tab" role="tab" id="tabbtn-camera" aria-controls="tab-camera" aria-selected="false" data-tab="camera"   onclick="showTab('camera')">Camera</button>
     <button class="tab" role="tab" id="tabbtn-runner" aria-controls="tab-runner" aria-selected="false" data-tab="runner"   onclick="showTab('runner')">Runner</button>
-    <button class="tab" role="tab" id="tabbtn-log" aria-controls="tab-log" aria-selected="false" data-tab="log"      onclick="showTab('log')">Log</button>
   </nav>
 
   <main>
@@ -85,12 +84,22 @@
           <div id="camera-split" hidden></div>
           <span class="camera-tag" id="camera-tag-left" hidden></span>
           <span class="camera-tag" id="camera-tag-right" hidden></span>
+          <div id="camera-box" hidden></div>
         </div>
         <p id="camera-msg">Loading camera…</p>
         <p id="camera-sharp" title="Variance of the Laplacian of the snapshot. Turn the lens until the number peaks; keep the camera and the scene still meanwhile."></p>
-        <div class="button-row camera-buttons">
+        <div class="button-row camera-buttons" id="camera-view-buttons">
           <button class="btn btn-gray btn-sm" onclick="refreshCamera()">&#x21BB; Refresh</button>
           <label class="chk chk-sm"><input type="checkbox" id="camera-live" checked onchange="cameraLive()"> Live (2 s)</label>
+          <button class="btn btn-blue btn-sm" id="btn-adjust-view" onclick="startAdjust()"
+                  title="Draw the crop and the split line on the full camera image">Adjust view</button>
+        </div>
+        <!-- "Adjust view": step 1 drag a box around both halves, step 2 tap the gap. -->
+        <div class="button-row camera-buttons" id="camera-adjust-buttons" hidden>
+          <button class="btn btn-green btn-sm" id="btn-adjust-save" onclick="saveAdjust()" disabled>Save</button>
+          <button class="btn btn-amber btn-sm" id="btn-adjust-reset" onclick="resetAdjust()"
+                  title="Remove the view set here; config.yaml roi and split_x apply again">Use config.yaml</button>
+          <button class="btn btn-gray btn-sm" onclick="cancelAdjust()">Cancel</button>
         </div>
       </div>
       <aside id="phase-panel">
@@ -122,21 +131,20 @@
       </div>
     </section>
 
-    <!-- ── Log ── -->
-    <section class="tab-panel" id="tab-log" role="tabpanel" aria-labelledby="tabbtn-log" hidden>
-      <div id="log-panel">
-        <div id="log-output"></div>
-      </div>
-      <div class="button-row">
-        <button class="btn btn-gray" id="btn-copy" onclick="copyLog()">Copy Log</button>
-        <button class="btn btn-gray" onclick="clearLog()">Clear Log</button>
-      </div>
-    </section>
   </main>
 
-  <!-- The newest log line on every tab; tap it to open the Log tab. -->
-  <footer id="log-strip" onclick="showTab('log')" title="Newest log line — tap to open the log">
-    <span id="log-last">—</span>
+  <!-- The log drawer, on every tab. Collapsed it shows the newest line; tap
+       the line or "Log" to open it. Commands that write to the log open it. -->
+  <footer id="log-drawer" data-open="false">
+    <div id="log-bar">
+      <span id="log-last" onclick="toggleLog()" title="Newest log line — tap to open the log">—</span>
+      <button class="btn btn-gray btn-xs" id="btn-copy" onclick="copyLog()">Copy</button>
+      <button class="btn btn-gray btn-xs" onclick="clearLog()">Clear</button>
+      <button class="btn btn-gray btn-xs" id="btn-log-toggle" onclick="toggleLog()" aria-expanded="false">Log ▲</button>
+    </div>
+    <div id="log-panel" hidden>
+      <div id="log-output"></div>
+    </div>
   </footer>
 
   <!-- Full-screen catch layer for the idle screen-blank (see app.js). It rises
@@ -145,6 +153,6 @@
   <div id="wake-overlay" hidden><span class="hint">Touch to wake</span></div>
 
   <script src="/static/socket.io.min.js"></script>
-  <script src="/static/app.js?v=11"></script>
+  <script src="/static/app.js?v=12"></script>
 </body>
 </html>

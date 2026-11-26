@@ -371,6 +371,58 @@ class MeasureNowStagingFailedTest(unittest.TestCase):
         self.assertIn("traces", out)
 
 
+class ViewOverrideTest(unittest.TestCase):
+    """The crop and split line set in the UI's "Adjust view"."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "var" / "camera_view.json"
+        self._orig = (camera.SETTINGS.roi, camera.SETTINGS.split_x)
+
+    def tearDown(self):
+        camera.SETTINGS.roi, camera.SETTINGS.split_x = self._orig
+        self._tmp.cleanup()
+
+    def test_override_wins_over_config_for_roi_and_split_only(self):
+        s, err = camera._load_settings({"roi": "0,0,1,1", "split_x": 0.5, "rotation": 180},
+                                       {"roi": "0.1,0.2,0.8,0.5", "split_x": 0.45})
+        self.assertEqual((s.roi, s.split_x, s.rotation, err), ("0.1,0.2,0.8,0.5", 0.45, 180, ""))
+
+    def test_invalid_override_is_ignored_not_fatal(self):
+        with self.assertLogs("polykybd-ctnd", level="WARNING"):
+            s, err = camera._load_settings({"split_x": 0.5}, {"roi": "0.9,0,0.5,1"})
+        self.assertEqual((s.enabled, s.roi, s.split_x, err), ("auto", "", 0.5, ""))
+
+    def test_load_keeps_only_view_keys(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"roi": "0,0,0.5,0.5", "split_x": 0.4, "enabled": "no"}')
+        self.assertEqual(camera.load_view_override(self.path), {"roi": "0,0,0.5,0.5", "split_x": 0.4})
+        self.path.write_text("not json")
+        self.assertEqual(camera.load_view_override(self.path), {})
+
+    def test_save_applies_in_place_and_clear_restores(self):
+        settings_obj = camera.SETTINGS
+        self.assertEqual(camera.save_view_override("0.1,0.3,0.8,0.4", 0.55, self.path), "")
+        self.assertIs(camera.SETTINGS, settings_obj)   # default arguments keep working
+        self.assertEqual((camera.SETTINGS.roi, camera.SETTINGS.split_x), ("0.1,0.3,0.8,0.4", 0.55))
+        self.assertEqual(camera.load_view_override(self.path)["split_x"], 0.55)
+        self.assertEqual(camera.clear_view_override(self.path), "")
+        self.assertFalse(self.path.exists())
+        self.assertEqual(camera.clear_view_override(self.path), "")   # already gone: fine
+
+    def test_save_rejects_bad_values_and_writes_nothing(self):
+        self.assertIn("roi", camera.save_view_override("0.5,0,0.8,1", 0.5, self.path))
+        self.assertIn("split_x", camera.save_view_override("", 0.99, self.path))
+        self.assertFalse(self.path.exists())
+
+    def test_full_view_snapshot_drops_only_the_roi(self):
+        s = CameraSettings.from_config({"roi": "0.1,0.25,0.8,0.5", "hflip": True})
+        self.assertEqual(s.orient_args(crop=False), ["--hflip"])
+        self.assertIn("--roi", s.orient_args())
+
+
 class RunnerHookTest(unittest.TestCase):
     def setUp(self):
         # rgb_phase_check() saves its result; keep it out of the checkout's var/.

@@ -159,6 +159,7 @@ function resultsRunning(what) {
 function flashSide(side) {
   const sel = document.getElementById(side === 'left' ? 'left-fw' : 'right-fw');
   if (!sel.value) { appendLog(`[ui] select a firmware file for ${side} first`); return; }
+  openLog();
   socket.emit('flash', { side, uf2: sel.value });
 }
 
@@ -173,6 +174,7 @@ function runTests() {
   appendLog(extended ? '[ui] running the EXTENDED suite (slow checks included)…'
                      : '[ui] running the default suite…');
   resultsRunning(extended ? 'Running the extended suite' : 'Running the default suite');
+  openLog();
   socket.emit('run_tests', { left_uf2: left, right_uf2: right, extended });
 }
 
@@ -184,11 +186,13 @@ function runPerf() {
   const right = document.getElementById('right-fw').value;
   if (!left || !right) { appendLog('[ui] select both left and right firmware files first'); return; }
   appendLog('[ui] running performance measurement (needs a POLYKYBD_LOOP_PROFILE build)…');
+  openLog();
   socket.emit('run_perf', { left_uf2: left, right_uf2: right });
 }
 
 function runDiagnostics() {
   appendLog('[ui] running runner diagnostics…');
+  openLog();
   socket.emit('run_diagnostics');
 }
 
@@ -196,6 +200,7 @@ function runDiagnostics() {
    Fixes the common "configured but wedged" case without a reconfigure. */
 function restartRunner() {
   appendLog('[ui] restarting runner service…');
+  openLog();
   socket.emit('restart_runner');
 }
 
@@ -218,6 +223,7 @@ function reregisterRunner() {
   btn.dataset.armed = 'false';
   btn.textContent = btn.dataset.label;
   appendLog('[ui] re-registering runner (stops, reconfigures, restarts it)…');
+  openLog();
   socket.emit('reregister_runner');
 }
 
@@ -246,8 +252,28 @@ function updateStation() {
   badge.textContent = badge.dataset.label;
   badge.title = badge.dataset.prevTitle || badge.title;
   appendLog('[ui] updating station from tracked branch…');
+  openLog();
   socket.emit('update_now');
 }
+
+/* ── Log drawer ──
+   On every tab. Collapsed, it shows the newest line; open, the whole log.
+   Commands that report in the log (flash, tests, perf, diagnostics, runner,
+   update, handedness, phase measurement) open it, so their output is visible
+   without leaving the tab. */
+function setLogOpen(open) {
+  const drawer = document.getElementById('log-drawer');
+  drawer.dataset.open = open ? 'true' : 'false';
+  document.getElementById('log-panel').hidden = !open;
+  const btn = document.getElementById('btn-log-toggle');
+  btn.textContent = open ? 'Log ▼' : 'Log ▲';
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
+  placeCameraOverlay();   // the camera image shrinks or grows with the drawer
+}
+
+function openLog() { setLogOpen(true); }
+function toggleLog() { setLogOpen(document.getElementById('log-drawer').dataset.open !== 'true'); }
 
 function clearLog() {
   logEl.textContent = '';
@@ -324,6 +350,7 @@ function toggleUsb(side) {
    "Set USB = Left" fixes a left half that shows up as "right". */
 function setHandedness(masterIsLeft) {
   appendLog(`[ui] setting handedness: USB/master half = ${masterIsLeft ? 'LEFT' : 'RIGHT'} — keyboard will reboot…`);
+  openLog();
   socket.emit('set_handedness', { master_is_left: masterIsLeft });
 }
 
@@ -335,13 +362,13 @@ let _ciJobsTimer = null;
    the kiosk returns to it); storage can throw in a locked-down profile, so
    every access is guarded. Entering a tab starts what it polls, leaving it
    stops that again. */
-const TABS = ['test', 'hardware', 'camera', 'runner', 'log'];
+const TABS = ['test', 'hardware', 'camera', 'runner'];
 let _currentTab = null;
 
 function showTab(name) {
   if (!TABS.includes(name)) name = 'test';
   if (name === _currentTab) return;
-  if (_currentTab === 'camera') closeCamera();
+  if (_currentTab === 'camera') { if (_adjust) cancelAdjust(); closeCamera(); }
   if (_currentTab === 'runner') { clearInterval(_ciJobsTimer); _ciJobsTimer = null; }
   TABS.forEach(t => {
     document.getElementById('tab-' + t).hidden = t !== name;
@@ -357,7 +384,6 @@ function showTab(name) {
     fetchCiJobs();
     _ciJobsTimer = setInterval(fetchCiJobs, 30000);
   }
-  if (name === 'log') logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
 }
 
 function fetchCiJobs() {
@@ -463,6 +489,14 @@ function openCamera() {
 // Put the split line and the labels on the PAINTED image. object-fit: contain
 // can leave bars at the sides or top, so split_x is a fraction of the painted
 // width, not of the img box.
+// The painted image inside the img box (object-fit: contain), in frame pixels.
+function paintedRect(img) {
+  const scale = Math.min(img.clientWidth / img.naturalWidth, img.clientHeight / img.naturalHeight);
+  const pw = img.naturalWidth * scale, ph = img.naturalHeight * scale;
+  return { x0: img.offsetLeft + (img.clientWidth - pw) / 2,
+           y0: img.offsetTop + (img.clientHeight - ph) / 2, pw, ph };
+}
+
 function placeCameraOverlay() {
   const img = document.getElementById('camera-img');
   const split = document.getElementById('camera-split');
@@ -470,11 +504,10 @@ function placeCameraOverlay() {
   const tagR = document.getElementById('camera-tag-right');
   const show = !!(_cameraInfo && img.naturalWidth && img.clientWidth);
   [split, tagL, tagR].forEach(el => { el.hidden = !show; });
+  if (_adjust) { drawAdjust(); return; }
+  document.getElementById('camera-box').hidden = true;
   if (!show) return;
-  const scale = Math.min(img.clientWidth / img.naturalWidth, img.clientHeight / img.naturalHeight);
-  const pw = img.naturalWidth * scale, ph = img.naturalHeight * scale;
-  const x0 = img.offsetLeft + (img.clientWidth - pw) / 2;
-  const y0 = img.offsetTop + (img.clientHeight - ph) / 2;
+  const { x0, y0, pw, ph } = paintedRect(img);
   split.style.left = (x0 + _cameraInfo.split_x * pw) + 'px';
   split.style.top = y0 + 'px';
   split.style.height = ph + 'px';
@@ -490,20 +523,22 @@ function refreshCamera() {
   const gen = _cameraGen;
   const img = document.getElementById('camera-img');
   const msg = document.getElementById('camera-msg');
-  fetch('/camera/snapshot.jpg?t=' + Date.now())
+  const full = _adjust ? '&full=1' : '';
+  fetch('/camera/snapshot.jpg?t=' + Date.now() + full)
     .then(r => r.ok ? r.blob() : r.text().then(t => { throw new Error(t); }))
     .then(b => {
       if (gen !== _cameraGen) return;
       if (img.src) URL.revokeObjectURL(img.src);
       img.src = URL.createObjectURL(b);
-      if (_cameraText) msg.textContent = _cameraText;   // clear an earlier "busy" error
+      if (_adjust) msg.textContent = adjustHint();
+      else if (_cameraText) msg.textContent = _cameraText;   // clear an earlier "busy" error
     })
     .catch(e => { if (gen === _cameraGen) msg.textContent = 'Snapshot: ' + e.message; });
 }
 
 function cameraLive() {
   if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
-  if (_cameraInfo && document.getElementById('camera-live').checked) {
+  if (_cameraInfo && !_adjust && document.getElementById('camera-live').checked) {
     _cameraTimer = setInterval(refreshCamera, 2000);
   }
 }
@@ -587,6 +622,7 @@ function measurePhase() {
   const sel = document.getElementById('phase-bin');
   if (!sel.value) { appendLog('[ui] select the .bin of the running build first'); return; }
   appendLog('[ui] measuring the RGB phase (HID stage + camera, no apply)…');
+  openLog();
   socket.emit('measure_phase', { bin: sel.value });
 }
 
@@ -637,6 +673,151 @@ function showSharpness() {
 document.getElementById('camera-img').addEventListener('load', placeCameraOverlay);
 document.getElementById('camera-img').addEventListener('load', showSharpness);
 window.addEventListener('resize', placeCameraOverlay);
+
+/* ── Adjust view ──
+   Set camera.roi and camera.split_x by touch. The full (uncropped) image is
+   shown; step 1: drag a box around both halves; step 2: tap the gap between
+   them. Save sends both to the server, which validates them and stores them in
+   var/camera_view.json (they override config.yaml's roi and split_x). All
+   coordinates are fractions of the full image; split_x is converted to a
+   fraction of the cropped image, which is what the phase check uses. */
+let _adjust = null;   // { step: 'box'|'split', box: [x, y, w, h], split: x (full-image fraction), drag }
+
+function fullViewFromInfo(info) {
+  let box = [0, 0, 1, 1];
+  if (info.roi) {
+    const v = info.roi.split(',').map(Number);
+    if (v.length === 4 && v.every(n => isFinite(n))) box = v;
+  }
+  return { box, split: box[0] + info.split_x * box[2] };
+}
+
+function adjustHint() {
+  if (!_adjust) return '';
+  return _adjust.step === 'box'
+    ? 'Step 1 of 2: drag a box around both halves (full camera view shown).'
+    : 'Step 2 of 2: tap the gap between the halves. Drag again to redraw the box.';
+}
+
+function startAdjust() {
+  if (!_cameraInfo) return;
+  const v = fullViewFromInfo(_cameraInfo);
+  _adjust = { step: 'box', box: v.box, split: v.split, drag: null };
+  if (_cameraTimer) { clearInterval(_cameraTimer); _cameraTimer = null; }
+  document.getElementById('camera-view-buttons').hidden = true;
+  document.getElementById('camera-adjust-buttons').hidden = false;
+  document.getElementById('btn-adjust-reset').disabled = !_cameraInfo.view_override;
+  document.getElementById('btn-adjust-save').disabled = true;
+  document.getElementById('camera-msg').textContent = adjustHint();
+  refreshCamera();
+}
+
+function endAdjust() {
+  _adjust = null;
+  document.getElementById('camera-adjust-buttons').hidden = true;
+  document.getElementById('camera-view-buttons').hidden = false;
+  document.getElementById('camera-box').hidden = true;
+}
+
+function cancelAdjust() {
+  endAdjust();
+  if (_currentTab === 'camera') { closeCamera(); openCamera(); }
+}
+
+function drawAdjust() {
+  const img = document.getElementById('camera-img');
+  const boxEl = document.getElementById('camera-box');
+  const split = document.getElementById('camera-split');
+  ['camera-tag-left', 'camera-tag-right'].forEach(id => { document.getElementById(id).hidden = true; });
+  if (!img.naturalWidth || !img.clientWidth) { boxEl.hidden = split.hidden = true; return; }
+  const { x0, y0, pw, ph } = paintedRect(img);
+  const [bx, by, bw, bh] = _adjust.box;
+  boxEl.hidden = false;
+  boxEl.style.left = (x0 + bx * pw) + 'px';
+  boxEl.style.top = (y0 + by * ph) + 'px';
+  boxEl.style.width = (bw * pw) + 'px';
+  boxEl.style.height = (bh * ph) + 'px';
+  split.hidden = _adjust.step !== 'split';
+  split.style.left = (x0 + _adjust.split * pw) + 'px';
+  split.style.top = (y0 + by * ph) + 'px';
+  split.style.height = (bh * ph) + 'px';
+  split.style.bottom = 'auto';
+}
+
+// Pointer position as a fraction of the full image, clamped to it.
+function imageFraction(e) {
+  const img = document.getElementById('camera-img');
+  const frame = document.getElementById('camera-frame').getBoundingClientRect();
+  const { x0, y0, pw, ph } = paintedRect(img);
+  const fx = (e.clientX - frame.left - x0) / pw, fy = (e.clientY - frame.top - y0) / ph;
+  return [Math.min(1, Math.max(0, fx)), Math.min(1, Math.max(0, fy))];
+}
+
+function splitValid() {
+  const [bx, , bw] = _adjust.box;
+  const rel = (_adjust.split - bx) / bw;
+  return rel > 0.05 && rel < 0.95;
+}
+
+const _frame = document.getElementById('camera-frame');
+_frame.addEventListener('pointerdown', e => {
+  if (!_adjust || !document.getElementById('camera-img').naturalWidth) return;
+  e.preventDefault();
+  _frame.setPointerCapture(e.pointerId);
+  _adjust.drag = { start: imageFraction(e), moved: false };
+});
+_frame.addEventListener('pointermove', e => {
+  if (!_adjust || !_adjust.drag) return;
+  const [sx, sy] = _adjust.drag.start, [x, y] = imageFraction(e);
+  if (Math.abs(x - sx) < 0.02 && Math.abs(y - sy) < 0.02 && !_adjust.drag.moved) return;
+  _adjust.drag.moved = true;
+  _adjust.box = [Math.min(sx, x), Math.min(sy, y), Math.abs(x - sx), Math.abs(y - sy)];
+  drawAdjust();
+});
+_frame.addEventListener('pointerup', e => {
+  if (!_adjust || !_adjust.drag) return;
+  const moved = _adjust.drag.moved;
+  _adjust.drag = null;
+  if (moved) {
+    // A box smaller than 10 % of the view either way is a mis-touch: keep step 1.
+    if (_adjust.box[2] < 0.1 || _adjust.box[3] < 0.1) { _adjust.step = 'box'; }
+    else {
+      _adjust.step = 'split';
+      _adjust.split = _adjust.box[0] + _adjust.box[2] / 2;
+    }
+  } else if (_adjust.step === 'split') {
+    _adjust.split = imageFraction(e)[0];
+  }
+  document.getElementById('btn-adjust-save').disabled = !(_adjust.step === 'split' && splitValid());
+  document.getElementById('camera-msg').textContent = adjustHint() +
+    (_adjust.step === 'split' && !splitValid() ? ' The line must lie inside the box, away from its edges.' : '');
+  drawAdjust();
+});
+
+function saveAdjust() {
+  if (!_adjust || _adjust.step !== 'split' || !splitValid()) return;
+  const [bx, by, bw, bh] = _adjust.box;
+  const full = bx <= 0.001 && by <= 0.001 && bw >= 0.999 && bh >= 0.999;
+  const r = n => Math.round(n * 1000) / 1000;
+  const roi = full ? '' : [r(bx), r(by), r(Math.min(bw, 1 - bx)), r(Math.min(bh, 1 - by))].join(',');
+  const split_x = r((_adjust.split - bx) / bw);
+  openLog();
+  socket.emit('camera_set_view', { roi, split_x });
+}
+
+function resetAdjust() {
+  openLog();
+  socket.emit('camera_clear_view');
+}
+
+socket.on('camera_view', ({ ok, error }) => {
+  if (!ok) {
+    document.getElementById('camera-msg').textContent = 'Not saved: ' + (error || 'unknown error');
+    return;
+  }
+  endAdjust();
+  if (_currentTab === 'camera') { closeCamera(); openCamera(); }
+});
 
 function quitApp() { window.close(); }
 
