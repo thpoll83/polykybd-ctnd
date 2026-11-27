@@ -1699,8 +1699,14 @@ def test_via_device_indication(raw: RawHID, log: Callable[[str], None]) -> bool:
             needs_restore = True
         if needs_restore:
             try:
-                raw.send(V.rgb_set_request(V.EFFECT, effect0[0]))
-                log(f"  restored effect {effect0[0]}")
+                resp = raw.send(V.rgb_set_request(V.EFFECT, effect0[0]))
+                back = _rgb_get(raw, V.EFFECT)
+                if V.parse_rgb(resp, V.EFFECT) is None or back != effect0:
+                    log(f"  FAIL: restoring effect {effect0[0]} -> "
+                        f"{resp[:4].hex() if resp else None}, read back {back}")
+                    ok = False
+                else:
+                    log(f"  restored effect {effect0[0]}")
             except Exception as e:  # noqa: BLE001 — logged, the test already fails
                 log(f"  FAIL: restoring the effect raised {e!r}")
                 ok = False
