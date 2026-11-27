@@ -12,6 +12,7 @@ from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
 from . import camera
 from . import status_watch
 from . import apply_cue
+from . import cue_checks
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
@@ -356,8 +357,11 @@ class TestRunner:
                 cam_rec = camera.BackgroundRecording() if cam_ok else None
                 if watch is not None:
                     watch.phase = "firmware update (stage+verify)"
+                baseline = None
                 try:
                     with status_watch.paused():   # the cue recording needs the camera
+                        if cam_rec is not None:
+                            baseline = self._screens_now()
                         fw_ok = stage_and_verify(
                             bin_path, self.log,
                             on_begin=cam_rec.start if cam_rec else None)
@@ -370,6 +374,7 @@ class TestRunner:
                          f"firmware update (stage+verify .bin)")
                 results.append(self.rgb_phase_check(cam_rec, cam_why,
                                                     fw=camera.image_fw(bin_path)))
+                results.append(self.staging_cue_check(cam_rec, baseline, cam_why))
 
             # Full HID update INCLUDING apply — extended tier, and the only check
             # that overwrites the running firmware. See firmware_apply_roundtrip.
@@ -424,6 +429,16 @@ class TestRunner:
                 if watch is not None:
                     watch.phase = "restoring the slave image"
                 self.restore_slave_image(right_uf2)
+
+            # A plain HID reboot with the lights off, recorded: report only. Last of
+            # the device checks, because it reboots the board.
+            if tests and any(r.get("status") == "fail" for r in results):
+                self.log("[runner] skipping the reboot cue check — the suite already "
+                         "has a failure to diagnose first")
+            elif tests:
+                if watch is not None:
+                    watch.phase = "reboot cue check"
+                results.append(self.reset_cue_check(console=console_started))
 
             # Only a genuine FAIL fails the run; SKIP / XFAIL / XPASS do not.
             passed = not any(r.get("status") == "fail" for r in results)
@@ -552,6 +567,101 @@ class TestRunner:
                  "the differences between the halves are exact to one sample")
         for line in apply_cue.summary(samples, t_rel):
             self.log(line)
+
+    def _screens_now(self):
+        """{side: display_samples} from one short clip, or None (no outlines,
+        camera busy). Report only."""
+        try:
+            if camera.skip_reason():
+                return None
+            s = camera.snapshot_settings(camera.SETTINGS)
+            boards = {sd: camera.load_board(sd) for sd in cue_checks.SIDES}
+            rec = camera.record(s, seconds=0.3, label={"text": "status displays before staging"},
+                                keep_frames=False)
+            luma = rec.lumas[len(rec.lumas) // 2]
+            return {sd: camera.display_samples(luma, rec.width, rec.height, s, sd, boards[sd])
+                    for sd in cue_checks.SIDES}
+        except Exception as exc:   # report only
+            self.log(f"[cue] no picture of the status displays before staging: {exc}")
+            return None
+
+    def staging_cue_check(self, cam_rec, baseline, unavailable_reason: str) -> dict:
+        """Report only: the cyan cue's start on both halves, and both status
+        displays showing another picture than before BEGIN (station/cue_checks.py)."""
+        name = cue_checks.STAGING_TEST_NAME
+        why = (unavailable_reason if cam_rec is None else camera.skip_reason()
+               or (None if baseline is not None else "no picture before staging"))
+        if why:
+            self.log(f"[test] SKIP: {name} — {why}")
+            return {"name": name, "status": "skip", "reason": why}
+        try:
+            rec = cam_rec.result()
+            s = camera.snapshot_settings(camera.SETTINGS)
+            boards = {sd: camera.load_board(sd) for sd in cue_checks.SIDES}
+            t0 = rec.timestamps_ms[0]
+            led, screens = [], []
+            for t, luma in zip(rec.timestamps_ms, rec.lumas):
+                led.append((t - t0, {sd: camera.half_levels(luma, rec.width, rec.height, s,
+                                                             sd, boards[sd])[0]
+                                     for sd in cue_checks.SIDES}))
+                screens.append({sd: camera.display_samples(luma, rec.width, rec.height, s,
+                                                           sd, boards[sd])
+                                for sd in cue_checks.SIDES})
+        except Exception as exc:
+            self.log(f"[test] SKIP: {name} — camera recording failed: {exc}")
+            return {"name": name, "status": "skip", "reason": f"camera recording failed: {exc}"}
+        result = cue_checks.judge_staging(cue_checks.staging_report(led, screens, baseline))
+        label = {"pass": "PASS", "xfail": "XFAIL"}[result["status"]]
+        self.log(f"[test] {label}: {name} — {result.get('reason') or result['info']}")
+        return result
+
+    def reset_cue_check(self, console: bool = False) -> dict:
+        """Report only: the HID reboot (cmd 43) with the lights off, recorded.
+        Neither half's LEDs may change in the first second, and both status
+        displays go dark (station/cue_checks.py). Reboots the board."""
+        name = cue_checks.RESET_TEST_NAME
+        why = camera.skip_reason()
+        caps = self._device_caps() or {}
+        if not why and (caps.get("protocol") or 0) < 39:
+            why = "needs protocol 39 (VIA lights off)"
+        if why:
+            self.log(f"[test] SKIP: {name} — {why}")
+            return {"name": name, "status": "skip", "reason": why}
+        s = camera.snapshot_settings(camera.SETTINGS)
+        boards = {sd: camera.load_board(sd) for sd in cue_checks.SIDES}
+        try:
+            with status_watch.paused():
+                self._raw.send(bytes([0x07, 0x03, 0x02, 0x00]))   # VIA: effect off (RAM only)
+                time.sleep(0.5)
+                rec_bg = camera.BackgroundRecording(s, seconds=6.0)
+                rec_bg.start()
+                if not rec_bg.wait_ready(apply_cue.READY_S):
+                    rec_bg.cancel()
+                    raise RuntimeError(f"no frame within {apply_cue.READY_S:.0f} s")
+                t_first = time.monotonic()
+                time.sleep(1.5)
+                t_cmd = time.monotonic()
+                self._raw.send(bytes([POLY_CHANNEL, 0x2B]), attempts=1)   # reboot
+                rec = rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
+        except Exception as exc:
+            self.log(f"[test] SKIP: {name} — {exc}")
+            self.wait_for_master_ready()
+            return {"name": name, "status": "skip", "reason": str(exc)}
+        self.wait_for_master_ready()
+        if console:
+            self._reattach_console()
+        t0 = rec.timestamps_ms[0]
+        led, disp = [], []
+        for t, luma in zip(rec.timestamps_ms, rec.lumas):
+            lv = {sd: camera.half_levels(luma, rec.width, rec.height, s, sd, boards[sd])
+                  for sd in cue_checks.SIDES}
+            led.append((t - t0, {sd: lv[sd][0] for sd in lv}))
+            disp.append((t - t0, {sd: lv[sd][1] for sd in lv}))
+        result = cue_checks.judge_reset(
+            cue_checks.reset_report(led, disp, (t_cmd - t_first) * 1000.0))
+        label = {"pass": "PASS", "xfail": "XFAIL"}[result["status"]]
+        self.log(f"[test] {label}: {name} — {result.get('reason') or result['info']}")
+        return result
 
     def rgb_phase_check(self, cam_rec, unavailable_reason: str, fw: str | None = None) -> dict:
         """Judge the camera recording made during HID staging (station/camera.py).
