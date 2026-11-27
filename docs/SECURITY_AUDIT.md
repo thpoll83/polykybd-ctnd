@@ -79,7 +79,7 @@ signing the firmware image alone was not enough.**
 | HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
 | SCAN-6 | 2026-11-23 Aikido on PolyKybdHost: two `yaml.load` calls flagged as unsafe (B506), already `CSafeLoader`/`SafeLoader` on our own specs | host | ✅ checked, not vulnerable; changed to `yaml.safe_load` anyway, host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) |
 | HOST-8 | 2026-11-23 Aikido on PolyKybdHost: Pillow 12.x CVEs (58 listed). Floor is 13.0.0 on Python 3.11+; Python 3.10 cannot install Pillow 13 | host | 🟡 3.11+ fixed once bootstrap's pip install succeeds (a failed install keeps 12.x until a later launch); 3.10 stays on 12.x, accepted and logged at startup. 🔲 `zerofish` pin (12.2.0) not touched |
-| HOST-9 | MCP server for AI assistants (`polyctl mcp`): an assistant can call keyboard tools, and text it read elsewhere can make it call one the user did not ask for (prompt injection) | host | 🟡 accepted + documented (frozen allow-list of 12 tools, no firmware, flash, settings or network method) |
+| HOST-9 | MCP server for AI assistants (`polyctl mcp`): an assistant can call keyboard tools, and text it read elsewhere can make it call one the user did not ask for (prompt injection) | host | 🟡 accepted + documented (off by default behind `mcp_enabled`; frozen allow-list of 12 tools, checked by the MCP server and again by the host; no firmware, flash, settings or network method) |
 
 ---
 
@@ -275,9 +275,19 @@ not move: the server can do only what the same user can already do with `polyctl
 - **What a client asks before a call is the client's choice.** Every write tool has
   `readOnlyHint: false`, and `set_key` has `destructiveHint: true`. A client set to run
   tools without asking runs them.
-- **Accepted:** the maintainer asked for the server (2026-11-27), with `set_key` in the
-  first version. A host setting to turn it off is open question 1 of the plan; today the
-  user turns it off by removing it from the AI client's configuration.
+- **Off by default.** The host setting `mcp_enabled` (Settings > Connections > Allow AI
+  assistants (MCP)) is False. The MCP server names its connection with
+  `client.identify {"client": "mcp"}`, and `ControlServer.dispatch()` then refuses every
+  request on it with `ERR_MCP_DISABLED` while the setting is off. The setting is read on
+  every request. On such a connection the host also checks the allow-list itself
+  (`ControlServer._mcp_refusal`), so a changed MCP server cannot reach a method the
+  allow-list does not name.
+- ⚠️ **The setting gates an honest client, not code that runs as the user.** A
+  connection that does not identify itself (`polyctl`, the tray app) is not gated, and
+  any process that can read the authkey file can open one. That process could already
+  do everything `polyctl` can, so the setting adds no hole and closes none at that level.
+- **Accepted:** the maintainer asked for the server and for the setting (2026-11-27),
+  with `set_key` in the first version.
 
 ### HOST-3 — usage telemetry is a new outbound surface, and it is on by default
 
