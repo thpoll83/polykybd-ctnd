@@ -324,5 +324,57 @@ class RigJobsTest(unittest.TestCase):
         self.assertEqual(self.calls, 2)
 
 
+
+@unittest.skipIf(app is None, "Flask not installed")
+class HiddenRunTest(unittest.TestCase):
+    """A stale run created 14 days ago or earlier is left out of the Runner tab."""
+    DAY = 24 * 3600
+
+    def setUp(self):
+        self._orig = (app._gh_api, app._is_stale, app.GITHUB_REPO, app.time.time)
+
+    def tearDown(self):
+        app._gh_api, app._is_stale, app.GITHUB_REPO, app.time.time = self._orig
+
+    def run_(self, run_id, age_days, stale=True):
+        return {"id": run_id, "status": "queued", "stale": stale,
+                "created_at": _iso(NOW - age_days * self.DAY)}
+
+    def test_boundary(self):
+        app._is_stale = lambda r, now=None: r["stale"]
+        self.assertFalse(app._is_hidden(self.run_(1, 13.9), NOW))
+        self.assertTrue(app._is_hidden(self.run_(2, 14), NOW))
+        self.assertFalse(app._is_hidden(self.run_(3, 30, stale=False), NOW))
+        self.assertFalse(app._is_hidden({"id": 4, "stale": True}, NOW))   # no created_at
+
+    def test_ci_jobs_leaves_old_stale_runs_out(self):
+        runs = {"queued": [self.run_(i, 20) for i in range(9)] + [self.run_(50, 1)]
+                + [self.run_(60 + i, 0.1, stale=False) for i in range(12)],
+                "in_progress": [], "completed": []}
+        asked = []
+
+        def fake(path, timeout=10, method="GET"):
+            if "/jobs" in path:
+                return 200, {"jobs": []}
+            status = path.split("status=")[1].split("&")[0]
+            asked.append(path)
+            return 200, {"workflow_runs": runs[status]}
+        app._gh_api, app.GITHUB_REPO = fake, "o/r"
+        app._is_stale = lambda r, now=None: r.get("stale", False)
+        app.time.time = lambda: NOW
+        with app.app.test_request_context():
+            ids = [j["id"] for j in app.list_ci_jobs().get_json()]
+        self.assertEqual(ids, [50] + list(range(60, 69)))   # 10 shown, none of the old 9
+        self.assertIn("per_page=100", asked[0])
+
+    def test_visible_stops_at_the_limit(self):
+        asked = []
+        app._is_stale = lambda r, now=None: (asked.append(r["id"]), r["stale"])[1]
+        runs = [self.run_(i, 20, stale=(i < 3)) for i in range(50)]
+        shown = app._visible(runs, 4, NOW)
+        self.assertEqual([r["id"] for r in shown], [3, 4, 5, 6])
+        self.assertEqual(asked, list(range(7)))   # nothing after the 4th visible run
+
+
 if __name__ == "__main__":
     unittest.main()
