@@ -515,14 +515,14 @@ class TestRunner:
         rec_bg, s, pause, t_first = cue
         if t_first is None:   # timed out in _apply_cue_start: only end the recorder
             try:
-                rec_bg.result(timeout=apply_cue.RECORD_S + 70)
+                rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
             except Exception:
                 pass
             finally:
                 pause.__exit__(None, None, None)
             return
         try:
-            rec = rec_bg.result(timeout=apply_cue.RECORD_S + 40)
+            rec = rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
             boards = {sd: camera.load_board(sd) for sd in apply_cue.SIDES}
             samples = apply_cue.levels(camera, rec, s, boards)
         except Exception as exc:   # report only

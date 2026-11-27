@@ -12,6 +12,10 @@ the LEDs). The firmware is ``keyboards/polykybd/lib/fw_update/fw_apply.c``
 RECORD_S = 20.0
 LEAD_S = 2.0         # recorded before FW_UP_APPLY
 READY_S = 10.0       # the longest wait for the first frame
+# camera.record() limits each of its waits: 30 s for each of its two camera
+# locks, then rpicam-vid's own timeout of seconds + 30. Waiting longer than their
+# sum means a recorder thread is known to have ended when the wait returns.
+RECORDER_MAX_S = 30 + 30 + RECORD_S + 30
 STEP_MS = 100.0      # one logged sample per STEP_MS
 CHANGE = 8.0         # a change of the LED mean luma that counts (camera levels)
 SIDES = ("left", "right")

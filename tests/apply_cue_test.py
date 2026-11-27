@@ -130,6 +130,17 @@ class CueStartTest(unittest.TestCase):
         self.assertIn("no frame", logs[0])
         self.assertEqual(len(logs), 1)   # no report lines
 
+    def test_the_wait_outlasts_every_wait_in_record(self):
+        """The report waits longer than record() can take, so a recorder thread
+        has ended when the pause is released."""
+        import inspect
+        from station import camera
+        src = inspect.getsource(camera.record)
+        self.assertIn("_lock.acquire(timeout=30)", src)
+        self.assertIn("_acquire_camera(30)", src)
+        self.assertIn("timeout=seconds + 30", src)
+        self.assertGreaterEqual(apply_cue.RECORDER_MAX_S, 30 + 30 + apply_cue.RECORD_S + 30)
+
 
 class RecordReadyTest(unittest.TestCase):
     """camera.record(): ready belongs to this recording, cancel stops a late start."""
