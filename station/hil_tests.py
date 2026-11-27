@@ -1613,26 +1613,40 @@ def test_via_rgb_matrix(raw: RawHID, log: Callable[[str], None]) -> bool:
             return False
         return True
 
+    def restore(vid, value, what):
+        # Each restore on its own: one that raises must not skip the others.
+        try:
+            return set_and_check(vid, value, value, what)
+        except Exception as e:  # noqa: BLE001 — logged, the test already fails
+            log(f"  FAIL: restoring {what} raised {e!r}")
+            return False
+
+    # A target that differs from the saved level, so a firmware that echoes the
+    # write without applying it cannot pass.
+    bright_target = 0 if bright0 else 255
     ok = True
-    ok &= set_and_check(V.EFFECT, (0,), (0,), "effect (off)")
-    ok &= set_and_check(V.EFFECT, (effect0 or 1,), (effect0 or 1,), "effect (on)")
-    ok &= set_and_check(V.BRIGHTNESS, (255,),
-                        (V.brightness_round_trip(255, RIG_RGB_MAX_BRIGHTNESS),), "brightness")
-    ok &= set_and_check(V.SPEED, ((speed0 + 77) & 0xFF,), ((speed0 + 77) & 0xFF,), "speed")
-    ok &= set_and_check(V.COLOR, ((hue0 + 40) & 0xFF, sat0 ^ 0x10),
-                        ((hue0 + 40) & 0xFF, sat0 ^ 0x10), "colour")
-    for req, what in ((bytes([V.ID_CUSTOM_GET_VALUE, V.RGB_MATRIX_CHANNEL, 9, 0, 0]), "value id 9"),
-                      (bytes([V.ID_CUSTOM_GET_VALUE, 2, V.BRIGHTNESS, 0, 0]), "channel 2")):
-        resp = raw.send(req)
-        log(f"  get {what} -> {resp[:5].hex() if resp else None}")
-        if not V.is_unhandled(resp):
-            log("  FAIL: expected id_unhandled (0xff)")
-            ok = False
-    # Restore. The brightness read-back of a value that came from a get is exact.
-    ok &= set_and_check(V.BRIGHTNESS, (bright0,), (bright0,), "brightness (restore)")
-    ok &= set_and_check(V.SPEED, (speed0,), (speed0,), "speed (restore)")
-    ok &= set_and_check(V.COLOR, (hue0, sat0), (hue0, sat0), "colour (restore)")
-    ok &= set_and_check(V.EFFECT, (effect0,), (effect0,), "effect (restore)")
+    try:
+        ok &= set_and_check(V.EFFECT, (0,), (0,), "effect (off)")
+        ok &= set_and_check(V.EFFECT, (effect0 or 1,), (effect0 or 1,), "effect (on)")
+        ok &= set_and_check(V.BRIGHTNESS, (bright_target,),
+                            (V.brightness_round_trip(bright_target, RIG_RGB_MAX_BRIGHTNESS),),
+                            "brightness")
+        ok &= set_and_check(V.SPEED, ((speed0 + 77) & 0xFF,), ((speed0 + 77) & 0xFF,), "speed")
+        ok &= set_and_check(V.COLOR, ((hue0 + 40) & 0xFF, sat0 ^ 0x10),
+                            ((hue0 + 40) & 0xFF, sat0 ^ 0x10), "colour")
+        for req, what in ((bytes([V.ID_CUSTOM_GET_VALUE, V.RGB_MATRIX_CHANNEL, 9, 0, 0]), "value id 9"),
+                          (bytes([V.ID_CUSTOM_GET_VALUE, 2, V.BRIGHTNESS, 0, 0]), "channel 2")):
+            resp = raw.send(req)
+            log(f"  get {what} -> {resp[:5].hex() if resp else None}")
+            if not V.is_unhandled(resp):
+                log("  FAIL: expected id_unhandled (0xff)")
+                ok = False
+    finally:
+        # The brightness read-back of a value that came from a get is exact.
+        ok &= restore(V.BRIGHTNESS, (bright0,), "brightness (restore)")
+        ok &= restore(V.SPEED, (speed0,), "speed (restore)")
+        ok &= restore(V.COLOR, (hue0, sat0), "colour (restore)")
+        ok &= restore(V.EFFECT, (effect0,), "effect (restore)")
     return bool(ok)
 
 
@@ -1640,8 +1654,10 @@ def test_via_uptime(raw: RawHID, log: Callable[[str], None]) -> bool:
     """VIA's uptime (0x02 value 0x01, protocol v39+): two reads 500 ms apart must
     differ by about 500 ms. The runner reset the board earlier in the run, so the
     value is small and far from the 49.7-day wrap."""
-    a = via_values.parse_uptime(raw.send(via_values.uptime_request()))
+    # The timer starts before the first request: the firmware samples its clock
+    # somewhere inside that round trip, so the window must include it.
     t = time.monotonic()
+    a = via_values.parse_uptime(raw.send(via_values.uptime_request()))
     time.sleep(0.5)
     b = via_values.parse_uptime(raw.send(via_values.uptime_request()))
     dt = (time.monotonic() - t) * 1000
@@ -1665,17 +1681,23 @@ def test_via_device_indication(raw: RawHID, log: Callable[[str], None]) -> bool:
         log("  FAIL: no valid 0x08 effect reply")
         return False
     ok = True
-    for i, want_on in ((0, effect0[0] == 0), (1, effect0[0] != 0)):
-        resp = raw.send(V.indication_request(i), attempts=1)
-        now = _rgb_get(raw, V.EFFECT)
-        log(f"  indication {i} -> {resp[:3].hex() if resp else None}, effect now {now}")
-        if not resp or V.is_unhandled(resp) or now is None or (now[0] != 0) != want_on:
-            log(f"  FAIL: expected the matrix {'on' if want_on else 'off'}")
+    try:
+        for i, want_on in ((0, effect0[0] == 0), (1, effect0[0] != 0)):
+            resp = raw.send(V.indication_request(i), attempts=1)
+            now = _rgb_get(raw, V.EFFECT)
+            log(f"  indication {i} -> {resp[:3].hex() if resp else None}, effect now {now}")
+            if not resp or V.is_unhandled(resp) or now is None or (now[0] != 0) != want_on:
+                log(f"  FAIL: expected the matrix {'on' if want_on else 'off'}")
+                ok = False
+                break
+    finally:
+        try:
+            if _rgb_get(raw, V.EFFECT) != effect0:
+                raw.send(V.rgb_set_request(V.EFFECT, effect0[0]))
+                log(f"  restored effect {effect0[0]}")
+        except Exception as e:  # noqa: BLE001 — logged, the test already fails
+            log(f"  FAIL: restoring the effect raised {e!r}")
             ok = False
-            break
-    if _rgb_get(raw, V.EFFECT) != effect0:
-        raw.send(V.rgb_set_request(V.EFFECT, effect0[0]))
-        log(f"  restored effect {effect0[0]}")
     return ok
 
 
