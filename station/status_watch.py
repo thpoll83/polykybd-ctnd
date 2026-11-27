@@ -123,7 +123,7 @@ def camera_sampler(camera, label: str = "status watch") -> Callable[[], dict]:
     boards = {side: camera.load_board(side) for side in SIDES}
 
     def sample() -> dict:
-        rec = camera.record(s, seconds=0.3, label={"text": label})
+        rec = camera.record(s, seconds=0.3, label={"text": label}, keep_frames=False)
         luma = rec.lumas[len(rec.lumas) // 2]
         return {side: camera.half_levels(luma, rec.width, rec.height, s, side, boards[side])
                 for side in SIDES}

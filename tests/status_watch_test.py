@@ -148,6 +148,16 @@ class WatchTest(unittest.TestCase):
             status_watch._active = None
         self.assertEqual(order, ["block", "sample"])
 
+    def test_the_sampler_keeps_its_clips_out_of_the_ui(self):
+        calls = []
+        fake = types.SimpleNamespace(
+            SETTINGS=None, snapshot_settings=lambda s: s, load_board=lambda side: side,
+            record=lambda s, **kw: calls.append(kw) or types.SimpleNamespace(
+                lumas=[b""], width=1, height=1),
+            half_levels=lambda *a: (0.0, 0))
+        status_watch.camera_sampler(fake)()
+        self.assertIs(calls[0]["keep_frames"], False)
+
     def test_paused_without_a_watch_is_a_no_op(self):
         with status_watch.paused():
             pass

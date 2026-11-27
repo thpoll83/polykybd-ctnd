@@ -534,11 +534,13 @@ def _acquire_camera(timeout_s: float):
 
 
 def record(settings: CameraSettings = SETTINGS, seconds: float | None = None,
-           label: dict | None = None) -> Recording:
+           label: dict | None = None, keep_frames: bool = True) -> Recording:
     """Record raw frames to RAM (/dev/shm) and return their Y planes and timestamps.
 
     While it records, LIVE_DIR holds the growing raw file and its label, for
-    live_frame(). Afterwards three frames are kept in FRAMES_DIR (save_frames())."""
+    live_frame(). Afterwards three frames are kept in FRAMES_DIR (save_frames()),
+    unless keep_frames is False: the status watch's short clips must not replace
+    the recording the UI shows."""
     seconds = settings.record_s if seconds is None else seconds
     label = recording_label() if label is None else label
     if not _lock.acquire(timeout=30):
@@ -585,6 +587,8 @@ def record(settings: CameraSettings = SETTINGS, seconds: float | None = None,
         _lock.release()
     n = min(len(lumas), len(ts))
     rec = Recording(settings.width, settings.height, ts[:n], lumas[:n])
+    if not keep_frames:
+        return rec
     try:
         save_frames(rec, label, started)
     except OSError as exc:
