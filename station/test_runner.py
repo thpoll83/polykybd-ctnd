@@ -510,14 +510,15 @@ class TestRunner:
             return None
 
     def _apply_cue_release(self, rec_bg, pause) -> None:
-        """Release the status watch pause once the recorder thread has ended. A
-        recorder still running after the wait (a stalled write before rpicam-vid
-        starts) keeps the pause for the rest of the run: the watch then takes no
-        more samples, which is better than sharing the camera with it."""
+        """Release the status watch pause. A recorder still running after the wait
+        (a stalled write before rpicam-vid starts) first stops the watch's sampling
+        for the rest of the run, so the watch never shares the camera with it."""
         if rec_bg.alive():
+            # An explicit stop, not a held pause: nothing keeps the pause object
+            # referenced, and its finalizer would release the watch's lock.
+            status_watch.stop_sampling()
             self.log("[apply-cue] the recorder is still running; the status watch "
-                     "stays paused for the rest of the run")
-            return
+                     "takes no more samples this run")
         pause.__exit__(None, None, None)
 
     def _apply_cue_report(self, cue, t_apply: float) -> None:

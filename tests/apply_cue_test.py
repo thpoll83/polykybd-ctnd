@@ -145,24 +145,26 @@ class CueStartTest(unittest.TestCase):
         self.assertIn("timeout=seconds + 30", src)
         self.assertGreaterEqual(apply_cue.RECORDER_MAX_S, 30 + 30 + apply_cue.RECORD_S + 30)
 
-    def test_a_recorder_still_running_keeps_the_pause(self):
-        """result() timed out with the recorder thread alive: the pause is kept
-        for the rest of the run, so the watch never shares the camera with it."""
+    def test_a_recorder_still_running_stops_the_watch(self):
+        """result() timed out with the recorder thread alive: the status watch
+        takes no more samples this run, then the pause is released."""
         import threading
         from station import camera, test_runner
-        released = []
+        order = []
 
         class Pause:
             def __exit__(self, *exc):
-                released.append(True)
+                order.append("released")
 
         stop = threading.Event()
         rec = camera.BackgroundRecording.__new__(camera.BackgroundRecording)
         rec._thread = threading.Thread(target=stop.wait, daemon=True)
         rec._thread.start()
         rec._err = rec._rec = None
-        saved = apply_cue.RECORDER_MAX_S
+        saved = (apply_cue.RECORDER_MAX_S, test_runner.status_watch)
         apply_cue.RECORDER_MAX_S = -9.9   # result() waits 0.1 s
+        test_runner.status_watch = types.SimpleNamespace(
+            stop_sampling=lambda: order.append("watch stopped"))
         logs = []
         me = types.SimpleNamespace(log=logs.append)
         me._apply_cue_release = lambda r, p: test_runner.TestRunner._apply_cue_release(me, r, p)
@@ -170,10 +172,10 @@ class CueStartTest(unittest.TestCase):
             for t_first in (None, 1.0):   # the timeout path and the normal path
                 test_runner.TestRunner._apply_cue_report(me, (rec, None, Pause(), t_first), 0.0)
         finally:
-            apply_cue.RECORDER_MAX_S = saved
+            apply_cue.RECORDER_MAX_S, test_runner.status_watch = saved
             stop.set()
-        self.assertEqual(released, [])
-        self.assertEqual(sum("stays paused" in line for line in logs), 2)
+        self.assertEqual(order, ["watch stopped", "released"] * 2)
+        self.assertEqual(sum("no more samples" in line for line in logs), 2)
 
 
 class RecordReadyTest(unittest.TestCase):
