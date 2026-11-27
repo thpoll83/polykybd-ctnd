@@ -79,6 +79,7 @@ signing the firmware image alone was not enough.**
 | HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
 | SCAN-6 | 2026-11-23 Aikido on PolyKybdHost: two `yaml.load` calls flagged as unsafe (B506), already `CSafeLoader`/`SafeLoader` on our own specs | host | ✅ checked, not vulnerable; changed to `yaml.safe_load` anyway, host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) |
 | HOST-8 | 2026-11-23 Aikido on PolyKybdHost: Pillow 12.x CVEs (58 listed). Floor is 13.0.0 on Python 3.11+; Python 3.10 cannot install Pillow 13 | host | 🟡 3.11+ fixed once bootstrap's pip install succeeds (a failed install keeps 12.x until a later launch); 3.10 stays on 12.x, accepted and logged at startup. 🔲 `zerofish` pin (12.2.0) not touched |
+| HOST-9 | MCP server for AI assistants (`polyctl mcp`): an assistant can call keyboard tools, and text it read elsewhere can make it call one the user did not ask for (prompt injection) | host | 🟡 accepted + documented (frozen allow-list of 12 tools, no firmware, flash, settings or network method) |
 
 ---
 
@@ -245,6 +246,38 @@ of budget, and J-Bot's `review` check failed because its Gemini credits were dep
 CodeRabbit reviewed only the first commit (`965f492`) and found the 3.10 and bootstrap
 gaps. The fix commits `76b6a59` (markers) and `967eb61` (bootstrap check, 3.10 warning)
 were merged without a bot review.
+
+### HOST-9 — the MCP server lets an AI assistant change the keyboard (2026-11-27)
+
+`polyctl mcp` (`polyhost/mcp/`, plan in PolyKybdHost `docs/mcp-server-plan.md`) is an MCP
+server that the AI client starts over stdio. It opens no port. Each tool call connects to
+the control socket with the local authkey, as `polyctl` does, so the trust boundary does
+not move: the server can do only what the same user can already do with `polyctl`.
+
+- **The new risk is prompt injection.** Text the assistant read in a web page, a file or
+  an issue can make it call a tool the user did not ask for. The tools are an allow-list:
+  `get_status`, `list_languages`, `get_keymap`, `list_app_overlays`, `list_keys`,
+  `show_layout`, `set_language`, `set_brightness`, `set_idle_style`, `set_glyph_script`,
+  `set_key` and `set_overlays`. The worst case is a changed language, brightness, idle
+  style, glyph script, overlay switch or one keycode, and each one can be set back.
+  `set_key` returns the previous keycode for that.
+- **Methods it can reach:** `tools.TOOL_METHODS` names 13 control methods. `HostLink.call()`
+  refuses every other method before it sends anything, and `settings.get` only for
+  `brightness_set_daylight_dependent`. It never reaches `fw.*`, `fontpack.*`, `doom.*`,
+  `update.install`, `host.shutdown`, `keymap.reset`, `commands.execute`, `settings.set`,
+  `overlay.mapping_send`, `overlay.reset_*`, `window.report`, `agents.*` or `telemetry.*`.
+  `tests/mcp/tools_test.py` freezes the list and checks that each excluded method is
+  refused with nothing sent.
+- **Results are built field by field** (`tools.RESULT_FIELDS`), never by passing a host
+  reply through. No result has a window title, URL, agent session title or file path. The
+  test gives `get_status` a status with a window title, a URL and a pipe port, and checks
+  that none of them is returned.
+- **What a client asks before a call is the client's choice.** Every write tool has
+  `readOnlyHint: false`, and `set_key` has `destructiveHint: true`. A client set to run
+  tools without asking runs them.
+- **Accepted:** the maintainer asked for the server (2026-11-27), with `set_key` in the
+  first version. A host setting to turn it off is open question 1 of the plan; today the
+  user turns it off by removing it from the AI client's configuration.
 
 ### HOST-3 — usage telemetry is a new outbound surface, and it is on by default
 
