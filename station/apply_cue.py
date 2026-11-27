@@ -54,9 +54,15 @@ def events(samples: list, side: str, change: float = CHANGE) -> tuple:
     return start, None
 
 
+BASE_BEFORE_MS = 300.0   # the reference level: the samples from this long before the apply
+
+
 def summary(samples: list, t_apply_ms: float) -> list[str]:
-    """Report lines, times relative to the FW_UP_APPLY command."""
+    """Report lines, times relative to the FW_UP_APPLY command. The reference level
+    is the one just before the apply, not the recording's first frame: the cyan
+    staging cue can still be on during the lead (its 2.5 s hold after COMMIT)."""
     lines = []
+    samples = [x for x in samples if x[0] >= t_apply_ms - BASE_BEFORE_MS]
     ev = {sd: events(samples, sd) for sd in SIDES}
     for sd in SIDES:
         a, b = ev[sd]
