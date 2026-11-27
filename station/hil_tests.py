@@ -1665,7 +1665,7 @@ def test_rgb_backlight_camera(raw: RawHID, log: Callable[[str], None]) -> bool:
         log(f"  FAIL: no valid 0x08 channel 3 reply: {start}")
         return False
     sample = status_watch.camera_sampler(camera, "backlight check")
-    ok = False
+    ok, lines = None, []
     with status_watch.paused():
         try:
             raw.send(V.rgb_set_request(V.COLOR, 0, 0))        # white
@@ -1687,11 +1687,15 @@ def test_rgb_backlight_camera(raw: RawHID, log: Callable[[str], None]) -> bool:
                     raw.send(V.rgb_set_request(vid, *value))
                 except Exception as exc:  # noqa: BLE001 — logged, the check goes on
                     log(f"  restoring value {vid} raised {exc!r}")
+    if ok is False:
+        # A measured failure is a FAIL even if a restore reply timed out (the
+        # runner turns a False with a timeout into WARN; an exception is a FAIL).
+        raise AssertionError("backlight: " + "; ".join(l for l in lines if "FAIL" in l))
     back = {vid: _rgb_get(raw, vid) for vid in start}
     if back != start:
         log(f"  FAIL: RGB state not restored: {back} != {start}")
         return False
-    return ok
+    return bool(ok)
 
 
 def test_via_uptime(raw: RawHID, log: Callable[[str], None]) -> bool:

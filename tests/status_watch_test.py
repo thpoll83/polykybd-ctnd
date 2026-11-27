@@ -107,6 +107,20 @@ class WatchTest(unittest.TestCase):
                             in l for l in lines))
         self.assertIn("left dark, right text", w.summary()[-1])
 
+    def test_the_phase_is_the_one_while_the_clip_records(self):
+        lines = []
+        w = None
+
+        def sample():
+            w.phase = "test B"   # the runner moves on while the clip records
+            return _levels(90, 90)
+        w = status_watch.StatusWatch(sample, camera.display_state, lines.append, clock=lambda: 0)
+        w._t0 = 0
+        w.phase = "test A"
+        w.step()
+        self.assertEqual(w.timeline[0][1], "test A")
+        self.assertIn("(test A)", lines[0])
+
     def test_a_camera_error_skips_one_sample(self):
         def boom():
             raise RuntimeError("camera busy")

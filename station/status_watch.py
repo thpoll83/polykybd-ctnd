@@ -72,6 +72,7 @@ class StatusWatch:
     def step(self) -> dict | None:
         """One sample: record, class, log the changes. None when the camera failed."""
         with self._busy:
+            phase = self.phase   # the test running while the clip records
             try:
                 levels = self._sample()
             except Exception as exc:   # a busy or failed camera skips one sample
@@ -80,13 +81,13 @@ class StatusWatch:
         t = self._clock() - self._t0
         states = classify(levels, self._state_of)
         p95 = {side: levels[side][1] for side in SIDES}
-        self.timeline.append((round(t, 1), self.phase, states, p95))
+        self.timeline.append((round(t, 1), phase, states, p95))
         if states != self._last:
-            self._log(f"[status] +{t:4.0f} s ({self.phase}): "
+            self._log(f"[status] +{t:4.0f} s ({phase}): "
                       + ", ".join(f"{s} {states[s]} ({p95[s]})" for s in SIDES))
             if states["left"] != states["right"]:
-                self.mismatches.append((round(t, 1), self.phase, states))
-                self._log(f"[status] WARNING: the halves differ during {self.phase}: "
+                self.mismatches.append((round(t, 1), phase, states))
+                self._log(f"[status] WARNING: the halves differ during {phase}: "
                           f"left {states['left']}, right {states['right']}")
         self._last = states
         return states
