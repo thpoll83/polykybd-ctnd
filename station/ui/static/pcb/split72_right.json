@@ -1,6 +1,12 @@
 {
  "width_mm": 184.0,
  "height_mm": 131.0,
+ "status_display": [
+  7,
+  32,
+  38,
+  50
+ ],
  "leds": [
   {
    "ref": "LED1",

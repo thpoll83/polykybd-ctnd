@@ -69,6 +69,8 @@ from .iso_lang_country import decode_packed
 from . import bulk_pipe
 from . import tap_terms
 from . import via_values
+from . import camera
+from . import status_watch
 from . import combos
 from . import agent_keys
 from . import key_attention
@@ -1647,6 +1649,52 @@ def test_via_rgb_matrix(raw: RawHID, log: Callable[[str], None]) -> bool:
         ok &= restore(V.SPEED, (speed0,), "speed (restore)")
         ok &= restore(V.COLOR, (hue0, sat0), "colour (restore)")
         ok &= restore(V.EFFECT, (effect0,), "effect (restore)")
+    return bool(ok)
+
+
+def test_rgb_backlight_camera(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """The backlight of BOTH halves, seen by the camera (protocol v39+): white at
+    full brightness, then off, through VIA's RGB matrix channel. Each half's
+    mean luma at the LED positions must rise by camera.BACKLIGHT_MIN_DELTA. The
+    slave's LEDs follow the master's settings over the split link, so a dark
+    right half means the mirror or the slave's LED chain failed. Restores the
+    RGB state; the status watch is paused while it records."""
+    V = via_values
+    start = {vid: _rgb_get(raw, vid) for vid in (V.EFFECT, V.BRIGHTNESS, V.COLOR)}
+    if any(v is None for v in start.values()):
+        log(f"  FAIL: no valid 0x08 channel 3 reply: {start}")
+        return False
+    sample = status_watch.camera_sampler(camera, "backlight check")
+    ok, lines = None, []
+    with status_watch.paused():
+        try:
+            raw.send(V.rgb_set_request(V.COLOR, 0, 0))        # white
+            raw.send(V.rgb_set_request(V.EFFECT, 1))          # solid colour
+            raw.send(V.rgb_set_request(V.BRIGHTNESS, 255))
+            time.sleep(0.5)
+            on = sample()
+            raw.send(V.rgb_set_request(V.EFFECT, 0))          # off
+            time.sleep(0.5)
+            off = sample()
+            ok, lines = camera.judge_backlight({s: on[s][0] for s in on},
+                                               {s: off[s][0] for s in off})
+            for line in lines:
+                log(f"  {line}")
+        finally:
+            for vid, value in ((V.COLOR, start[V.COLOR]), (V.BRIGHTNESS, start[V.BRIGHTNESS][:1]),
+                               (V.EFFECT, start[V.EFFECT][:1])):
+                try:
+                    raw.send(V.rgb_set_request(vid, *value))
+                except Exception as exc:  # noqa: BLE001 — logged, the check goes on
+                    log(f"  restoring value {vid} raised {exc!r}")
+    if ok is False:
+        # A measured failure is a FAIL even if a restore reply timed out (the
+        # runner turns a False with a timeout into WARN; an exception is a FAIL).
+        raise AssertionError("backlight: " + "; ".join(l for l in lines if "FAIL" in l))
+    back = {vid: _rgb_get(raw, vid) for vid in start}
+    if back != start:
+        log(f"  FAIL: RGB state not restored: {back} != {start}")
+        return False
     return bool(ok)
 
 
@@ -5027,6 +5075,8 @@ TESTS = [
      "min_protocol": tap_terms.TAP_TERMS_MIN_PROTOCOL},
     {"name": "VIA RGB matrix channel: off/on, brightness, speed, colour (v39)",
      "fn": test_via_rgb_matrix, "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL},
+    {"name": "RGB backlight lights both halves (camera, v39)", "fn": test_rgb_backlight_camera,
+     "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL, "skip_if": camera.skip_reason},
     {"name": "VIA uptime advances (v39)", "fn": test_via_uptime,
      "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL},
     {"name": "VIA device indication toggles the RGB matrix (v39)", "fn": test_via_device_indication,
