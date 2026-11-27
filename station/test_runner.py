@@ -11,6 +11,7 @@ from .flash import FlashController
 from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
 from . import camera
 from . import status_watch
+from . import apply_cue
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
@@ -474,6 +475,46 @@ class TestRunner:
     # evidence that the flash took. See the `unknown` parameter.
     MASTERS_UNKNOWN = -1
 
+    def _apply_cue_start(self):
+        """Start the camera on the apply's orange cue (station/apply_cue.py), or
+        None on a rig without a camera or saved board outlines. Report only."""
+        reason = camera.skip_reason()
+        if reason:
+            self.log(f"[apply-cue] no recording: {reason}")
+            return None
+        s = camera.snapshot_settings(camera.SETTINGS)
+        pause = status_watch.paused()
+        pause.__enter__()   # released in _apply_cue_report
+        rec = camera.BackgroundRecording(s, seconds=apply_cue.RECORD_S)
+        rec.start()
+        time.sleep(2.0)     # a level before the apply (rpicam-vid needs ~1 s to start)
+        return rec, s, pause, time.monotonic()
+
+    def _apply_cue_report(self, cue, t_apply: float) -> None:
+        if cue is None:
+            return
+        rec_bg, s, pause, _ = cue
+        try:
+            rec = rec_bg.result(timeout=apply_cue.RECORD_S + 40)
+            boards = {sd: camera.load_board(sd) for sd in apply_cue.SIDES}
+            samples = apply_cue.levels(camera, rec, s, boards)
+        except Exception as exc:   # report only
+            self.log(f"[apply-cue] recording failed: {exc}")
+            return
+        finally:
+            pause.__exit__(None, None, None)
+        # Times against FW_UP_APPLY are approximate: the first frame comes when
+        # rpicam-vid has started, taken here as the start of the two-second lead.
+        # The differences between the halves do not depend on it.
+        t_rel = (t_apply - (cue[3] - 2.0)) * 1000.0
+        for t, lv in samples:
+            self.log(f"[apply-cue] {(t - t_rel) / 1000:+6.2f} s  "
+                     + "  ".join(f"{sd} {lv[sd]:5.1f}" for sd in apply_cue.SIDES))
+        self.log("[apply-cue] times are approximate (about +-1 s); "
+                 "the differences between the halves are exact to one sample")
+        for line in apply_cue.summary(samples, t_rel):
+            self.log(line)
+
     def rgb_phase_check(self, cam_rec, unavailable_reason: str, fw: str | None = None) -> dict:
         """Judge the camera recording made during HID staging (station/camera.py).
 
@@ -656,13 +697,18 @@ class TestRunner:
                 raise RuntimeError("staging the signed image did not reach a clean COMMIT")
 
             mark = TAP.mark()
-            if not apply_staged(self.log):
-                raise RuntimeError("FW_UP_APPLY was refused")
+            cue = self._apply_cue_start()
+            t_apply = time.monotonic()
+            try:
+                if not apply_staged(self.log):
+                    raise RuntimeError("FW_UP_APPLY was refused")
 
-            # The board reboots into the applier, which runs with interrupts off and
-            # cannot print. Give it the copy time before looking for it back.
-            time.sleep(5)
-            self.wait_for_master_ready()
+                # The board reboots into the applier, which runs with interrupts off
+                # and cannot print. Give it the copy time before looking for it back.
+                time.sleep(5)
+                self.wait_for_master_ready()
+            finally:
+                self._apply_cue_report(cue, t_apply)   # releases the status watch
             # Reattach BEFORE the banner and link checks below — both read the
             # console, and it has been stopped since before BEGIN.
             console_live = self._reattach_console() if console else False
