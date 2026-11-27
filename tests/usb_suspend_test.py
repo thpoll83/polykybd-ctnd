@@ -724,6 +724,8 @@ class SuspendWiringTest(unittest.TestCase):
         seen, names = self._flash_and_test(extended=False)
         self.assertFalse(seen["called"])
         self.assertEqual(names[tr.SUSPEND_TEST_NAME], "skip")
+        # The reboot cue check reboots the board, so it is extended only too.
+        self.assertEqual(names[tr.cue_checks.RESET_TEST_NAME], "skip")
 
     def test_no_console_records_a_skip(self):
         seen, names = self._flash_and_test(console_ok=False)
