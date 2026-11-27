@@ -763,6 +763,10 @@ class BackgroundRecording:
         """Stop a recording that has not started yet (rpicam-vid not launched)."""
         self._cancel.set()
 
+    def alive(self) -> bool:
+        """True while the recorder thread runs."""
+        return self._thread is not None and self._thread.is_alive()
+
     def result(self, timeout: float = 60.0) -> Recording:
         if self._thread is None:
             raise RuntimeError("recording never started")

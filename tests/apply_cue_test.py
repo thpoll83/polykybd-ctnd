@@ -111,6 +111,9 @@ class CueStartTest(unittest.TestCase):
                 order.append("recorder ended")   # a late recording ran to its end
                 raise RuntimeError("late")
 
+            def alive(self):
+                return False
+
         saved = (test_runner.camera, test_runner.status_watch, apply_cue.READY_S)
         test_runner.camera = types.SimpleNamespace(
             skip_reason=lambda: None, snapshot_settings=lambda s: s, SETTINGS=None,
@@ -119,6 +122,7 @@ class CueStartTest(unittest.TestCase):
         apply_cue.READY_S = 0.1
         logs = []
         me = types.SimpleNamespace(log=logs.append)
+        me._apply_cue_release = lambda r, p: test_runner.TestRunner._apply_cue_release(me, r, p)
         try:
             cue = test_runner.TestRunner._apply_cue_start(me)
             self.assertEqual(order, ["cancelled"])   # still paused
@@ -140,6 +144,36 @@ class CueStartTest(unittest.TestCase):
         self.assertIn("_acquire_camera(30)", src)
         self.assertIn("timeout=seconds + 30", src)
         self.assertGreaterEqual(apply_cue.RECORDER_MAX_S, 30 + 30 + apply_cue.RECORD_S + 30)
+
+    def test_a_recorder_still_running_keeps_the_pause(self):
+        """result() timed out with the recorder thread alive: the pause is kept
+        for the rest of the run, so the watch never shares the camera with it."""
+        import threading
+        from station import camera, test_runner
+        released = []
+
+        class Pause:
+            def __exit__(self, *exc):
+                released.append(True)
+
+        stop = threading.Event()
+        rec = camera.BackgroundRecording.__new__(camera.BackgroundRecording)
+        rec._thread = threading.Thread(target=stop.wait, daemon=True)
+        rec._thread.start()
+        rec._err = rec._rec = None
+        saved = apply_cue.RECORDER_MAX_S
+        apply_cue.RECORDER_MAX_S = -9.9   # result() waits 0.1 s
+        logs = []
+        me = types.SimpleNamespace(log=logs.append)
+        me._apply_cue_release = lambda r, p: test_runner.TestRunner._apply_cue_release(me, r, p)
+        try:
+            for t_first in (None, 1.0):   # the timeout path and the normal path
+                test_runner.TestRunner._apply_cue_report(me, (rec, None, Pause(), t_first), 0.0)
+        finally:
+            apply_cue.RECORDER_MAX_S = saved
+            stop.set()
+        self.assertEqual(released, [])
+        self.assertEqual(sum("stays paused" in line for line in logs), 2)
 
 
 class RecordReadyTest(unittest.TestCase):
