@@ -891,6 +891,75 @@ def rectify(luma: bytes, width: int, height: int, s: CameraSettings, side: str,
     return ow, oh, bytes(out)
 
 
+# ── Backlight and status displays (both halves, one frame) ──────────────────
+
+# Status display levels: the 95th percentile luma in the board's status_display
+# box (mm), at the rig's exposure. Measured with the backlight off (rig probe
+# backlight_status, 2026-11-27): status page 76..97, idle animation 25..47,
+# after DISPLAY_OFF 1..3.
+DISPLAY_DARK_MAX = 10
+DISPLAY_TEXT_MIN = 60
+# Backlight: mean luma at the LED positions, white at full brightness minus off.
+# Measured +66 (left) and +50 (right); 64/255 gave +21 and +8.
+BACKLIGHT_MIN_DELTA = 20.0
+
+
+def half_levels(luma: bytes, width: int, height: int, s: CameraSettings, side: str,
+                board: dict) -> tuple[float, int]:
+    """(backlight, status display) of one half in one frame: the mean luma at
+    the LED positions, and the 95th percentile luma in the status_display box,
+    sampled every 1 mm (0 when the board has none). Maps only those points, not
+    the whole board, so a watch thread costs a few milliseconds per frame."""
+    to_px = board_mapper(s, side, board, width, height)
+
+    def at(x_mm: float, y_mm: float):
+        x, y = to_px(x_mm, y_mm)
+        xi, yi = int(x), int(y)
+        if x >= 0 and y >= 0 and xi < width and yi < height:
+            return luma[yi * width + xi]
+        return None
+
+    leds = [v for v in (at(l["x"], l["y"]) for l in board["leds"]) if v is not None]
+    led = sum(leds) / len(leds) if leds else 0.0
+    box = board.get("status_display")
+    if not box:
+        return led, 0
+    x0, y0, x1, y1 = (int(v) for v in box)
+    vals = sorted(v for v in (at(x + 0.5, y + 0.5) for y in range(y0, y1)
+                              for x in range(x0, x1)) if v is not None)
+    return led, (vals[int(len(vals) * 0.95)] if vals else 0)
+
+
+def display_state(p95: int) -> str:
+    """'dark', 'idle' (the idle animation) or 'text' (the status page)."""
+    if p95 <= DISPLAY_DARK_MAX:
+        return "dark"
+    return "text" if p95 >= DISPLAY_TEXT_MIN else "idle"
+
+
+def judge_backlight(on: dict, off: dict) -> tuple[bool, list[str]]:
+    """Whether each half's LEDs brightened by BACKLIGHT_MIN_DELTA from off to
+    full white. ``on`` and ``off`` map side to the LED mean luma."""
+    ok, lines = True, []
+    for side in QUAD_SIDES:
+        delta = on[side] - off[side]
+        good = delta >= BACKLIGHT_MIN_DELTA
+        ok = ok and good
+        lines.append(f"{side}: LED luma off {off[side]:.1f}, full {on[side]:.1f}, "
+                     f"{delta:+.1f} (need +{BACKLIGHT_MIN_DELTA:.0f}){'' if good else '  FAIL'}")
+    return ok, lines
+
+
+def skip_reason() -> str | None:
+    """Why a camera check cannot run on this rig, or None."""
+    ok, why = availability()
+    if not ok:
+        return why
+    if not SETTINGS.quads:
+        return "no board outlines saved in the camera's Adjust view"
+    return None
+
+
 def resample(ts: list[float], values: list[float], dt: float) -> list[float]:
     """Linear interpolation of (ts, values) onto a uniform grid with spacing dt."""
     if len(ts) < 2:

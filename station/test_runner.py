@@ -10,6 +10,7 @@ from .console_log import TAP, console_sink
 from .flash import FlashController
 from .hid import HIDConsole, RawHID, enumerate_raw_interfaces
 from . import camera
+from . import status_watch
 from .fw_update import stage_and_verify, apply_staged, caps_from_image
 from .uf2 import uf2_file_to_bin, Uf2Error
 from .hil_tests import (begin_session, parse_device_caps, skip_reason, measure_split_link,
@@ -177,6 +178,7 @@ class TestRunner:
         results = []
         self._two_masters_after_apply = False   # set again by this run's apply, if any
         restore_slave = False   # put the slave's own image back at the end (ungraded)
+        watch = None            # the camera watch on both status displays (report only)
         begin_session()      # the crash scan reads the console from HERE
         try:
             self.flash_halves(left_uf2, right_uf2)
@@ -229,8 +231,11 @@ class TestRunner:
             # the graded suite, so no test runs while the master's loop is briefly
             # stalled in split retries. Best-effort.
             self.settle_master()
+            watch = self._start_status_watch() if tests else None
             for test in (tests or []):
                 name = test.get("name", "unnamed")
+                if watch is not None:
+                    watch.phase = name
                 # Capability gate: skip (do NOT fail) a test the flashed firmware
                 # can't yet satisfy — e.g. a protocol-v3 command checked before
                 # the v3 firmware is deployed. The device advertises its
@@ -320,6 +325,8 @@ class TestRunner:
                     results.append({"name": SUSPEND_TEST_NAME, "status": "skip",
                                     "reason": "an earlier test failed"})
                 else:
+                    if watch is not None:
+                        watch.phase = SUSPEND_TEST_NAME
                     results.append(self.suspend_wake_eden())
             elif tests:
                 results.append({"name": SUSPEND_TEST_NAME, "status": "skip",
@@ -346,10 +353,13 @@ class TestRunner:
                 # camera (if there is one) records it for the RGB phase check.
                 cam_ok, cam_why = camera.availability()
                 cam_rec = camera.BackgroundRecording() if cam_ok else None
+                if watch is not None:
+                    watch.phase = "firmware update (stage+verify)"
                 try:
-                    fw_ok = stage_and_verify(
-                        bin_path, self.log,
-                        on_begin=cam_rec.start if cam_rec else None)
+                    with status_watch.paused():   # the cue recording needs the camera
+                        fw_ok = stage_and_verify(
+                            bin_path, self.log,
+                            on_begin=cam_rec.start if cam_rec else None)
                 except Exception as exc:
                     fw_ok = False
                     self.log(f"[runner] firmware update ERROR: {exc}")
@@ -375,6 +385,8 @@ class TestRunner:
                     self.log("[runner] skipping the firmware apply round-trip — the "
                              "suite already has a failure to diagnose first")
                 else:
+                    if watch is not None:
+                        watch.phase = "firmware apply round-trip"
                     applied = self.firmware_apply_roundtrip(
                         apply_bin, left_uf2, console=console_started)
                     results.append(applied)
@@ -403,18 +415,35 @@ class TestRunner:
                 self.log("[runner] skipping the reboot-persistence check — the suite "
                          "already has a failure to diagnose first")
             else:
+                if watch is not None:
+                    watch.phase = "reboot persistence"
                 results.append(self.reboot_persistence())
 
             if restore_slave:
+                if watch is not None:
+                    watch.phase = "restoring the slave image"
                 self.restore_slave_image(right_uf2)
 
             # Only a genuine FAIL fails the run; SKIP / XFAIL / XPASS do not.
             passed = not any(r.get("status") == "fail" for r in results)
+            if watch is not None:
+                watch.phase = "after the suite"
+                watch.stop()
             if passed:
                 # Successful HIL test/deploy — park the OLEDs so they don't sit
                 # lit between runs and age. (With no tests defined this is a bare
                 # successful flash, which is still a deploy worth blanking after.)
                 self._turn_off_displays()
+                if watch is not None:
+                    watch.phase = "after DISPLAY_OFF"
+                    time.sleep(2)
+                    states = watch.step()
+                    if states and set(states.values()) != {"dark"}:
+                        self.log("[status] WARNING: a status display is still on after "
+                                 f"DISPLAY_OFF: {states}")
+            if watch is not None:
+                for line in watch.summary():
+                    self.log(line)
             self.status = "idle"
             return {"passed": passed, "results": results}
 
@@ -423,6 +452,8 @@ class TestRunner:
             self.log(f"[runner] fatal: {exc}")
             raise
         finally:
+            if watch is not None:
+                watch.stop()   # idempotent; covers a run that raised
             self._flash.cleanup()
 
     # How long to let the split link re-establish after re-flashing the slave,
@@ -1635,6 +1666,19 @@ class TestRunner:
                          "(gated tests will run anyway)")
         self._caps = caps
         return caps
+
+    def _start_status_watch(self):
+        """Start watching both status displays with the camera (report only), or
+        None on a rig without a usable camera or saved board outlines."""
+        reason = camera.skip_reason()
+        if reason:
+            self.log(f"[status] status displays not watched: {reason}")
+            return None
+        watch = status_watch.StatusWatch(status_watch.camera_sampler(camera),
+                                         camera.display_state, self.log)
+        watch.start()
+        self.log(f"[status] watching both status displays every {status_watch.STEP_S:.0f} s")
+        return watch
 
     def _turn_off_displays(self) -> None:
         """Blank both OLEDs (status + per-key) after a passing run so the panels
