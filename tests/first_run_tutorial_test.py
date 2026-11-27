@@ -292,7 +292,8 @@ class GateTest(unittest.TestCase):
     def test_tutorial_suite_is_the_tutorial_and_the_crash_scan(self):
         suite = hil_tests.tutorial_suite(hil_tests.TESTS)
         self.assertEqual([t["fn"] for t in suite],
-                         [hil_tests.test_first_run_tutorial, hil_tests.test_no_crash_record])
+                         [hil_tests.test_first_run_tutorial, hil_tests.test_via_switch_matrix_debug,
+                          hil_tests.test_no_crash_record])
 
     def test_runner_flag(self):
         args = test_runner.build_parser().parse_args(
