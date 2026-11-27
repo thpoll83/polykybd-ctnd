@@ -148,6 +148,25 @@ class WatchTest(unittest.TestCase):
             status_watch._active = None
         self.assertEqual(order, ["block", "sample"])
 
+    def test_stop_sampling_takes_no_more_samples(self):
+        order = []
+        w = status_watch.StatusWatch(lambda: order.append("sample") or _levels(90, 90),
+                                     camera.display_state, lambda _l: None, clock=lambda: 0)
+        w._t0 = 0
+        status_watch._active = w
+        try:
+            with status_watch.paused():
+                t = threading.Thread(target=w.step)   # waits for the pause
+                t.start()
+                t.join(0.2)
+                status_watch.stop_sampling()
+            t.join(2)
+            self.assertIsNone(w.step())               # a later step samples nothing
+        finally:
+            status_watch._active = None
+        self.assertEqual(order, [])
+        self.assertEqual(w.timeline, [])
+
     def test_the_sampler_keeps_its_clips_out_of_the_ui(self):
         calls = []
         fake = types.SimpleNamespace(

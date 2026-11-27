@@ -509,6 +509,18 @@ class TestRunner:
             self.log(f"[apply-cue] no recording: {exc}")
             return None
 
+    def _apply_cue_release(self, rec_bg, pause) -> None:
+        """Release the status watch pause. A recorder still running after the wait
+        (a stalled write before rpicam-vid starts) first stops the watch's sampling
+        for the rest of the run, so the watch never shares the camera with it."""
+        if rec_bg.alive():
+            # An explicit stop, not a held pause: nothing keeps the pause object
+            # referenced, and its finalizer would release the watch's lock.
+            status_watch.stop_sampling()
+            self.log("[apply-cue] the recorder is still running; the status watch "
+                     "takes no more samples this run")
+        pause.__exit__(None, None, None)
+
     def _apply_cue_report(self, cue, t_apply: float) -> None:
         if cue is None:
             return
@@ -519,7 +531,7 @@ class TestRunner:
             except Exception:
                 pass
             finally:
-                pause.__exit__(None, None, None)
+                self._apply_cue_release(rec_bg, pause)
             return
         try:
             rec = rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
@@ -529,7 +541,7 @@ class TestRunner:
             self.log(f"[apply-cue] recording failed: {exc}")
             return
         finally:
-            pause.__exit__(None, None, None)
+            self._apply_cue_release(rec_bg, pause)
         # Times against FW_UP_APPLY are measured from this recording's first
         # frame, seen within 10 ms of its write.
         t_rel = (t_apply - t_first) * 1000.0

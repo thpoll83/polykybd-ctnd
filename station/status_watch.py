@@ -42,6 +42,7 @@ class StatusWatch:
         self.phase = "start"
         self.timeline = []   # (seconds, phase, {side: state}, {side: p95})
         self.mismatches = []
+        self._off = threading.Event()   # stop_sampling(): no more clips this run
 
     def start(self) -> None:
         global _active
@@ -69,9 +70,18 @@ class StatusWatch:
             self.step()
             self._stop.wait(self._step)
 
+    def stop_sampling(self) -> None:
+        """Take no more samples for the rest of the run."""
+        self._off.set()
+
     def step(self) -> dict | None:
-        """One sample: record, class, log the changes. None when the camera failed."""
+        """One sample: record, class, log the changes. None when the camera failed
+        or sampling was stopped."""
+        if self._off.is_set():
+            return None
         with self._busy:
+            if self._off.is_set():   # stopped while this step waited for the lock
+                return None
             phase = self.phase   # the test running while the clip records
             try:
                 levels = self._sample()
@@ -115,6 +125,13 @@ def paused():
     else:
         with watch.paused():
             yield
+
+
+def stop_sampling() -> None:
+    """Stop the running watch, if any, from taking more samples this run."""
+    watch = _active
+    if watch is not None:
+        watch.stop_sampling()
 
 
 def camera_sampler(camera, label: str = "status watch") -> Callable[[], dict]:
