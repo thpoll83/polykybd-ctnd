@@ -364,7 +364,8 @@ class TestRunner:
                             baseline = self._screens_now()
                         fw_ok = stage_and_verify(
                             bin_path, self.log,
-                            on_begin=cam_rec.start if cam_rec else None)
+                            on_begin=(lambda: self._start_and_wait(cam_rec))
+                            if cam_rec else None)
                 except Exception as exc:
                     fw_ok = False
                     self.log(f"[runner] firmware update ERROR: {exc}")
@@ -435,10 +436,16 @@ class TestRunner:
             if tests and any(r.get("status") == "fail" for r in results):
                 self.log("[runner] skipping the reboot cue check — the suite already "
                          "has a failure to diagnose first")
-            elif tests:
+            elif tests and extended:
                 if watch is not None:
                     watch.phase = "reboot cue check"
                 results.append(self.reset_cue_check(console=console_started))
+            elif tests:
+                self.log("[runner] reboot cue check skipped — extended tier only "
+                         "(pass --extended)")
+                results.append({"name": cue_checks.RESET_TEST_NAME, "status": "skip",
+                                "reason": "extended suite — re-run with --extended "
+                                          "(or the hil-extended label)"})
 
             # Only a genuine FAIL fails the run; SKIP / XFAIL / XPASS do not.
             passed = not any(r.get("status") == "fail" for r in results)
@@ -524,6 +531,14 @@ class TestRunner:
             self.log(f"[apply-cue] no recording: {exc}")
             return None
 
+    def _stop_watch_if_recording(self, rec_bg) -> None:
+        """Inside a status_watch.paused() block: a recorder still running stops
+        the watch's sampling for the rest of the run, before the pause ends."""
+        if rec_bg.alive():
+            status_watch.stop_sampling()
+            self.log("[cue] the recorder is still running; the status watch takes "
+                     "no more samples this run")
+
     def _apply_cue_release(self, rec_bg, pause) -> None:
         """Release the status watch pause. A recorder still running after the wait
         (a stalled write before rpicam-vid starts) first stops the watch's sampling
@@ -567,6 +582,15 @@ class TestRunner:
                  "the differences between the halves are exact to one sample")
         for line in apply_cue.summary(samples, t_rel):
             self.log(line)
+
+    def _start_and_wait(self, rec_bg) -> None:
+        """on_begin for the staging recording: start it and wait for its first
+        frame, so it holds frames from before the cue starts (the cue starts at
+        the first written chunk, which stage_and_verify sends after on_begin)."""
+        rec_bg.start()
+        if not rec_bg.wait_ready(apply_cue.READY_S):
+            self.log(f"[cue] the staging recording gave no frame within "
+                     f"{apply_cue.READY_S:.0f} s; staging goes ahead")
 
     def _screens_now(self):
         """{side: display_samples} from one short clip, or None (no outlines,
@@ -637,12 +661,20 @@ class TestRunner:
                 rec_bg.start()
                 if not rec_bg.wait_ready(apply_cue.READY_S):
                     rec_bg.cancel()
+                    try:   # it may still launch: wait for it before the pause ends
+                        rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
+                    except Exception:
+                        pass
+                    self._stop_watch_if_recording(rec_bg)
                     raise RuntimeError(f"no frame within {apply_cue.READY_S:.0f} s")
                 t_first = time.monotonic()
                 time.sleep(1.5)
                 t_cmd = time.monotonic()
                 self._raw.send(bytes([POLY_CHANNEL, 0x2B]), attempts=1)   # reboot
-                rec = rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
+                try:
+                    rec = rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
+                finally:
+                    self._stop_watch_if_recording(rec_bg)
         except Exception as exc:
             self.log(f"[test] SKIP: {name} — {exc}")
             self.wait_for_master_ready()

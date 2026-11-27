@@ -67,9 +67,6 @@ class ResetTest(unittest.TestCase):
         self.assertIn("right status display never went dark", rec["reason"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ResetRunnerTest(unittest.TestCase):
     """TestRunner.reset_cue_check: lights off, record, reboot, wait, judge."""
@@ -104,6 +101,9 @@ class ResetRunnerTest(unittest.TestCase):
             def result(self, timeout):
                 return types.SimpleNamespace(width=1, height=1, timestamps_ms=[0.0, 1600.0, 2000.0],
                                              lumas=[b"a", b"b", b"c"])
+
+            def alive(self):
+                return False
 
         levels = iter([(7, 80), (1, 80), (7, 80), (1, 80), (7, 5), (1, 5)])
         fake_cam = types.SimpleNamespace(
@@ -147,3 +147,66 @@ class ResetRunnerTest(unittest.TestCase):
             tr.camera = saved
         self.assertEqual(rec["status"], "skip")
         self.assertIn("protocol 39", rec["reason"])
+
+    def test_staging_start_waits_for_the_first_frame(self):
+        import types
+        from station import test_runner as tr
+        order = []
+        rec = types.SimpleNamespace(start=lambda: order.append("start"),
+                                    wait_ready=lambda t: order.append("ready") or True)
+        tr.TestRunner._start_and_wait(types.SimpleNamespace(log=order.append), rec)
+        self.assertEqual(order, ["start", "ready"])
+
+    def test_a_failed_reboot_recording_stops_the_watch_inside_the_pause(self):
+        import types
+        from station import test_runner as tr
+        order = []
+
+        class Rec:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                pass
+
+            def wait_ready(self, timeout):
+                return False
+
+            def cancel(self):
+                order.append("cancel")
+
+            def result(self, timeout):
+                order.append("waited")
+                raise RuntimeError("late")
+
+            def alive(self):
+                return True
+
+        class Pause:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                order.append("pause released")
+
+        saved = (tr.camera, tr.status_watch, tr.time)
+        tr.camera = types.SimpleNamespace(
+            skip_reason=lambda: None, snapshot_settings=lambda s: s, SETTINGS=None,
+            load_board=lambda sd: {}, BackgroundRecording=Rec)
+        tr.status_watch = types.SimpleNamespace(paused=Pause,
+                                                stop_sampling=lambda: order.append("watch stopped"))
+        tr.time = types.SimpleNamespace(sleep=lambda s: None, monotonic=lambda: 0.0)
+        runner = tr.TestRunner(log=lambda _m: None)
+        runner._raw = types.SimpleNamespace(send=lambda *a, **k: b"ok")
+        runner._device_caps = lambda: {"protocol": 39}
+        runner.wait_for_master_ready = lambda *a, **k: True
+        try:
+            rec = runner.reset_cue_check()
+        finally:
+            tr.camera, tr.status_watch, tr.time = saved
+        self.assertEqual(rec["status"], "skip")
+        self.assertEqual(order, ["cancel", "waited", "watch stopped", "pause released"])
+
+
+if __name__ == "__main__":
+    unittest.main()

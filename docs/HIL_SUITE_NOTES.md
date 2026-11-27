@@ -377,6 +377,10 @@ and relative links were adjusted to suit a standalone file.
   bridging the same cmd-21 soak and measuring the counters
   (`hil_tests.measure_split_link`, shared with `test_split_link_health` so the two
   cannot disagree about what a fault is).
+  - The fwapply job now builds stamp-mode images (`POLYKYBD_HIL=stamp`, qmk_firmware
+    `rules.mk`): each half takes its role from its handedness stamp, so the slave stays
+    a slave after the apply and the post-apply link is measured. The note below still
+    holds for the per-side `left`/`right` images.
   - ⚠️ **On THIS RIG the apply necessarily destroys the slave, and that is
     STRUCTURAL — not a firmware fault, and not the field bug it resembles.** The
     slave installs its own STAGED image, and the staged bytes are the ones the
