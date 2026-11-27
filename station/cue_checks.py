@@ -19,8 +19,13 @@ SIDES = ("left", "right")   # the left board is the master on the rig
 STAGING_TEST_NAME = "flash cue starts together, update screen on both halves (camera)"
 RESET_TEST_NAME = "no cue on a plain reboot, both displays reset (camera)"
 
-ONSET_MAX_MS = 100.0      # one master LED update while chunks stream (98 ms measured)
+# One master LED update while chunks stream (98 ms measured). Measured starts: 601 ms
+# before qmk_firmware#490, then -49, +33 and -65 ms (slave minus master).
+ONSET_MAX_MS = 100.0
 LED_CHANGE = apply_cue.CHANGE   # a change of the LED mean luma that counts
+# Calibrated on the rig 2026-11-27 (two staging runs, 606 frames each): the normal
+# status page differs from itself by 2.9 (left) and 5.4 (right) over 3 s; during
+# staging every frame differs by 10.4 to 40.6, median 28 to 32.
 SCREEN_CHANGE = 10.0      # mean absolute luma difference that counts as another picture
 SCREEN_FRACTION = 0.5     # the share of staging frames that must show another picture
 RESET_WINDOW_MS = 1000.0  # after cmd 43: the reboot itself, before the firmware boots
