@@ -492,8 +492,14 @@ class TestRunner:
             # The first frame, not the start call, is the time base: record() can
             # wait for the camera lock before rpicam-vid starts.
             if not rec.wait_ready(apply_cue.READY_S):
-                rec.cancel()   # it must not start after the status watch resumes
-                raise RuntimeError(f"no frame within {apply_cue.READY_S:.0f} s")
+                # Too late for a time base. The recorder may still start (cancel
+                # only stops it before rpicam-vid launches), so the pause stays
+                # held: _apply_cue_report waits for the recorder thread to end
+                # before it releases the status watch, and skips the report.
+                rec.cancel()
+                self.log(f"[apply-cue] no frame within {apply_cue.READY_S:.0f} s; "
+                         "no report")
+                return rec, s, pause, None
             t_first = time.monotonic()
             time.sleep(apply_cue.LEAD_S)   # a level before the apply
             return rec, s, pause, t_first
@@ -506,7 +512,15 @@ class TestRunner:
     def _apply_cue_report(self, cue, t_apply: float) -> None:
         if cue is None:
             return
-        rec_bg, s, pause, _ = cue
+        rec_bg, s, pause, t_first = cue
+        if t_first is None:   # timed out in _apply_cue_start: only end the recorder
+            try:
+                rec_bg.result(timeout=apply_cue.RECORD_S + 70)
+            except Exception:
+                pass
+            finally:
+                pause.__exit__(None, None, None)
+            return
         try:
             rec = rec_bg.result(timeout=apply_cue.RECORD_S + 40)
             boards = {sd: camera.load_board(sd) for sd in apply_cue.SIDES}
@@ -518,7 +532,7 @@ class TestRunner:
             pause.__exit__(None, None, None)
         # Times against FW_UP_APPLY are measured from this recording's first
         # frame, seen within 10 ms of its write.
-        t_rel = (t_apply - cue[3]) * 1000.0
+        t_rel = (t_apply - t_first) * 1000.0
         for t, lv in samples:
             self.log(f"[apply-cue] {(t - t_rel) / 1000:+6.2f} s  "
                      + "  ".join(f"{sd} {lv[sd]:5.1f}" for sd in apply_cue.SIDES))

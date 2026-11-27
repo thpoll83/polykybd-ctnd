@@ -81,18 +81,18 @@ class CueStartTest(unittest.TestCase):
         self.assertEqual(released, [True])
         self.assertIn("camera busy", logs[-1])
 
-    def test_no_frame_releases_the_pause(self):
+    def test_no_frame_holds_the_pause_until_the_recorder_ends(self):
+        """A late recorder may still launch rpicam-vid, so the status watch stays
+        paused until the recorder thread has ended; then no report is written."""
         from station import test_runner
-        released = []
+        order = []
 
         class Pause:
             def __enter__(self):
                 return self
 
             def __exit__(self, *exc):
-                released.append(True)
-
-        cancelled = []
+                order.append("released")
 
         class Rec:
             def __init__(self, *a, **k):
@@ -105,7 +105,11 @@ class CueStartTest(unittest.TestCase):
                 return False
 
             def cancel(self):
-                cancelled.append(True)
+                order.append("cancelled")
+
+            def result(self, timeout):
+                order.append("recorder ended")   # a late recording ran to its end
+                raise RuntimeError("late")
 
         saved = (test_runner.camera, test_runner.status_watch, apply_cue.READY_S)
         test_runner.camera = types.SimpleNamespace(
@@ -114,15 +118,17 @@ class CueStartTest(unittest.TestCase):
         test_runner.status_watch = types.SimpleNamespace(paused=Pause)
         apply_cue.READY_S = 0.1
         logs = []
+        me = types.SimpleNamespace(log=logs.append)
         try:
-            got = test_runner.TestRunner._apply_cue_start(types.SimpleNamespace(log=logs.append))
+            cue = test_runner.TestRunner._apply_cue_start(me)
+            self.assertEqual(order, ["cancelled"])   # still paused
+            self.assertIsNone(cue[3])
+            test_runner.TestRunner._apply_cue_report(me, cue, 0.0)
         finally:
             test_runner.camera, test_runner.status_watch, apply_cue.READY_S = saved
-        self.assertIsNone(got)
-        self.assertEqual(released, [True])
-        self.assertIn("no frame", logs[-1])
-        self.assertEqual(cancelled, [True])   # a late start is stopped
-
+        self.assertEqual(order, ["cancelled", "recorder ended", "released"])
+        self.assertIn("no frame", logs[0])
+        self.assertEqual(len(logs), 1)   # no report lines
 
 
 class RecordReadyTest(unittest.TestCase):
