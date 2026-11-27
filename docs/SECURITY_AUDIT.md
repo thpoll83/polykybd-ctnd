@@ -79,7 +79,7 @@ signing the firmware image alone was not enough.**
 | HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
 | SCAN-6 | 2026-11-23 Aikido on PolyKybdHost: two `yaml.load` calls flagged as unsafe (B506), already `CSafeLoader`/`SafeLoader` on our own specs | host | ✅ checked, not vulnerable; changed to `yaml.safe_load` anyway, host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) |
 | HOST-8 | 2026-11-23 Aikido on PolyKybdHost: Pillow 12.x CVEs (58 listed). Floor is 13.0.0 on Python 3.11+; Python 3.10 cannot install Pillow 13 | host | 🟡 3.11+ fixed once bootstrap's pip install succeeds (a failed install keeps 12.x until a later launch); 3.10 stays on 12.x, accepted and logged at startup. 🔲 `zerofish` pin (12.2.0) not touched |
-| HOST-9 | MCP server for AI assistants (`polyctl mcp`): an assistant can call keyboard tools, and text it read elsewhere can make it call one the user did not ask for (prompt injection) | host | 🟡 accepted + documented (off by default behind `mcp_enabled`; frozen allow-list of 12 tools, checked by the MCP server and again by the host; no firmware, flash, settings or network method) |
+| HOST-9 | MCP server for AI assistants (`polyctl mcp`): an assistant can call keyboard tools, and text it read elsewhere can make it call one the user did not ask for (prompt injection) | host | 🟡 accepted + documented (off by default behind `mcp_enabled`; frozen allow-list of 20 tools and 17 control methods, checked by the MCP server and again by the host; no firmware, flash, settings or network method; overlay files written only inside `user_overlays/`) |
 
 ---
 
@@ -258,10 +258,25 @@ not move: the server can do only what the same user can already do with `polyctl
   an issue can make it call a tool the user did not ask for. The tools are an allow-list:
   `get_status`, `list_languages`, `get_keymap`, `list_app_overlays`, `list_keys`,
   `show_layout`, `set_language`, `set_brightness`, `set_idle_style`, `set_glyph_script`,
-  `set_key` and `set_overlays`. The worst case is a changed language, brightness, idle
-  style, glyph script, overlay switch or one keycode, and each one can be set back.
-  `set_key` returns the previous keycode for that.
-- **Methods it can reach:** `tools.TOOL_METHODS` names 13 control methods. `HostLink.call()`
+  `set_key`, `set_overlays`, and since version 2a (2026-11-27) `find_icons`,
+  `list_overlay_keys`, `list_user_overlays`, `create_overlay`, `draw_key`, `clear_key`,
+  `delete_overlay` and `preview_overlay`. The worst case is a changed language,
+  brightness, idle style, glyph script, overlay switch, one keycode, or an unwanted
+  picture on keys; each one can be set back. `set_key` returns the previous keycode, and
+  the tray dialog *Overlays made by AI assistants…* removes a picture set without the
+  assistant.
+- **Files it makes the host write (version 2a).** The host, not the MCP server, writes
+  `user_overlays/<app>/set.yaml` and the overlay PNGs in the config directory
+  (`services/user_overlays.py`). The folder name comes from the app name, which must
+  match `[a-z0-9][a-z0-9 ._+-]{0,63}` (or be `"*"`), and anything else is refused before
+  a path is built, so `..`, `/`, `\` and `,` cannot reach the path or the mapping key;
+  a test checks that the files stay inside the folder. A drawing is a checked shape list
+  (`services/key_drawing.py`: at most 200 shapes, 2000 points, 64 characters of Latin
+  text, icons only from the shipped library), never a file name or a URL: the host reads
+  no file the assistant names and downloads nothing. A set has at most 400 bindings and
+  there are at most 100 sets. The files are loaded with `yaml.safe_load` and Pillow,
+  like the shipped overlays.
+- **Methods it can reach:** `tools.TOOL_METHODS` names 17 control methods. `HostLink.call()`
   refuses every other method before it sends anything, and `settings.get` only for
   `brightness_set_daylight_dependent`. It never reaches `fw.*`, `fontpack.*`, `doom.*`,
   `update.install`, `host.shutdown`, `keymap.reset`, `commands.execute`, `settings.set`,
