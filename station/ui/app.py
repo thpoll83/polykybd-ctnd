@@ -423,7 +423,7 @@ def _diag_queued(log) -> bool:
     if data is None:
         log(f"    [?] could not query queued runs (status {code})")
         return False
-    runs = [r for r in data.get("workflow_runs", []) if not _is_hidden(r)][:5]
+    runs = _visible(data.get("workflow_runs", []), 5)
     if not runs:
         log("    none queued")
         return False
@@ -715,6 +715,18 @@ def _is_stale(run: dict, now: float | None = None) -> bool:
     return verdict
 
 
+def _visible(runs: list, count: int, now: float | None = None) -> list:
+    """The first ``count`` runs that are not hidden (_is_hidden), in order. Stops
+    there, so later runs cost no jobs request."""
+    out = []
+    for run in runs:
+        if len(out) >= count:
+            break
+        if not _is_hidden(run, now):
+            out.append(run)
+    return out
+
+
 def _is_hidden(run: dict, now: float | None = None) -> bool:
     """True for a stale run created more than HIDE_STALE_AFTER_S ago."""
     created = _gh_time(run.get("created_at"))
@@ -777,7 +789,7 @@ def list_ci_jobs():
             return jsonify({"error": "GitHub API failure", "status": code}), 502
         runs = data.get("workflow_runs", [])
         if status != "completed":
-            runs = [r for r in runs if not _is_hidden(r, now)][:count]
+            runs = _visible(runs, count, now)
         for run in runs:
             job = _ci_job(run)
             job["stale"] = _is_stale(run)

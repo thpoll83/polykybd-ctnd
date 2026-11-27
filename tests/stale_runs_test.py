@@ -324,9 +324,6 @@ class RigJobsTest(unittest.TestCase):
         self.assertEqual(self.calls, 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 @unittest.skipIf(app is None, "Flask not installed")
 class HiddenRunTest(unittest.TestCase):
@@ -369,3 +366,15 @@ class HiddenRunTest(unittest.TestCase):
             ids = [j["id"] for j in app.list_ci_jobs().get_json()]
         self.assertEqual(ids, [50] + list(range(60, 69)))   # 10 shown, none of the old 9
         self.assertIn("per_page=100", asked[0])
+
+    def test_visible_stops_at_the_limit(self):
+        asked = []
+        app._is_stale = lambda r, now=None: (asked.append(r["id"]), r["stale"])[1]
+        runs = [self.run_(i, 20, stale=(i < 3)) for i in range(50)]
+        shown = app._visible(runs, 4, NOW)
+        self.assertEqual([r["id"] for r in shown], [3, 4, 5, 6])
+        self.assertEqual(asked, list(range(7)))   # nothing after the 4th visible run
+
+
+if __name__ == "__main__":
+    unittest.main()

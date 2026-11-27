@@ -478,17 +478,32 @@ class TestRunner:
     def _apply_cue_start(self):
         """Start the camera on the apply's orange cue (station/apply_cue.py), or
         None on a rig without a camera or saved board outlines. Report only."""
-        reason = camera.skip_reason()
-        if reason:
-            self.log(f"[apply-cue] no recording: {reason}")
+        pause = None
+        try:
+            reason = camera.skip_reason()
+            if reason:
+                self.log(f"[apply-cue] no recording: {reason}")
+                return None
+            s = camera.snapshot_settings(camera.SETTINGS)
+            pause = status_watch.paused()
+            pause.__enter__()   # released in _apply_cue_report
+            rec = camera.BackgroundRecording(s, seconds=apply_cue.RECORD_S)
+            rec.start()
+            # The first frame, not the start call, is the time base: record() can
+            # wait for the camera lock before rpicam-vid starts.
+            deadline = time.monotonic() + apply_cue.READY_S
+            while camera.live_frame() is None:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"no frame within {apply_cue.READY_S:.0f} s")
+                time.sleep(0.05)
+            t_first = time.monotonic()
+            time.sleep(apply_cue.LEAD_S)   # a level before the apply
+            return rec, s, pause, t_first
+        except Exception as exc:   # report only: the apply goes ahead without it
+            if pause is not None:
+                pause.__exit__(None, None, None)
+            self.log(f"[apply-cue] no recording: {exc}")
             return None
-        s = camera.snapshot_settings(camera.SETTINGS)
-        pause = status_watch.paused()
-        pause.__enter__()   # released in _apply_cue_report
-        rec = camera.BackgroundRecording(s, seconds=apply_cue.RECORD_S)
-        rec.start()
-        time.sleep(2.0)     # a level before the apply (rpicam-vid needs ~1 s to start)
-        return rec, s, pause, time.monotonic()
 
     def _apply_cue_report(self, cue, t_apply: float) -> None:
         if cue is None:
@@ -503,14 +518,13 @@ class TestRunner:
             return
         finally:
             pause.__exit__(None, None, None)
-        # Times against FW_UP_APPLY are approximate: the first frame comes when
-        # rpicam-vid has started, taken here as the start of the two-second lead.
-        # The differences between the halves do not depend on it.
-        t_rel = (t_apply - (cue[3] - 2.0)) * 1000.0
+        # Times against FW_UP_APPLY are measured from the first live frame, seen
+        # within one 50 ms poll of its write.
+        t_rel = (t_apply - cue[3]) * 1000.0
         for t, lv in samples:
             self.log(f"[apply-cue] {(t - t_rel) / 1000:+6.2f} s  "
                      + "  ".join(f"{sd} {lv[sd]:5.1f}" for sd in apply_cue.SIDES))
-        self.log("[apply-cue] times are approximate (about +-1 s); "
+        self.log("[apply-cue] times against FW_UP_APPLY are within about 0.1 s; "
                  "the differences between the halves are exact to one sample")
         for line in apply_cue.summary(samples, t_rel):
             self.log(line)

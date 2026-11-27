@@ -10,6 +10,8 @@ the LEDs). The firmware is ``keyboards/polykybd/lib/fw_update/fw_apply.c``
 """
 
 RECORD_S = 20.0
+LEAD_S = 2.0         # recorded before FW_UP_APPLY
+READY_S = 10.0       # the longest wait for the first frame
 STEP_MS = 100.0      # one logged sample per STEP_MS
 CHANGE = 8.0         # a change of the LED mean luma that counts (camera levels)
 SIDES = ("left", "right")
