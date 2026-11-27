@@ -1,8 +1,23 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """station/cue_checks.py: the staging cue start, the update screen and the reboot."""
+import sys
+import types
 import unittest
 
-from station import cue_checks as cc
+if "hid" not in sys.modules:  # pragma: no cover - environment shim
+    _hid = types.ModuleType("hid")
+    _hid.enumerate = lambda *a, **k: []
+    sys.modules["hid"] = _hid
+if "RPi" not in sys.modules:  # pragma: no cover - environment shim
+    _rpi, _gpio = types.ModuleType("RPi"), types.ModuleType("RPi.GPIO")
+    for _name in ("setmode", "setup", "output", "cleanup", "setwarnings"):
+        setattr(_gpio, _name, lambda *a, **k: None)
+    for _name in ("BCM", "OUT", "HIGH", "LOW"):
+        setattr(_gpio, _name, 0)
+    _rpi.GPIO = _gpio
+    sys.modules["RPi"], sys.modules["RPi.GPIO"] = _rpi, _gpio
+
+from station import cue_checks as cc  # noqa: E402
 
 
 def _led(rows, step=16.0):
@@ -72,19 +87,6 @@ class ResetRunnerTest(unittest.TestCase):
     """TestRunner.reset_cue_check: lights off, record, reboot, wait, judge."""
 
     def test_order_and_result(self):
-        import sys
-        import types
-        if "hid" not in sys.modules:   # pragma: no cover - environment shim
-            sys.modules["hid"] = types.SimpleNamespace(enumerate=lambda *a, **k: [])
-        if "RPi" not in sys.modules:   # pragma: no cover - environment shim
-            gpio = types.ModuleType("RPi.GPIO")
-            for n in ("setmode", "setup", "output", "cleanup", "setwarnings"):
-                setattr(gpio, n, lambda *a, **k: None)
-            for n in ("BCM", "OUT", "HIGH", "LOW"):
-                setattr(gpio, n, 0)
-            rpi = types.ModuleType("RPi")
-            rpi.GPIO = gpio
-            sys.modules["RPi"], sys.modules["RPi.GPIO"] = rpi, gpio
         from station import test_runner as tr
         order = []
 
@@ -206,6 +208,59 @@ class ResetRunnerTest(unittest.TestCase):
             tr.camera, tr.status_watch, tr.time = saved
         self.assertEqual(rec["status"], "skip")
         self.assertEqual(order, ["cancel", "waited", "watch stopped", "pause released"])
+
+    def test_a_failed_reboot_send_stops_the_watch_inside_the_pause(self):
+        import types
+        from station import test_runner as tr
+        order = []
+
+        class Rec:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                pass
+
+            def wait_ready(self, timeout):
+                return True
+
+            def result(self, timeout):
+                order.append("waited")
+                raise RuntimeError("still running")
+
+            def alive(self):
+                return True
+
+        class Pause:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                order.append("pause released")
+
+        def send(data, attempts=3):
+            if data[:2] == bytes([0x50, 0x2B]):
+                raise OSError("HID gone")
+            return b"ok"
+
+        saved = (tr.camera, tr.status_watch, tr.time)
+        tr.camera = types.SimpleNamespace(
+            skip_reason=lambda: None, snapshot_settings=lambda s: s, SETTINGS=None,
+            load_board=lambda sd: {}, BackgroundRecording=Rec)
+        tr.status_watch = types.SimpleNamespace(paused=Pause,
+                                                stop_sampling=lambda: order.append("watch stopped"))
+        tr.time = types.SimpleNamespace(sleep=lambda s: None, monotonic=lambda: 0.0)
+        runner = tr.TestRunner(log=lambda _m: None)
+        runner._raw = types.SimpleNamespace(send=send)
+        runner._device_caps = lambda: {"protocol": 39}
+        runner.wait_for_master_ready = lambda *a, **k: True
+        try:
+            rec = runner.reset_cue_check()
+        finally:
+            tr.camera, tr.status_watch, tr.time = saved
+        self.assertEqual(rec["status"], "skip")
+        self.assertIn("HID gone", rec["reason"])
+        self.assertEqual(order, ["waited", "watch stopped", "pause released"])
 
 
 if __name__ == "__main__":

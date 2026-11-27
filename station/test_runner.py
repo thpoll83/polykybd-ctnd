@@ -659,21 +659,23 @@ class TestRunner:
                 time.sleep(0.5)
                 rec_bg = camera.BackgroundRecording(s, seconds=6.0)
                 rec_bg.start()
-                if not rec_bg.wait_ready(apply_cue.READY_S):
-                    rec_bg.cancel()
-                    try:   # it may still launch: wait for it before the pause ends
-                        rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
-                    except Exception:
-                        pass
-                    self._stop_watch_if_recording(rec_bg)
-                    raise RuntimeError(f"no frame within {apply_cue.READY_S:.0f} s")
-                t_first = time.monotonic()
-                time.sleep(1.5)
-                t_cmd = time.monotonic()
-                self._raw.send(bytes([POLY_CHANNEL, 0x2B]), attempts=1)   # reboot
                 try:
+                    if not rec_bg.wait_ready(apply_cue.READY_S):
+                        rec_bg.cancel()
+                        raise RuntimeError(f"no frame within {apply_cue.READY_S:.0f} s")
+                    t_first = time.monotonic()
+                    time.sleep(1.5)
+                    t_cmd = time.monotonic()
+                    self._raw.send(bytes([POLY_CHANNEL, 0x2B]), attempts=1)   # reboot
                     rec = rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
                 finally:
+                    # Every way out, inside the pause: wait (bounded) for a recorder
+                    # that still runs, then stop the watch if it outlived the wait.
+                    if rec_bg.alive():
+                        try:
+                            rec_bg.result(timeout=apply_cue.RECORDER_MAX_S + 10)
+                        except Exception:
+                            pass
                     self._stop_watch_if_recording(rec_bg)
         except Exception as exc:
             self.log(f"[test] SKIP: {name} — {exc}")
