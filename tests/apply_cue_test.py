@@ -92,6 +92,8 @@ class CueStartTest(unittest.TestCase):
             def __exit__(self, *exc):
                 released.append(True)
 
+        cancelled = []
+
         class Rec:
             def __init__(self, *a, **k):
                 pass
@@ -99,10 +101,16 @@ class CueStartTest(unittest.TestCase):
             def start(self):
                 pass
 
+            def wait_ready(self, timeout):
+                return False
+
+            def cancel(self):
+                cancelled.append(True)
+
         saved = (test_runner.camera, test_runner.status_watch, apply_cue.READY_S)
         test_runner.camera = types.SimpleNamespace(
             skip_reason=lambda: None, snapshot_settings=lambda s: s, SETTINGS=None,
-            BackgroundRecording=Rec, live_frame=lambda: None)
+            BackgroundRecording=Rec)
         test_runner.status_watch = types.SimpleNamespace(paused=Pause)
         apply_cue.READY_S = 0.1
         logs = []
@@ -113,6 +121,61 @@ class CueStartTest(unittest.TestCase):
         self.assertIsNone(got)
         self.assertEqual(released, [True])
         self.assertIn("no frame", logs[-1])
+        self.assertEqual(cancelled, [True])   # a late start is stopped
+
+
+
+class RecordReadyTest(unittest.TestCase):
+    """camera.record(): ready belongs to this recording, cancel stops a late start."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from station import camera
+        self.camera = camera
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (camera.LIVE_DIR, camera._acquire_camera, camera._run,
+                      camera.rig_lock.release)
+        camera.LIVE_DIR = self.dir
+        camera._acquire_camera = lambda timeout: 1
+        camera.rig_lock.release = lambda fd: None
+        self.s = camera.CameraSettings(width=64, height=8)
+
+    def tearDown(self):
+        (self.camera.LIVE_DIR, self.camera._acquire_camera, self.camera._run,
+         self.camera.rig_lock.release) = self.saved
+
+    def test_cancel_before_start_runs_nothing(self):
+        import threading
+        ran = []
+        self.camera._run = lambda argv, timeout: ran.append(argv)
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaises(self.camera.CameraBusy):
+            self.camera.record(self.s, seconds=1, keep_frames=False, cancel=cancel)
+        self.assertEqual(ran, [])
+
+    def test_ready_ignores_an_old_live_file(self):
+        import threading
+        frame = 64 * 8 * 3 // 2
+        (self.dir / "rec.yuv").write_bytes(b"\x00" * frame)   # left by another recording
+        ready = threading.Event()
+        seen_at_start = []
+
+        def run(argv, timeout):
+            seen_at_start.append(ready.wait(0.1))   # the old file must not count
+            raw = argv[argv.index("-o") + 1]
+            with open(raw, "wb") as f:
+                f.write(b"\x00" * frame)
+            with open(argv[argv.index("--save-pts") + 1], "w") as f:
+                f.write("# timecode format v2\n0\n")
+            ready.wait(1.0)
+            return types.SimpleNamespace(returncode=0, stderr=b"")
+        self.camera._run = run
+        rec = self.camera.record(self.s, seconds=1, keep_frames=False, ready=ready)
+        self.assertEqual(seen_at_start, [False])
+        self.assertTrue(ready.is_set())
+        self.assertEqual(len(rec.lumas), 1)
 
 
 if __name__ == "__main__":

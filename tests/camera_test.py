@@ -479,7 +479,7 @@ class MeasureNowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fw.stage_and_verify = fake_stage
             camera.availability = lambda s=None: (True, "fake camera")
-            camera.record = lambda s=None, seconds=None: synth(640.0)
+            camera.record = lambda s=None, seconds=None, **k: synth(640.0)
             camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
             try:
                 out = camera.measure_now("fw.bin", lambda m: None, CameraSettings.from_config({}))
@@ -548,7 +548,7 @@ class MeasureNowStagingFailedTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fw.stage_and_verify = fake_stage
             camera.availability = lambda s=None: (True, "fake camera")
-            camera.record = lambda s=None, seconds=None: synth(0.0)
+            camera.record = lambda s=None, seconds=None, **k: synth(0.0)
             camera.LAST_RESULT_PATH = Path(tmp) / "last.json"
             try:
                 out = camera.measure_now("fw.bin", lambda m: None, CameraSettings.from_config({}))

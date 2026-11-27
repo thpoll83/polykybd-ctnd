@@ -533,14 +533,34 @@ def _acquire_camera(timeout_s: float):
         time.sleep(0.05)
 
 
+def _watch_first_frame(raw: str, frame_bytes: int, ready: threading.Event,
+                       done: threading.Event) -> None:
+    """Set ready once ``raw`` holds one frame; stop when done is set."""
+    while not done.is_set():
+        try:
+            if os.path.getsize(raw) >= frame_bytes:
+                ready.set()
+                return
+        except OSError:
+            pass
+        done.wait(0.01)
+
+
 def record(settings: CameraSettings = SETTINGS, seconds: float | None = None,
-           label: dict | None = None, keep_frames: bool = True) -> Recording:
+           label: dict | None = None, keep_frames: bool = True,
+           ready: threading.Event | None = None,
+           cancel: threading.Event | None = None) -> Recording:
     """Record raw frames to RAM (/dev/shm) and return their Y planes and timestamps.
 
     While it records, LIVE_DIR holds the growing raw file and its label, for
     live_frame(). Afterwards three frames are kept in FRAMES_DIR (save_frames()),
     unless keep_frames is False: the status watch's short clips must not replace
-    the recording the UI shows."""
+    the recording the UI shows.
+
+    ``ready`` is set when this recording's first frame is in its file (the old
+    files are removed once the locks are held, so no other recording can set it).
+    ``cancel``, when set by the time both locks are held, ends the call with
+    CameraBusy before rpicam-vid starts."""
     seconds = settings.record_s if seconds is None else seconds
     label = recording_label() if label is None else label
     if not _lock.acquire(timeout=30):
@@ -550,6 +570,8 @@ def record(settings: CameraSettings = SETTINGS, seconds: float | None = None,
         cam_fd = _acquire_camera(30)
         if cam_fd is None:
             raise CameraBusy("camera busy (another process holds it)")
+        if cancel is not None and cancel.is_set():
+            raise CameraBusy("recording cancelled before it started")
         started = time.time()   # after any wait for a snapshot to finish
         LIVE_DIR.mkdir(parents=True, exist_ok=True)
         raw, pts = str(LIVE_DIR / "rec.yuv"), str(LIVE_DIR / "rec.pts")
@@ -568,7 +590,15 @@ def record(settings: CameraSettings = SETTINGS, seconds: float | None = None,
                     *settings.orient_args()]
             if settings.mode:
                 argv += ["--mode", settings.mode]
-            r = _run(argv, timeout=seconds + 30)
+            done = threading.Event()
+            if ready is not None:
+                frame_bytes = settings.width * settings.height * 3 // 2
+                threading.Thread(target=_watch_first_frame,
+                                 args=(raw, frame_bytes, ready, done), daemon=True).start()
+            try:
+                r = _run(argv, timeout=seconds + 30)
+            finally:
+                done.set()
             if r.returncode != 0:
                 err = r.stderr.decode(errors="replace").strip().splitlines()
                 raise RuntimeError(err[-1] if err else f"rpicam-vid exit {r.returncode}")
@@ -706,6 +736,8 @@ class BackgroundRecording:
         self._thread = None
         self._rec = None
         self._err = None
+        self._ready = threading.Event()
+        self._cancel = threading.Event()
 
     @property
     def started(self) -> bool:
@@ -718,9 +750,18 @@ class BackgroundRecording:
 
     def _body(self) -> None:
         try:
-            self._rec = record(self._settings, self._seconds)
+            self._rec = record(self._settings, self._seconds,
+                               ready=self._ready, cancel=self._cancel)
         except Exception as exc:   # reported by result(), never kills the caller
             self._err = exc
+
+    def wait_ready(self, timeout: float) -> bool:
+        """True once this recording's first frame is written, False after timeout."""
+        return self._ready.wait(timeout)
+
+    def cancel(self) -> None:
+        """Stop a recording that has not started yet (rpicam-vid not launched)."""
+        self._cancel.set()
 
     def result(self, timeout: float = 60.0) -> Recording:
         if self._thread is None:
