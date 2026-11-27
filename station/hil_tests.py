@@ -68,6 +68,7 @@ from .hid import RawHID, enumerate_raw_interfaces
 from .iso_lang_country import decode_packed
 from . import bulk_pipe
 from . import tap_terms
+from . import via_values
 from . import combos
 from . import agent_keys
 from . import key_attention
@@ -1574,6 +1575,168 @@ def _macro_write(raw: RawHID, log: Callable[[str], None], offset: int,
         if not _resp_ok(resp, CMD_MACRO_BODY, log, expect_status=ACK):
             log(f"  FAIL: macro body write failed at offset {off}")
             return False
+    return True
+
+
+# split72 (the rig's board): config.h RGB_MATRIX_MAXIMUM_BRIGHTNESS and MATRIX_ROWS.
+RIG_RGB_MAX_BRIGHTNESS = 100
+RIG_MATRIX_ROWS = 10
+
+
+def _rgb_get(raw: RawHID, value_id: int):
+    return via_values.parse_rgb(raw.send(via_values.rgb_get_request(value_id)), value_id)
+
+
+def test_via_rgb_matrix(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """VIA's RGB matrix channel (legacy ids 0x07 / 0x08, protocol v39+): switch the
+    matrix off and on, and set/read back brightness, speed and colour. RAM only, so
+    nothing reaches EEPROM; every value is restored. An unknown value id and an
+    unknown channel must come back as id_unhandled (0xFF), not as a fake value.
+
+    This checks the firmware's RGB state, not the LEDs: the camera phase check
+    covers what the LEDs show."""
+    V = via_values
+    start = {vid: _rgb_get(raw, vid) for vid in (V.EFFECT, V.BRIGHTNESS, V.SPEED, V.COLOR)}
+    log(f"rgb matrix state -> {start}")
+    if any(v is None for v in start.values()):
+        log("  FAIL: no valid 0x08 channel 3 reply")
+        return False
+    effect0, bright0, speed0, (hue0, sat0) = (start[V.EFFECT][0], start[V.BRIGHTNESS][0],
+                                               start[V.SPEED][0], start[V.COLOR])
+
+    def set_and_check(vid, value, want, what):
+        got = V.parse_rgb(raw.send(V.rgb_set_request(vid, *value)), vid)
+        back = _rgb_get(raw, vid)
+        log(f"  set {what} {value} -> {got}, read back {back}")
+        if got is None or back != want:
+            log(f"  FAIL: expected {want}")
+            return False
+        return True
+
+    def restore(vid, value, what):
+        # Each restore on its own: one that raises must not skip the others.
+        try:
+            return set_and_check(vid, value, value, what)
+        except Exception as e:  # noqa: BLE001 — logged, the test already fails
+            log(f"  FAIL: restoring {what} raised {e!r}")
+            return False
+
+    # A target that differs from the saved level, so a firmware that echoes the
+    # write without applying it cannot pass.
+    bright_target = 0 if bright0 else 255
+    ok = True
+    try:
+        ok &= set_and_check(V.EFFECT, (0,), (0,), "effect (off)")
+        ok &= set_and_check(V.EFFECT, (effect0 or 1,), (effect0 or 1,), "effect (on)")
+        ok &= set_and_check(V.BRIGHTNESS, (bright_target,),
+                            (V.brightness_round_trip(bright_target, RIG_RGB_MAX_BRIGHTNESS),),
+                            "brightness")
+        ok &= set_and_check(V.SPEED, ((speed0 + 77) & 0xFF,), ((speed0 + 77) & 0xFF,), "speed")
+        ok &= set_and_check(V.COLOR, ((hue0 + 40) & 0xFF, sat0 ^ 0x10),
+                            ((hue0 + 40) & 0xFF, sat0 ^ 0x10), "colour")
+        for req, what in ((bytes([V.ID_CUSTOM_GET_VALUE, V.RGB_MATRIX_CHANNEL, 9, 0, 0]), "value id 9"),
+                          (bytes([V.ID_CUSTOM_GET_VALUE, 2, V.BRIGHTNESS, 0, 0]), "channel 2")):
+            resp = raw.send(req)
+            log(f"  get {what} -> {resp[:5].hex() if resp else None}")
+            if not V.is_unhandled(resp):
+                log("  FAIL: expected id_unhandled (0xff)")
+                ok = False
+    finally:
+        # The brightness read-back of a value that came from a get is exact.
+        ok &= restore(V.BRIGHTNESS, (bright0,), "brightness (restore)")
+        ok &= restore(V.SPEED, (speed0,), "speed (restore)")
+        ok &= restore(V.COLOR, (hue0, sat0), "colour (restore)")
+        ok &= restore(V.EFFECT, (effect0,), "effect (restore)")
+    return bool(ok)
+
+
+def test_via_uptime(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """VIA's uptime (0x02 value 0x01, protocol v39+): two reads 500 ms apart must
+    differ by about 500 ms. The runner reset the board earlier in the run, so the
+    value is small and far from the 49.7-day wrap."""
+    # The timer starts before the first request: the firmware samples its clock
+    # somewhere inside that round trip, so the window must include it.
+    t = time.monotonic()
+    a = via_values.parse_uptime(raw.send(via_values.uptime_request()))
+    time.sleep(0.5)
+    b = via_values.parse_uptime(raw.send(via_values.uptime_request()))
+    dt = (time.monotonic() - t) * 1000
+    log(f"uptime -> {a} ms, then {b} ms ({dt:.0f} ms later on the Pi)")
+    if a is None or b is None:
+        log("  FAIL: no valid 0x02 uptime reply")
+        return False
+    if not 300 <= b - a <= dt + 1000:
+        log(f"  FAIL: uptime advanced {b - a} ms, expected about {dt:.0f}")
+        return False
+    return True
+
+
+def test_via_device_indication(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """VIA's device indication (0x03 value 0x05, protocol v39+): each report toggles
+    the RGB matrix, RAM only, so two of them end as it started. Sent with
+    attempts=1: a retried toggle would toggle twice."""
+    V = via_values
+    effect0 = _rgb_get(raw, V.EFFECT)
+    if effect0 is None:
+        log("  FAIL: no valid 0x08 effect reply")
+        return False
+    ok = True
+    try:
+        for i, want_on in ((0, effect0[0] == 0), (1, effect0[0] != 0)):
+            resp = raw.send(V.indication_request(i), attempts=1)
+            now = _rgb_get(raw, V.EFFECT)
+            log(f"  indication {i} -> {resp[:3].hex() if resp else None}, effect now {now}")
+            if not resp or V.is_unhandled(resp) or now is None or (now[0] != 0) != want_on:
+                log(f"  FAIL: expected the matrix {'on' if want_on else 'off'}")
+                ok = False
+                break
+    finally:
+        # A read that raises must not skip the restore: write the saved effect then.
+        try:
+            needs_restore = _rgb_get(raw, V.EFFECT) != effect0
+        except Exception as e:  # noqa: BLE001 — logged, the restore still runs
+            log(f"  reading the effect before the restore raised {e!r}")
+            needs_restore = True
+        if needs_restore:
+            try:
+                resp = raw.send(V.rgb_set_request(V.EFFECT, effect0[0]))
+                back = _rgb_get(raw, V.EFFECT)
+                if V.parse_rgb(resp, V.EFFECT) is None or back != effect0:
+                    log(f"  FAIL: restoring effect {effect0[0]} -> "
+                        f"{resp[:4].hex() if resp else None}, read back {back}")
+                    ok = False
+                else:
+                    log(f"  restored effect {effect0[0]}")
+            except Exception as e:  # noqa: BLE001 — logged, the test already fails
+                log(f"  FAIL: restoring the effect raised {e!r}")
+                ok = False
+    return ok
+
+
+def test_via_switch_matrix_refused(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """SECURITY: VIA's switch matrix state (0x02 value 0x03, protocol v39+) shows
+    which keys are down, so on a normal image (debug_enable off) it must come back as
+    id_unhandled. A reply with row bytes would let any host program log keys."""
+    resp = raw.send(via_values.switch_matrix_request())
+    log(f"switch matrix (debug off) -> {resp[:6].hex() if resp else None}")
+    if not via_values.is_unhandled(resp):
+        log("  FAIL: expected id_unhandled (0xff) with debug_enable off")
+        return False
+    return True
+
+
+def test_via_switch_matrix_debug(raw: RawHID, log: Callable[[str], None]) -> bool:
+    """VIA's switch matrix state on a POLYKYBD_DEBUG image (debug_enable on at boot):
+    the reply carries one byte per row, and with no key held every row is 0."""
+    rows = via_values.parse_switch_matrix(raw.send(via_values.switch_matrix_request()),
+                                          RIG_MATRIX_ROWS)
+    log(f"switch matrix (debug on) -> {rows}")
+    if rows is None:
+        log("  FAIL: no switch matrix rows on a debug image")
+        return False
+    if any(rows):
+        log("  FAIL: a key reads as held, but nobody presses keys on the rig")
+        return False
     return True
 
 
@@ -4862,6 +5025,14 @@ TESTS = [
     {"name": "glyph size round-trip (v13)",     "fn": test_glyph_size_round_trip,   "min_protocol": 13},
     {"name": "tap terms round-trip + range NACKs (v29 cmd 44)", "fn": test_tap_terms_round_trip,
      "min_protocol": tap_terms.TAP_TERMS_MIN_PROTOCOL},
+    {"name": "VIA RGB matrix channel: off/on, brightness, speed, colour (v39)",
+     "fn": test_via_rgb_matrix, "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL},
+    {"name": "VIA uptime advances (v39)", "fn": test_via_uptime,
+     "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL},
+    {"name": "VIA device indication toggles the RGB matrix (v39)", "fn": test_via_device_indication,
+     "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL},
+    {"name": "VIA switch matrix refused with debug off (v39)", "fn": test_via_switch_matrix_refused,
+     "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL},
     {"name": "auto shift round-trip + range NACKs (v30 cmd 44)", "fn": test_auto_shift_round_trip,
      "min_protocol": tap_terms.AUTO_SHIFT_MIN_PROTOCOL},
     {"name": "combos / tap dance round-trip + NACKs + commit (v33 cmd 48)", "fn": test_combos_round_trip,
@@ -5002,6 +5173,9 @@ TESTS = [
     # POLYKYBD_DEBUG images), so it sits with the other opt-in tiers, before the scan.
     {"name": "first-run tutorial over cmd 14: letters, Shifts, preview, Esc skip (debug build)",
      "fn": test_first_run_tutorial, "needs_console": True, "tier": TIER_TUTORIAL},
+    {"name": "VIA switch matrix answers on a debug image, no key held (v39)",
+     "fn": test_via_switch_matrix_debug, "min_protocol": via_values.VIA_VALUES_MIN_PROTOCOL,
+     "tier": TIER_TUTORIAL},
     # LAST, whatever tiers ran: the console scan over this run's whole window, so
     # a crash inside any test above — the flash tests and the doom set included —
     # or on the slave lands here rather than reading as a flake.
