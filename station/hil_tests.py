@@ -1691,13 +1691,19 @@ def test_via_device_indication(raw: RawHID, log: Callable[[str], None]) -> bool:
                 ok = False
                 break
     finally:
+        # A read that raises must not skip the restore: write the saved effect then.
         try:
-            if _rgb_get(raw, V.EFFECT) != effect0:
+            needs_restore = _rgb_get(raw, V.EFFECT) != effect0
+        except Exception as e:  # noqa: BLE001 — logged, the restore still runs
+            log(f"  reading the effect before the restore raised {e!r}")
+            needs_restore = True
+        if needs_restore:
+            try:
                 raw.send(V.rgb_set_request(V.EFFECT, effect0[0]))
                 log(f"  restored effect {effect0[0]}")
-        except Exception as e:  # noqa: BLE001 — logged, the test already fails
-            log(f"  FAIL: restoring the effect raised {e!r}")
-            ok = False
+            except Exception as e:  # noqa: BLE001 — logged, the test already fails
+                log(f"  FAIL: restoring the effect raised {e!r}")
+                ok = False
     return ok
 
 
