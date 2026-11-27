@@ -419,11 +419,11 @@ def _diag_queued(log) -> bool:
     """List queued workflow runs and the labels each waiting job requests.
     Returns True if anything is queued, so the verdict can stay quiet when the
     queue is empty (a healthy, idle station)."""
-    code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=queued&per_page=5")
+    code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status=queued&per_page=100")
     if data is None:
         log(f"    [?] could not query queued runs (status {code})")
         return False
-    runs = data.get("workflow_runs", [])
+    runs = [r for r in data.get("workflow_runs", []) if not _is_hidden(r)][:5]
     if not runs:
         log("    none queued")
         return False
@@ -657,6 +657,12 @@ def _ci_job(run: dict) -> dict:
 STALE_RUN_MIN_AGE_S = 3600
 _STALE_VERDICT: dict = {}   # _stale_key(run) -> verdict for that exact run state
 
+# A stale run created this long ago is left out of the Runner tab, the Diagnose
+# queue listing and Cancel stale runs. The runs of 6 and 11 Nov 2026 refused
+# cancel, force-cancel and delete, and GitHub Support closed the ticket without
+# help (2026-11-26). Agreed with the maintainer 2026-11-27.
+HIDE_STALE_AFTER_S = 14 * 24 * 3600
+
 
 def _gh_time(value) -> float | None:
     """A GitHub timestamp ('2026-11-11T20:55:18Z') as epoch seconds, or None."""
@@ -709,6 +715,14 @@ def _is_stale(run: dict, now: float | None = None) -> bool:
     return verdict
 
 
+def _is_hidden(run: dict, now: float | None = None) -> bool:
+    """True for a stale run created more than HIDE_STALE_AFTER_S ago."""
+    created = _gh_time(run.get("created_at"))
+    now = time.time() if now is None else now
+    return (created is not None and now - created >= HIDE_STALE_AFTER_S
+            and _is_stale(run, now))
+
+
 # The rig jobs of qmk-test.yml by name prefix, as short tags for the Runner tab.
 # Only "HIL test" stages a .bin, so only it runs the camera's RGB phase check.
 RIG_JOB_TAGS = (
@@ -754,12 +768,17 @@ def list_ci_jobs():
     A queued run that will never start has "stale": true."""
     if not GITHUB_REPO:
         return jsonify([])
-    jobs = []
+    jobs, now = [], time.time()
     for status, count in (("queued", 10), ("in_progress", 10), ("completed", CI_FINISHED_SHOWN)):
-        code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page={count}")
+        # Hidden runs (_is_hidden) take places on the page, so ask for more.
+        ask = count if status == "completed" else 100
+        code, data = _gh_api(f"/repos/{GITHUB_REPO}/actions/runs?status={status}&per_page={ask}")
         if data is None:
             return jsonify({"error": "GitHub API failure", "status": code}), 502
-        for run in data.get("workflow_runs", []):
+        runs = data.get("workflow_runs", [])
+        if status != "completed":
+            runs = [r for r in runs if not _is_hidden(r, now)][:count]
+        for run in runs:
             job = _ci_job(run)
             job["stale"] = _is_stale(run)
             job["rig"] = [] if job["stale"] else _rig_jobs(run)
@@ -832,7 +851,8 @@ def on_cancel_stale_runs(_data=None):
                 if data is None:
                     emit_log(f"[ui] could not list {status} runs (status {code})")
                     return
-                stale += [r for r in data.get("workflow_runs", []) if _is_stale(r, now)]
+                stale += [r for r in data.get("workflow_runs", [])
+                          if _is_stale(r, now) and not _is_hidden(r, now)]
             if not stale:
                 emit_log("[ui] no stale runs to cancel")
                 return
