@@ -348,7 +348,8 @@ class JudgeTest(unittest.TestCase):
     def test_offset_is_xfail_not_fail(self):
         r = camera.judge(self.res(offset_ms=640.0))
         self.assertEqual(r["status"], "xfail")
-        self.assertIn("timer_read32", r["reason"])
+        self.assertIn("+640.0 ms apart, more than 35 ms", r["reason"])
+        self.assertNotIn("timer_read32", r["reason"])   # the cause fixed in qmk_firmware#484
 
     def test_no_breathing_skips(self):
         self.assertEqual(camera.judge(self.res(swing_right=0.5))["status"], "skip")
