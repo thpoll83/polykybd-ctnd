@@ -79,6 +79,7 @@ signing the firmware image alone was not enough.**
 | HOST-7 | Game bind-file reader (`game_assets/key_files.py`, TF2 and Apex): the bind-line regex backtracked exponentially on a line of backslashes, stalling the game-art build thread | host | ✅ fixed in host [#916](https://github.com/thpoll83/PolyKybdHost/pull/916) before merge |
 | SCAN-6 | 2026-11-23 Aikido on PolyKybdHost: two `yaml.load` calls flagged as unsafe (B506), already `CSafeLoader`/`SafeLoader` on our own specs | host | ✅ checked, not vulnerable; changed to `yaml.safe_load` anyway, host [#1016](https://github.com/thpoll83/PolyKybdHost/pull/1016) (`0bdb99e`) |
 | HOST-8 | 2026-11-23 Aikido on PolyKybdHost: Pillow 12.x CVEs (58 listed). Floor is 13.0.0 on Python 3.11+; Python 3.10 cannot install Pillow 13 | host | 🟡 3.11+ fixed once bootstrap's pip install succeeds (a failed install keeps 12.x until a later launch); 3.10 stays on 12.x, accepted and logged at startup. 🔲 `zerofish` pin (12.2.0) not touched |
+| HOST-9 | MCP server for AI assistants (`polyctl mcp`): an assistant can call keyboard tools, and text it read elsewhere can make it call one the user did not ask for (prompt injection) | host | 🟡 accepted + documented (off by default behind `mcp_enabled`; frozen allow-list of 20 tools and 17 control methods, checked by the MCP server and again by the host; no firmware, flash or network method; no settings write, and `settings.get` for `brightness_set_daylight_dependent` only; overlay files written only inside `user_overlays/`) |
 
 ---
 
@@ -245,6 +246,65 @@ of budget, and J-Bot's `review` check failed because its Gemini credits were dep
 CodeRabbit reviewed only the first commit (`965f492`) and found the 3.10 and bootstrap
 gaps. The fix commits `76b6a59` (markers) and `967eb61` (bootstrap check, 3.10 warning)
 were merged without a bot review.
+
+### HOST-9 — the MCP server lets an AI assistant change the keyboard (2026-11-27)
+
+`polyctl mcp` (`polyhost/mcp/`, plan in PolyKybdHost `docs/mcp-server-plan.md`) is an MCP
+server that the AI client starts over stdio. It opens no port. Each tool call connects to
+the control socket with the local authkey, as `polyctl` does, so the trust boundary does
+not move: the server can do only what the same user can already do with `polyctl`.
+
+- **The new risk is prompt injection.** Text the assistant read in a web page, a file or
+  an issue can make it call a tool the user did not ask for. The tools are an allow-list:
+  `get_status`, `list_languages`, `get_keymap`, `list_app_overlays`, `list_keys`,
+  `show_layout`, `set_language`, `set_brightness`, `set_idle_style`, `set_glyph_script`,
+  `set_key`, `set_overlays`, and since version 2a (2026-11-27) `find_icons`,
+  `list_overlay_keys`, `list_user_overlays`, `create_overlay`, `draw_key`, `clear_key`,
+  `delete_overlay` and `preview_overlay`. The worst case is a changed language,
+  brightness, idle style, glyph script, overlay switch, one keycode, or an unwanted
+  picture on keys; each one can be set back. `set_key` returns the previous keycode, and
+  the tray dialog *Overlays made by AI assistants…* removes a picture set without the
+  assistant.
+- **Files it makes the host write (version 2a).** The host, not the MCP server, writes
+  `user_overlays/<app>/set.yaml` and the overlay PNGs in the config directory
+  (`services/user_overlays.py`). The folder name comes from the app name, which must
+  match `[a-z0-9][a-z0-9 ._+-]{0,63}` (or be `"*"`), and anything else is refused before
+  a path is built, so `..`, `/`, `\` and `,` cannot reach the path or the mapping key;
+  a test checks that the files stay inside the folder. A drawing is a checked shape list
+  (`services/key_drawing.py`: at most 200 shapes, 2000 points, 64 characters of Latin
+  text, icons only from the shipped library), never a file name or a URL: the host reads
+  no file the assistant names and downloads nothing. A set has at most 400 bindings and
+  there are at most 100 sets. The files are loaded with `yaml.safe_load` and Pillow,
+  like the shipped overlays.
+- **Methods it can reach:** `tools.TOOL_METHODS` names 17 control methods. `HostLink.call()`
+  refuses every other method before it sends anything, and `settings.get` only for
+  `brightness_set_daylight_dependent`. It never reaches `fw.*`, `fontpack.*`, `doom.*`,
+  `update.install`, `host.shutdown`, `keymap.reset`, `commands.execute`, `settings.set`,
+  `overlay.mapping_send`, `overlay.reset_*`, `window.report`, `agents.*` or `telemetry.*`.
+  `tests/mcp/tools_test.py` freezes the list and checks that each excluded method is
+  refused with nothing sent.
+- **Results are built field by field** (`tools.RESULT_FIELDS`), never by passing a host
+  reply through. No result has a window title, URL, agent session title or file path. The
+  test gives `get_status` a status with a window title, a URL and a pipe port, and checks
+  that none of them is returned.
+- **What a client asks before a call is the client's choice.** Every write tool has
+  `readOnlyHint: false`, and `set_key` has `destructiveHint: true`. A client set to run
+  tools without asking runs them.
+- **Off by default.** The host setting `mcp_enabled` (Settings > Connections > Allow AI
+  assistants (MCP)) is False. The MCP server names its connection with
+  `client.identify {"client": "mcp"}`, and `ControlServer.dispatch()` then refuses every
+  request on it with `ERR_MCP_DISABLED` while the setting is off. The setting is read on
+  every request. On such a connection the host also checks the allow-list itself
+  (`ControlServer._mcp_refusal`), so a changed MCP server cannot reach a method the
+  allow-list does not name. Against a host too old to know `client.identify`, the MCP
+  server fails closed: it refuses to work and asks for a host update (J-Bot on host
+  #1076).
+- ⚠️ **The setting gates an honest client, not code that runs as the user.** A
+  connection that does not identify itself (`polyctl`, the tray app) is not gated, and
+  any process that can read the authkey file can open one. That process could already
+  do everything `polyctl` can, so the setting adds no hole and closes none at that level.
+- **Accepted:** the maintainer asked for the server and for the setting (2026-11-27),
+  with `set_key` in the first version.
 
 ### HOST-3 — usage telemetry is a new outbound surface, and it is on by default
 
