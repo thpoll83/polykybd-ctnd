@@ -1177,10 +1177,11 @@ MIN_PERIODICITY = 0.6    # each trace must repeat after one cue period
 def judge(res: PhaseResult) -> dict:
     """The result record for one phase measurement.
 
-    Report-only for now: an offset above the tolerance is ``xfail`` (the known
-    unsynced flash cue, keys_com/rgb.c), not ``fail``, so the suite stays green
-    until the firmware fix lands. A measurement the camera could not make is a
-    skip with the reason.
+    Report-only: an offset above the tolerance is ``xfail``, not ``fail``. The
+    halves share the split clock (keys_com/rgb.c, qmk_firmware#484) and the slave
+    breathes FLASH_RGB_SLAVE_LAG_MS later (#487); what remains is set by how
+    often the master's LED task runs while chunks stream. A measurement the
+    camera could not make is a skip with the reason.
     """
     info = (f"offset {res.offset_ms:+.1f} ms, correlation {res.correlation:.2f}, "
             f"swing L {res.swing_left:.1f} / R {res.swing_right:.1f}, "
@@ -1202,8 +1203,10 @@ def judge(res: PhaseResult) -> dict:
     if abs(res.offset_ms) <= PHASE_TOLERANCE_MS:
         return {**rec, "status": "pass"}
     return {**rec, "status": "xfail",
-            "reason": "flash cue phase differs between halves (keys_com/rgb.c uses "
-                      "timer_read32(), not sync_timer_read32()) — " + info}
+            "reason": f"the halves breathe {res.offset_ms:+.1f} ms apart, more than "
+                      f"{PHASE_TOLERANCE_MS:.0f} ms; the master's LED step is "
+                      f"{res.step_left_ms:.0f} ms while chunks stream (keys_com/rgb.c, "
+                      f"FLASH_RGB_SLAVE_LAG_MS) — " + info}
 
 
 # ── The last measurement, for the UI ─────────────────────────────────────────
