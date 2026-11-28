@@ -970,13 +970,31 @@ def half_levels(luma: bytes, width: int, height: int, s: CameraSettings, side: s
 
     leds = [v for v in (at(l["x"], l["y"]) for l in board["leds"]) if v is not None]
     led = sum(leds) / len(leds) if leds else 0.0
+    vals = sorted(display_samples(luma, width, height, s, side, board, _at=at))
+    return led, (vals[int(len(vals) * 0.95)] if vals else 0)
+
+
+def display_samples(luma: bytes, width: int, height: int, s: CameraSettings, side: str,
+                    board: dict, _at=None) -> list[int]:
+    """The luma in one half's status_display box, sampled every 1 mm, row by row
+    ([] when the board has none). The same points on every call, so two frames
+    compare sample by sample."""
     box = board.get("status_display")
     if not box:
-        return led, 0
+        return []
+    at = _at
+    if at is None:
+        to_px = board_mapper(s, side, board, width, height)
+
+        def at(x_mm: float, y_mm: float):
+            x, y = to_px(x_mm, y_mm)
+            xi, yi = int(x), int(y)
+            if x >= 0 and y >= 0 and xi < width and yi < height:
+                return luma[yi * width + xi]
+            return None
     x0, y0, x1, y1 = (int(v) for v in box)
-    vals = sorted(v for v in (at(x + 0.5, y + 0.5) for y in range(y0, y1)
-                              for x in range(x0, x1)) if v is not None)
-    return led, (vals[int(len(vals) * 0.95)] if vals else 0)
+    return [v for v in (at(x + 0.5, y + 0.5) for y in range(y0, y1)
+                        for x in range(x0, x1)) if v is not None]
 
 
 def display_state(p95: int) -> str:

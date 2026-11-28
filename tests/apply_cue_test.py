@@ -49,6 +49,15 @@ class EventsTest(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(apply_cue.events([], "left"), (None, None))
 
+    def test_summary_ignores_the_staging_cue_before_the_apply(self):
+        # 0..300 ms: cyan hold (bright), then dark, the apply at 1000 ms, orange at 1100
+        left = [140, 130, 120, 2, 2, 2, 2, 2, 2, 2, 2, 125, 125, 125, 3, 3]
+        right = [80, 70, 60, 1, 1, 1, 1, 1, 1, 1, 1, 68, 68, 68, 68, 1]
+        lines = apply_cue.summary(_samples(left, right), 1000.0)
+        self.assertIn("left: LEDs changed +0.10 s, changed again +0.40 s", lines[0])
+        self.assertIn("right: LEDs changed +0.10 s, changed again +0.50 s", lines[1])
+        self.assertIn("end: right minus left +100 ms", lines[3])
+
 
 class CueStartTest(unittest.TestCase):
     """A failing recording setup releases the status watch and skips the recording."""
