@@ -8,7 +8,9 @@ package and is not visible inside the venv).
 
 The phase check measures the offset between the two halves' copies of the
 breathing flash cue that the firmware shows while it stages an image
-(``keys_com/rgb.c``: ``phase = timer_read32() >> 3``, a 2048 ms triangle). The
+(``keys_com/rgb.c``: ``phase = sync_timer_read32() >> 3``, a 2048 ms triangle, on
+the clock both halves share since qmk_firmware#484; the slave runs
+``FLASH_RGB_SLAVE_LAG_MS`` (50 ms) behind while staging). The
 camera records both halves side by side; the analysis picks the pixels that
 breathe on each side of ``split_x``, builds one brightness trace per half, and
 finds the lag with the highest circular cross-correlation within one period.
@@ -35,7 +37,7 @@ from pathlib import Path
 from . import rig_lock
 from .config import CAMERA
 
-# The flash cue's period: 256 phase steps of 8 ms (timer_read32() >> 3, as uint8).
+# The flash cue's period: 256 phase steps of 8 ms (sync_timer_read32() >> 3, as uint8).
 FLASH_CUE_PERIOD_MS = 2048.0
 
 _lock = threading.Lock()   # one capture at a time inside this process
